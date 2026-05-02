@@ -53,7 +53,7 @@ Claude は `$ARGUMENTS` の先頭トークンをサブコマンド（`pull` / `p
 
 両ファイルは `.gitignore` に含めず、必ずコミットする。
 
-`logs/` はプロジェクトルート基準。現在の CWD（`c:/data/制作物/claude/`）配下の `logs/` を使用する。
+`logs/` はプロジェクトルート基準。現在の CWD（`c:/data/works/FX/`）配下の `logs/` を使用する。
 ATLAS サブプロジェクト内で呼ばれた場合は `ATLAS/logs/` に書く（CWD に追従）。
 
 ---

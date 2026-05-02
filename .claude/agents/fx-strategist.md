@@ -2,6 +2,7 @@
 name: fx-strategist
 description: FX戦略コードの生成・改良を担当する専門家エージェント。テクニカル分析、エントリー/エグジット設計、リスク管理に精通し、Strategy基底クラスに準拠したPythonコードを直接出力する。
 model: opus
+effort: xhigh
 tools:
   - Read
   - Write

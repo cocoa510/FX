@@ -20,17 +20,12 @@
       "Bash(where python:*)",
       "Bash(python -c \"import sys,json; print\\(json.load\\(sys.stdin\\)\\)\")",
       "Bash(where python.exe)",
-      "Bash(\"C:/Users/COCOA/AppData/Local/Microsoft/WindowsApps/python.exe\" --version)",
-      "Read(//c/Users/COCOA/AppData/Local/Programs/**)",
       "Bash(ls /c/Python*)",
       "Read(//usr/**)",
-      "Read(//c/Users/COCOA/AppData/Local/Programs//**)",
       "Bash(winget --version)",
       "Bash(scoop --version)",
       "Bash(choco --version)",
       "Bash(scoop install:*)",
-      "Read(//c/Users/COCOA/.local/bin//**)",
-      "Read(//c/Users/COCOA/.cargo/**)",
       "Bash(command -v uv)",
       "Bash(command -v curl)",
       "Bash(curl -LsSf https://astral.sh/uv/install.sh)",
@@ -69,7 +64,6 @@
       "Bash(cmd.exe:*)",
       "Read(//c/Program Files/**)",
       "Bash($UV_PYTHON:*)",
-      "Bash(\"/c/Users/COCOA/AppData/Roaming/uv/python/cpython-3.11.15-windows-x86_64-none/python.exe\" -m venv .venv)",
       "Bash(ATLAS/.venv/Scripts/python.exe --version)",
       "Bash(.venv/Scripts/pip.exe install:*)",
       "Bash(ls:*)",
@@ -89,10 +83,7 @@
       "Bash(python -c \"import aiofiles; print\\('ok'\\)\")",
       "Bash(pip install:*)",
       "Bash(.venv/Scripts/python -m pytest tests/unit/test_data_quality.py --tb=short -q)",
-      "Bash(python -m pytest C:/data/MegaFile/Claude/fx_trading_system/tests/ --tb=short -q)",
       "Bash(.venv/Scripts/python -m pytest tests/ --tb=short -q --ignore=tests/unit/test_phase3_platform.py)",
-      "Bash(\"C:/data/MegaFile/Claude/fx_trading_system/.venv/Scripts/python.exe\" -m pip install aiofiles)",
-      "Bash(C:/data/MegaFile/Claude/fx_trading_system/.venv/Scripts/python.exe:*)",
       "Bash(.venv/Scripts/python -m pytest tests/unit/test_phase3_risk_execution.py --tb=short -v)",
       "Bash(.venv/Scripts/python -m pytest tests/unit/test_phase3_platform.py --tb=short -v)",
       "Bash(.venv/Scripts/python -m pytest tests/unit/test_data_quality.py --tb=short -v)",
@@ -106,10 +97,7 @@
       "Bash(python -c ':*)",
       "Bash(ATLAS/.venv/Scripts/python.exe:*)",
       "Bash(mkdir -p \"C:/Users/goto/.claude/commands\")",
-      "Bash(cp \"C:/data/制作物/claude/ATLAS/.claude/commands/audit-loop.md\" \"C:/Users/goto/.claude/commands/audit-loop.md\")",
-      "Read(//c/Users/goto/.claude/commands/**)",
-      "Bash(mkdir -p \"C:/data/制作物/claude/fx_trading_system/logs/audit/round_0415_1\")",
-      "Bash(mkdir -p \"C:/data/制作物/claude/ATLAS/logs/audit/round_0415_1\")"
+      "Read(//c/Users/goto/.claude/commands/**)"
     ]
   }
 }

@@ -2,6 +2,7 @@
 name: quant-analyst
 description: バックテスト結果と26評価指標を解釈し、戦略の強み・弱み・改善方針を策定する定量分析専門家エージェント。3層スコアリング結果の妥当性検証、因果チェーンによる弱点分析、具体的な改善指示の出力を担当する。
 model: opus
+effort: xhigh
 tools:
   - Read
   - Grep

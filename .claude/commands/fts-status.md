@@ -13,7 +13,7 @@ FTS (fx_trading_system) の運用状態をターミナルに出力します。We
 
 ### 引数なし (全体サマリー)
 ```bash
-cd /c/data/制作物/claude/fx_trading_system && python -c "
+cd /c/data/works/FX/fx_trading_system && python -c "
 import json, glob, subprocess
 from pathlib import Path
 from datetime import datetime, timezone
@@ -99,7 +99,7 @@ if state_dir.exists():
 
 ### `<strategy_id>` 指定時 (戦略詳細)
 ```bash
-cd /c/data/制作物/claude/fx_trading_system && python -c "
+cd /c/data/works/FX/fx_trading_system && python -c "
 import json, sys
 from pathlib import Path
 
@@ -154,15 +154,15 @@ if gf.exists():
 ```bash
 ps -ef | grep -E "run_unified.py|fx_trading_system" | grep -v grep
 echo "---"
-tail -5 /c/data/制作物/claude/fx_trading_system/logs/unified_runner.log 2>/dev/null
+tail -5 /c/data/works/FX/fx_trading_system/logs/unified_runner.log 2>/dev/null
 echo "---LATEST EVENT---"
-tail -1 /c/data/制作物/claude/fx_trading_system/logs/unified_runner.jsonl 2>/dev/null
+tail -1 /c/data/works/FX/fx_trading_system/logs/unified_runner.jsonl 2>/dev/null
 ```
 
 ### `--strategies` (戦略一覧のみ)
 ```bash
-ls /c/data/制作物/claude/fx_trading_system/trading_platform/strategies/imported/ | sort
-echo "---計 $(ls /c/data/制作物/claude/fx_trading_system/trading_platform/strategies/imported/ | wc -l) 件---"
+ls /c/data/works/FX/fx_trading_system/trading_platform/strategies/imported/ | sort
+echo "---計 $(ls /c/data/works/FX/fx_trading_system/trading_platform/strategies/imported/ | wc -l) 件---"
 ```
 
 ## 出力例

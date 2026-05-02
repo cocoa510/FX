@@ -155,12 +155,18 @@ trend_following / mean_reversion / breakout / momentum / volatility / hybrid
 
 ### フェーズ1: 初期化
 1. 引数を解析し、設定を読み込む
-2. `--resume` の場合は以下の順で冪等復元（Merged-04）:
+2. **エージェント設定読み取り（比較用記録）** — `.claude/agents/fx-strategist.md` と `.claude/agents/quant-analyst.md` のフロントマターから `effort` フィールドを読み取り、`agent_config` として保持する（フィールドなければ `"default"` とする）:
+   ```
+   fx_strategist_effort = frontmatter["effort"] or "default"   # 例: "xhigh"
+   quant_analyst_effort = frontmatter["effort"] or "default"
+   agent_effort_label = f"fx:{fx_strategist_effort}/qa:{quant_analyst_effort}"  # 例: "fx:xhigh/qa:xhigh"
+   ```
+3. `--resume` の場合は以下の順で冪等復元（Merged-04）:
    a. `logs/loop_session.json` を読み、`session_start` / `direction_bias` / `current_type` を**継承**（リセット禁止）
    b. `current_gen_id` と `current_step` を確認し、完了済み artifact（`backtest/result.json`, `evaluation/integrated_report.json`）の存在で部分完了状態を判定
    c. 最後に完了した Step の**次から**再開（例: backtest 完了済 → metrics から開始）
    d. `limit_minutes` の残時間 = `limit_minutes - (now - session_start 分)` を再計算
-3. 新規の場合は `session_id` と世代 ID を採番し `loop_session.json` を作成
+4. 新規の場合は `session_id` と世代 ID を採番し `loop_session.json` を作成（`agent_config` フィールドを含める）
 4. **以降の全 Step 冒頭**で以下を必ず実行（冪等性の基盤）:
    - `loop_session.json` に `current_gen_id` / `current_step` / `step_started_at` を上書き
    - `logs/loop_progress.json` を更新（`status=running`）
@@ -179,6 +185,17 @@ Agent tool で `fx-strategist` エージェントを起動:
 >
 > strategy.py, spec.md, config.json, metadata.json を生成すること。
 > ATLAS/CLAUDE.md と ATLAS/atlas/common/models.py を読んでインターフェースに準拠すること。
+
+fx-strategist が `metadata.json` を生成したら、オーケストレーター（このSkill）が以下を**追記**する:
+```python
+# metadata.json に generation_agent_config を追加
+metadata["generation_agent_config"] = {
+    "fx_strategist_effort": fx_strategist_effort,   # 例: "xhigh"
+    "quant_analyst_effort": quant_analyst_effort,   # 例: "xhigh"
+    "recorded_at": "<ISO8601 UTC>"
+}
+# ファイルに書き戻す
+```
 
 ### フェーズ3: 反復ループ（各世代で実行）
 
@@ -287,9 +304,10 @@ cd ATLAS && .venv/Scripts/python.exe -m atlas.main converge <generation_id>
 
 1. **`logs/loop_metrics.csv` に追記** — ヘッダがなければ作成し、1 行追記:
    ```
-   session_id,generation_id,generation_num,duration_sec,phase_validate_sec,phase_bt_sec,phase_metrics_sec,phase_eval_sec,gate_result,final_score,converge_result,schema_version
+   session_id,generation_id,generation_num,duration_sec,phase_validate_sec,phase_bt_sec,phase_metrics_sec,phase_eval_sec,gate_result,final_score,converge_result,schema_version,agent_effort
    ```
-   各 phase の秒は `step_started_at` の差分から算出
+   - 各 phase の秒は `step_started_at` の差分から算出
+   - `agent_effort` には初期化時に読み取った `agent_effort_label`（例: `"fx:xhigh/qa:xhigh"`）を記録
 2. **git commit + push** — 対象は `ATLAS/strategies/<gen_id>/` と `logs/`:
    ```bash
    cd <repo_root> && git add ATLAS/strategies/<gen_id> logs/loop_session.json logs/loop_metrics.csv logs/loop_progress.json

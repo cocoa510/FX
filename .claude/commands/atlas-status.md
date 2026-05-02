@@ -170,19 +170,26 @@ import sys, json
 from pathlib import Path
 data = json.load(sys.stdin)
 print('=== ATLAS Top スコア戦略 ===')
-print(f'{\"順位\":>3} | {\"戦略ID\":<22} | {\"表示名\":<35} | {\"世代\":>4} | {\"スコア\":>6} | {\"状態\":<12}')
-print('-' * 110)
+print(f'{\"順位\":>3} | {\"戦略ID\":<22} | {\"表示名\":<35} | {\"世代\":>4} | {\"スコア\":>6} | {\"状態\":<12} | {\"Effort\":<18}')
+print('-' * 132)
 for i, s in enumerate(data, 1):
     sid = s.get('strategy_id', '')
-    # display_name lookup from metadata.json
+    # display_name と agent_effort を metadata.json から取得
     dn = ''
+    effort = ''
     mp = Path('strategies') / sid / 'metadata.json'
     if mp.exists():
         try:
-            dn = json.loads(mp.read_text(encoding='utf-8')).get('display_name') or ''
+            meta = json.loads(mp.read_text(encoding='utf-8'))
+            dn = meta.get('display_name') or ''
+            cfg = meta.get('generation_agent_config') or {}
+            fx_e = cfg.get('fx_strategist_effort', '')
+            qa_e = cfg.get('quant_analyst_effort', '')
+            if fx_e or qa_e:
+                effort = f'fx:{fx_e}/qa:{qa_e}' if fx_e != qa_e else fx_e
         except Exception:
             pass
-    print(f'{i:>3} | {sid:<22} | {dn:<35} | {s.get(\"generation\",0):>4} | {s.get(\"final_score\",0):>6.3f} | {s.get(\"status\",\"\"):<12}')
+    print(f'{i:>3} | {sid:<22} | {dn:<35} | {s.get(\"generation\",0):>4} | {s.get(\"final_score\",0):>6.3f} | {s.get(\"status\",\"\"):<12} | {effort:<18}')
 "
 ```
 

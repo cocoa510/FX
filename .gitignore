@@ -6,3 +6,4 @@ __pycache__/
 .claude/projects/
 ATLAS/
 fx_trading_system/
+.claude/scheduled_tasks.lock

@@ -15,7 +15,7 @@ FTS のペーパー/Live トレード結果、PnL、最新シグナル、log tai
 
 ### 引数なし (全体結果サマリー)
 ```bash
-cd /c/data/制作物/claude/fx_trading_system && python -c "
+cd /c/data/works/FX/fx_trading_system && python -c "
 import json
 from pathlib import Path
 
@@ -71,7 +71,7 @@ if unprofitable:
 
 ### `<strategy_id>` 指定時 (戦略別トレード履歴)
 ```bash
-cd /c/data/制作物/claude/fx_trading_system && python -c "
+cd /c/data/works/FX/fx_trading_system && python -c "
 import json
 from pathlib import Path
 import sys
@@ -113,7 +113,7 @@ print(f'  updated_at:       {s.get(\"updated_at\")}')
 
 ### `--forward-test`
 ```bash
-cd /c/data/制作物/claude/fx_trading_system && python -c "
+cd /c/data/works/FX/fx_trading_system && python -c "
 import json
 from pathlib import Path
 
@@ -143,28 +143,28 @@ for r in d.get('results', []):
 
 ### `--audit` (PTRC 判定 tail)
 ```bash
-cd /c/data/制作物/claude/fx_trading_system && \
+cd /c/data/works/FX/fx_trading_system && \
   ls -t logs/audit/round_*/  2>/dev/null | head -1 | xargs -I {} ls -t logs/audit/{}/*.jsonl 2>/dev/null | head -3
 echo "---LATEST AUDIT EVENTS---"
-find /c/data/制作物/claude/fx_trading_system/logs/audit/ -name "*.jsonl" -type f 2>/dev/null | xargs ls -t 2>/dev/null | head -1 | xargs tail -10
+find /c/data/works/FX/fx_trading_system/logs/audit/ -name "*.jsonl" -type f 2>/dev/null | xargs ls -t 2>/dev/null | head -1 | xargs tail -10
 ```
 
 ### `--tail <N>` (Runner ログ tail)
 ```bash
 N="${ARG:-20}"
 echo "=== unified_runner.log tail $N ==="
-tail -${N} /c/data/制作物/claude/fx_trading_system/logs/unified_runner.log 2>/dev/null
+tail -${N} /c/data/works/FX/fx_trading_system/logs/unified_runner.log 2>/dev/null
 echo ""
 echo "=== unified_runner.stderr.log tail ${N} ==="
-tail -${N} /c/data/制作物/claude/fx_trading_system/logs/unified_runner.stderr.log 2>/dev/null
+tail -${N} /c/data/works/FX/fx_trading_system/logs/unified_runner.stderr.log 2>/dev/null
 echo ""
 echo "=== unified_runner.jsonl tail 5 (latest events) ==="
-tail -5 /c/data/制作物/claude/fx_trading_system/logs/unified_runner.jsonl 2>/dev/null
+tail -5 /c/data/works/FX/fx_trading_system/logs/unified_runner.jsonl 2>/dev/null
 ```
 
 ### `--pnl` (PnL 集計のみ)
 ```bash
-cd /c/data/制作物/claude/fx_trading_system && python -c "
+cd /c/data/works/FX/fx_trading_system && python -c "
 import json
 from pathlib import Path
 
