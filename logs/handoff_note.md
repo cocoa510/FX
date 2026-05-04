@@ -1,38 +1,44 @@
-# Handoff Note (親リポ — リダイレクトのみ)
+# Handoff Note
 
-**最終更新**: 2026-05-01T07:29:24Z (JST 2026-05-01 16:29:24+09:00) @ training-goto
-**ブランチ**: master
+**最終更新**: 2026-05-04T00:15:00Z @ training-goto
+**ブランチ**: master (ATLAS repo: master)
+**直前のコミット**: ATLAS: 2d23758 [atlas] ATLAS-2026-0504-066 GATE PASS
 
-## このノートは ATLAS 引継ぎを保持しません
+## 現在の作業（1 行サマリ）
 
-ATLAS は `bc20d49` (2026-02 頃) で親リポ (`claude/`) から独立 git 管理に分離済み
-（リモート: `https://github.com/cocoa510/ATLAS.git`）。
+H1/H4マトリクス探索セッション完了 — 「EMAなし純粋Donchianブレイクアウト + SL2x/TP4x」でJPYペアが8件Gate PASS
 
-**現在進行中の作業（ATLAS / fx_trading_system）の引継ぎ状態は以下の正本を参照すること**:
+## 詳細コンテキスト（3〜5 行）
 
-| 対象 | 引継ぎノート正本 |
-|-----|----------------|
-| ATLAS | `ATLAS/logs/handoff_note.md` + `ATLAS/logs/handoff_state.json` |
-| fx_trading_system (FTS) | `fx_trading_system/logs/handoff_note.md`（存在する場合） |
+本セッションで**重大な発見**: EUR/JPYとUSD/JPYのH1/H4において、EMAトレンドフィルターを完全除去した純粋Donchianブレイクアウト（SL=2xATR, TP=4xATR）が非常に高い性能を示し、8件のGate PASSを達成した。
 
-`/handoff pull` 実行時は、CWD に応じてサブプロジェクト側の note を読みに行く運用とする。
-親リポ側の note は「親リポ独自のメタ作業（CLAUDE.md 改訂・スキル定義・複数システム横断作業等）」が
-発生した時のみ更新する。
+USD/JPY H4ではDonchianルックバックを短くするほどL2 Sharpeが向上（D10:3.33→D8:3.61→D5:3.96→D3:4.08）。EUR/JPY H1ではDonchian20が最良（soft=0.802）。
 
-## 親リポ単独の作業状況（あれば）
+また、非JPYペア（EUR/USD, GBP/USD）向けのpips_per_unitバグを特定（config.parametersの中に明示要）。SHORTおよびBALANCED戦略はvectorbt L1がSHORTをLONGとして評価する制限で困難。
 
-現時点で親リポ単独の未完了作業はなし。直近の親リポコミットは:
+FTSペーパーポートフォリオは13件に拡大（全long_only）。SHORT/BALANCED不足問題は未解決。
 
-- `e192ba3 [docs] 5 Skill (atlas-status/history/compare + fts-status/results) に display_name 併記表示を追加`
-  → 2026-04-30 のスキル整備で完了済。
+## 未コミット変更 / WIP コミット対象
 
-**2026-05-01 セッション**: ATLAS Gate 監査ループ 4 ラウンド完遂 (19 件全解消) + FTS PC 異常終了復旧 + .ps1 BOM 修正。
-親リポへのコミットなし。詳細は ATLAS / FTS の各 handoff_note 参照:
-- `ATLAS/logs/handoff_note.md` (主作業: Gate 監査、6 commit)
-- `fx_trading_system/logs/handoff_note.md` (副作業: 復旧 + BOM 修正、4 commit + hourly snapshot)
+なし（全てATLASとFTSリポジトリにコミット・プッシュ済み）
+
+## 次にやること
+
+1. **EUR/JPY H4データ取得**: `atlas data fetch EUR_JPY --timeframe H4 --years 7` でH4データを作成し、EUR/JPY H4 no-EMA Donchianを試す
+2. **SHORT戦略探索代替手段**: vectorbt L1のSHORT制限を[change:spec]で解決するか提案する
+3. **rescue_candidates救済**: ATLAS/logs/rescue_candidates.jsonの4件のBT期間延長
+4. **EMAなしDonchian最適化続行**: EUR/JPY H1でDonchian25, 30も試す
+
+## 関連文書・コマンド
+
+- 発見パターン記録: `memory/project_no_ema_donchian_discovery.md`
+- Gate PASS最新: ATLAS-2026-0504-058〜066 (8件)
+- 実行コマンド例: `cd ATLAS && .venv/Scripts/python.exe -m atlas.main backtest ATLAS-2026-0504-XXX`
+- 実行中ループ: なし
 
 ## 引継ぎ時の注意
 
-- 親リポ note を最新状態と誤読しないこと。**ATLAS 側 note の `generated_at` と必ず比較**し、新しい方を信用する
-- 親リポ側を更新するのは、複数システム横断の判断ログ（例: ATLAS から FTS へのチャンピオン投入決定等）が
-  発生した場合に限る
+- **pips_per_unit**: 非JPYペアはconfig.json parametersブロックに`"pips_per_unit": 10000`必須
+- **EMAフィルター**: USD/JPY H1はEMA50>EMA100が有効、EUR/JPY H1とUSD/JPY H4はEMAなしが有効
+- **SHORT不足**: 全13件long_only。vectorbt L1 SHORT制限で短策が困難
+- **USD/JPY H4クラスター**: 035+061+062+064+066の5件でクラスターが大きい

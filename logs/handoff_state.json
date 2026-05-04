@@ -1,18 +1,35 @@
 {
-  "generated_at": "2026-04-25T00:30:00Z",
-  "generated_at_local": "2026-04-25T09:30:00+09:00",
+  "generated_at": "2026-05-04T00:15:00Z",
   "hostname": "training-goto",
   "branch": "master",
-  "head_sha_at_redirect": "69df9e9",
-  "redirect_only": true,
-  "canonical_handoff_locations": {
-    "ATLAS": "ATLAS/logs/handoff_note.md",
-    "fx_trading_system": "fx_trading_system/logs/handoff_note.md"
-  },
-  "note": "親リポ (claude/) の handoff は redirect のみ。サブプロジェクトの作業状態は各サブリポの handoff_note.md / handoff_state.json を参照すること。/handoff pull 実行時は CWD に応じて適切な note を読む運用。",
-  "parent_repo_only_pending_actions": [],
-  "warnings": [
-    "ATLAS は bc20d49 で独立 git 管理に分離済み（remote: https://github.com/cocoa510/ATLAS.git）",
-    "親リポ側 note を最新状態と誤読しないこと。ATLAS 側 note の generated_at と必ず比較し、新しい方を信用する"
+  "head_sha_atlas": "2d23758b68f36d10a126a783d3792cd7b013b690",
+  "head_sha_fts": "31dd5e9",
+  "uncommitted_files": [],
+  "latest_commits": [
+    {"sha": "2d23758", "subject": "[atlas] ATLAS-2026-0504-066 - GATE PASS (Sharpe=4.08, USD/JPY H4 Donchian3)", "date": "2026-05-04"},
+    {"sha": "67da445", "subject": "[atlas] ATLAS-2026-0504-065 - GATE PASS (Sharpe=2.18, EUR/JPY H1 Donchian5)", "date": "2026-05-04"},
+    {"sha": "3d9cbf7", "subject": "[atlas] ATLAS-2026-0504-064 - GATE PASS (Sharpe=3.96, USD/JPY H4 Donchian5)", "date": "2026-05-04"},
+    {"sha": "d6a1f90", "subject": "[atlas] ATLAS-2026-0504-063 - GATE PASS (Sharpe=2.05, EUR/JPY H1 Donchian15)", "date": "2026-05-04"},
+    {"sha": "434a0cb", "subject": "[atlas] ATLAS-2026-0504-062 - GATE PASS (Sharpe=3.61, USD/JPY H4 Donchian8)", "date": "2026-05-04"}
+  ],
+  "loop_session_active": false,
+  "gate_pass_this_session": [
+    "ATLAS-2026-0504-058 (EUR/JPY H1 D10, soft=0.749, Sharpe=2.295)",
+    "ATLAS-2026-0504-060 (EUR/JPY H1 D20, soft=0.802, Sharpe=2.087)",
+    "ATLAS-2026-0504-061 (USD/JPY H4 D10, soft=0.864, Sharpe=3.334)",
+    "ATLAS-2026-0504-062 (USD/JPY H4 D8, soft=0.863, Sharpe=3.611)",
+    "ATLAS-2026-0504-063 (EUR/JPY H1 D15, soft=0.744, Sharpe=2.045)",
+    "ATLAS-2026-0504-064 (USD/JPY H4 D5, soft=0.878, Sharpe=3.960)",
+    "ATLAS-2026-0504-065 (EUR/JPY H1 D5, soft=0.705, Sharpe=2.180)",
+    "ATLAS-2026-0504-066 (USD/JPY H4 D3, soft=0.879, Sharpe=4.080)"
+  ],
+  "key_discovery": "EMAなし純粋Donchian + SL2x/TP4x がJPYペアで有効。USD/JPY H4はD短いほど高Sharpe。EUR/JPY H1はD長いほど高品質。",
+  "bugs_fixed": ["pips_per_unit: 非JPYペアはconfig.parametersにpips_per_unit: 10000を明示必須"],
+  "unresolved": ["SHORT/BALANCEDポートフォリオ不足（全13件long_only）", "vectorbt L1 SHORT制限"],
+  "next_actions": [
+    "EUR/JPY H4データ取得: atlas data fetch EUR_JPY --timeframe H4 --years 7",
+    "SHORT戦略代替手段: [change:spec]でvectorbt SHORT対応を検討",
+    "rescue_candidates救済: ATLAS/logs/rescue_candidates.jsonの4件",
+    "EUR/JPY H1 Donchian25, 30で更なる最適化"
   ]
 }
