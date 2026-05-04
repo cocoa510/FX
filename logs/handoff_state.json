@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-05-04T08:00:00Z",
+  "generated_at": "2026-05-04T08:10:00Z",
   "hostname": "training-goto",
   "branch": "master",
   "uncommitted_files": [],
@@ -19,8 +19,9 @@
   },
   "session_summary_2026-05-04_short_loop": {
     "user_directive": "許可確認なしで戦略開発ループを回し続ける",
-    "strategies_generated": 12,
+    "strategies_generated": 15,
     "strategies_gate_passed": 0,
+    "duration_hours_approx": 3.5,
     "generation_ids": [
       "ATLAS-2026-0504-073 (USDJPY-MeanRev-Short-H1-001)",
       "ATLAS-2026-0504-074 (EURUSD-Breakout-Short-H4-001)",
@@ -33,14 +34,23 @@
       "ATLAS-2026-0504-081 (GBPUSD-MeanRev-Short-M15-002)",
       "ATLAS-2026-0504-082 (GBPUSD-MeanRev-Short-M15-003)",
       "ATLAS-2026-0504-083 (GBPUSD-MeanRev-Short-H4-001)",
-      "ATLAS-2026-0504-084 (GBPUSD-MeanRev-Short-H1-002)"
+      "ATLAS-2026-0504-084 (GBPUSD-MeanRev-Short-H1-002)",
+      "ATLAS-2026-0504-085 (EURUSD-Breakout-Short-H1-004)",
+      "ATLAS-2026-0504-086 (GBPJPY-MeanRev-Short-M15-001)",
+      "ATLAS-2026-0504-087 (GBPUSD-MeanRev-Bal-M15-002)"
     ],
     "data_fetched_new": [
-      "EUR_USD_H4 + secondary",
-      "GBP_JPY_H1/H4 + secondary",
+      "EUR_USD_H4 + secondary (4656 + 6229 bars)",
+      "GBP_JPY_H1 + secondary",
+      "GBP_JPY_H4 + secondary",
+      "GBP_JPY_M15 + secondary (74490 bars)",
       "GBP_USD_H4 + secondary"
     ],
-    "existing_short_strategies_re_evaluated_5_4_0": 8,
+    "existing_short_strategies_re_evaluated_5_4_0": [
+      "ATLAS-2026-0503-004", "ATLAS-2026-0503-032", "ATLAS-2026-0503-071",
+      "ATLAS-2026-0504-018", "ATLAS-2026-0504-027", "ATLAS-2026-0504-045",
+      "ATLAS-2026-0424-001 (Tier 1 ALL PASS 発見!)"
+    ],
     "important_discovery": {
       "strategy_id": "ATLAS-2026-0424-001",
       "display_name": "GBPUSD-MeanRev-Short-M15-001",
@@ -61,24 +71,32 @@
       "tier2_threshold": 0.70,
       "tier2_passed": false,
       "overall_passed": false,
-      "deployment_recommendation": "FTS Paper 投入候補。Tier 1 ALL PASS は SHORT 戦略として極めて稀。ユーザー判断要請。"
-    }
+      "deployment_recommendation": "FTS Paper 投入候補。Tier 1 ALL PASS は SHORT 戦略として極めて稀。Tier 2 0.35 は既存 deploy (0410-008 soft=0.49, 0426-013 soft=0.13) と同水準。ユーザー判断要請。"
+    },
+    "improvement_attempts_on_0424_001": [
+      {"id": "081", "approach": "厳格化 (bb_std 2.0, rsi 73, ADX<25)", "result": "WR 62.7→34.6%, PF=0.84 悪化"},
+      {"id": "082", "approach": "RR=1.5 + early RSI exit", "result": "Sharpe 0.39→0.19 悪化"},
+      {"id": "083", "approach": "H4 移植", "result": "trades=28 不足"},
+      {"id": "084", "approach": "H1 移植", "result": "L2 進行も Tier1 #1, #4 FAIL"},
+      {"id": "087", "approach": "balanced 化 (LONG/SHORT 対称)", "result": "LONG 取引が悪化、PF=0.93"}
+    ]
   },
   "structural_findings": [
     "2019-2026 JPY weakness era で SHORT 戦略は B&H 超過 (Tier 1 #4) に構造的逆風",
     "vectorbt 5.4.0 SHORT bug fix で pre-5.4.0 SHORT 評価が一律下方修正",
     "Tier 2 soft_score >= 0.70 は SHORT 戦略には PF/Sharpe 上限的に困難 (PF<1.5/Sharpe<1.5 で自動 soft<0.4)",
-    "0424-001 のパラメータは sweet spot、AND 厳格化 (081) も execution 最適化 (082) も逆効果"
+    "0424-001 のパラメータは sweet spot、AND 厳格化・execution 最適化・balanced 化すべて逆効果",
+    "SHORT-only Tier 1 PASS 戦略を balanced 化すると LONG 側で edge を破壊する (087)"
   ],
   "loop_session_active": false,
   "next_actions": [
-    "ATLAS-2026-0424-001 FTS Paper 投入判断 (Tier 1 ALL PASS、ユーザー判断要)",
-    "GBP/JPY M15 MR SHORT (未試行 combo)",
-    "EUR/USD H1 Donchian SHORT (Donchian 系未試行)",
-    "Multi-timeframe trend filter SHORT (H4 trend 下抜けで限定)",
-    "Session-bound SHORT (NY only など)",
+    "[要判断] ATLAS-2026-0424-001 FTS Paper 投入 (Tier 1 ALL PASS、overall=false)",
+    "WFA Efficiency / Strategy Drift null 原因調査 (Tier 2 soft の主要障害)",
+    "Multi-timeframe trend filter SHORT (H4 trend 下抜けで限定、結合 edge)",
+    "セッション限定 SHORT (NY only など構造的 edge)",
     "rescue_candidates 0430-005 アンサンブル化",
-    "WFA Efficiency / Strategy Drift null 原因調査"
+    "Per-Symbol/Direction Net Exposure Cap (P3)",
+    "Promotion Gate 形式化"
   ],
   "open_critical_issues": [
     "SHORT 戦略 0 deploy (FTS 34件全 long_only) - 0424-001 投入で部分解消可能",
