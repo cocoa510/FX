@@ -1,33 +1,61 @@
 {
-  "generated_at": "2026-05-06T00:10:00Z",
+  "generated_at": "2026-05-06T04:00:00Z",
   "hostname": "TRAINING-GOTO",
   "branch": "master",
   "head_sha": "06d65ab",
   "uncommitted_files": [],
-  "atlas_head_sha": "c1f9c2f28266343f5ec68b3465bb0184b4e071d8",
+  "atlas_head_sha": "d8a83c8",
   "latest_commits": [
-    {"sha": "c1f9c2f", "subject": "[atlas] セッション0505後半: 349/352 Gate PASS (H1 volatility) + M15/CAD/AUD探索完了", "date": "2026-05-06"},
-    {"sha": "462b740", "subject": "[atlas] 346/348 Gate PASS (EUR/JPY soft=0.8835, AUD/JPY soft=0.8468)", "date": "2026-05-06"},
-    {"sha": "4dce2cb", "subject": "[atlas] 345 GBP/JPY H4 volatility Gate PASS (soft=0.7789) + bollinger feature bugfix", "date": "2026-05-06"}
+    {
+      "sha": "d8a83c8",
+      "subject": "[atlas] 376-378: CAD/JPY H4 TF初PASS + NZD/JPY TF確認",
+      "date": "2026-05-06"
+    },
+    {
+      "sha": "55d75f8",
+      "subject": "[atlas] 372-375: H1 TF + GBP/JPY H4 TF slope 2 PASS",
+      "date": "2026-05-06"
+    },
+    {
+      "sha": "93a1cec",
+      "subject": "[atlas] 370-371: AUD/JPY H4 TrendFollow SMA PASS",
+      "date": "2026-05-06"
+    }
   ],
   "fts_runner": {
     "status": "running",
-    "imported_strategies": 70,
+    "imported_strategies": 80,
     "realized_pnl_jpy": 400.88
   },
   "gate_pass_summary": {
-    "total": 33,
-    "today_new": 14,
+    "total": 202,
+    "today_new": 13,
     "best": {
-      "id": "ATLAS-2026-0504-098",
-      "soft_score": 0.9504,
-      "display": "USDJPY-Breakout-Long-M15"
+      "id": "ATLAS-2026-0505-368",
+      "soft_score": 0.9214,
+      "display": "USDJPY-TrendFollow-Long-H4-004"
     },
     "today_highlights": [
-      {"id": "ATLAS-2026-0505-324", "soft": 0.8605, "cell": "GBP/JPY H4 hybrid"},
-      {"id": "ATLAS-2026-0505-346", "soft": 0.8835, "cell": "EUR/JPY H4 volatility"},
-      {"id": "ATLAS-2026-0505-349", "soft": 0.8335, "cell": "EUR/JPY H1 volatility"},
-      {"id": "ATLAS-2026-0505-329", "soft": 0.8307, "cell": "EUR/JPY H4 momentum"}
+      {
+        "id": "ATLAS-2026-0505-368",
+        "soft": 0.9214,
+        "cell": "USD/JPY H4 TF"
+      },
+      {
+        "id": "ATLAS-2026-0505-374",
+        "soft": 0.9311,
+        "cell": "GBP/JPY H4 TF slope"
+      },
+      {
+        "id": "ATLAS-2026-0505-370",
+        "soft": 0.8801,
+        "cell": "AUD/JPY H4 TF初"
+      },
+      {
+        "id": "ATLAS-2026-0505-376",
+        "soft": 0.7988,
+        "cell": "CAD/JPY H4 TF初"
+      }
     ]
   },
   "known_failures": {
@@ -41,13 +69,12 @@
   },
   "loop_session_active": true,
   "loop_session_id": "ATLAS-LOOP-2026-0505-001",
-  "latest_strategy_id": "ATLAS-2026-0505-357",
-  "next_strategy_id": "ATLAS-2026-0505-358",
+  "latest_strategy_id": "ATLAS-2026-0505-378",
+  "next_strategy_id": "ATLAS-2026-0505-379",
   "next_actions": [
-    "EUR/JPY H4 trend_following追加探索（現在1 PASS、soft=0.8769。追加改善余地あり）",
-    "FTS同一セル3件上限の適用判断（現在5セルが3件超）",
-    "OOS悪い戦略の精査: 332（OOS=-2.23）、342（OOS=-1.63）",
-    "GBP/JPY H4 volatility改善（345, soft=0.7789 → 0.80+を目指す）",
-    "新セル開拓: GBP/JPY H4 trend_followingの更なる最適化"
+    "GBP/JPY H4 volatility 345(soft=0.7789) 0.80+へ改善",
+    "USD/JPY M15 trend_following 未探索",
+    "EUR/JPY H4 TF 0.87→0.90へのさらなる最適化",
+    "FTS同一セル3件超の整理判断"
   ]
 }
