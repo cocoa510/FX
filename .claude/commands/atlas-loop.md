@@ -485,3 +485,12 @@ final_score: 0.76
 - `--dry-run` で実行計画と推定ステップ数を事前確認可能
 - ループ中断後は `/atlas-status` で現在状態を確認可能
 - 各エージェントは順次実行される（並列実行はAgent Teams実験機能で対応予定）
+
+## 関連ドキュメント
+
+- **FTS forward test 候補選定メソドロジー**: `ATLAS/docs/fts_selection_methodology.md`
+  - ループ開始前・終了後の方向性判断に必ず参照すること
+  - 過去 PASS 戦略集合の偏り（短方向 0 件、特定 instrument/timeframe/method の脱落）から、次セッションで生成すべき戦略タイプ・通貨ペア・方向を決定する根拠資料
+  - 2026-05-06 時点の実測: 189 PASS の真の多様性は 7 unique buckets（inst×tf×method×direction）。`class_name` / `tag_cluster_id` 単位 dedup は機能しないため、本メソドロジーの 5 段階フィルタが正規手順
+- **Backtest Gate 階層化**: `ATLAS/CLAUDE.md` § Backtest Gate基準
+- **戦略タグ仕様**: `ATLAS/docs/Redesign_v2_Plan.md` §3.6 (StrategyTags 運用ルール)
