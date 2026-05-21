@@ -147,9 +147,9 @@ trend_following / mean_reversion / breakout / momentum / volatility / hybrid
 |-------------|--------|------|
 | fx-strategist | opus | 戦略コード生成・改良 |
 | quant-analyst | opus | 定量評価・弱点分析 |
-| devil-advocate | sonnet | 敵対的レビュー・バイアス検出 |
+| devil-advocate | sonnet | 敵対的レビュー・バイアス検出・**ループ終了前の構造的限界判定 CHECKER (フェーズ 3.9)** |
 | code-safety-reviewer | sonnet | コード安全性検証 |
-| オーケストレーター（このSkill） | - | 全体制御・統合判定 |
+| オーケストレーター（このSkill） | - | 全体制御・統合判定（**「構造的不可」判断は単独で確定できない、CHECKER 経由必須**） |
 
 ## 実行フロー
 
@@ -292,10 +292,10 @@ cd ATLAS && .venv/Scripts/python.exe -m atlas.main converge <generation_id>
 | 判定 | アクション |
 |------|----------|
 | `excellent` | ループ停止、最終レポート。`gate_pass_generations` に追加 |
-| `converged_stagnation` | タイプ切替発動（`--no-rotate` 時は停止） |
-| `converged_oscillation` | タイプ切替発動（`--no-rotate` 時は停止） |
-| `abandoned` | タイプ切替発動（`--no-rotate` 時は停止） |
-| `max_generations` | ループ停止。世代上限到達を報告 |
+| `converged_stagnation` | タイプ切替発動（`--no-rotate` 時は停止） → **`--no-rotate` 停止時は フェーズ 3.9 CHECKER 起動必須** |
+| `converged_oscillation` | タイプ切替発動（`--no-rotate` 時は停止） → **`--no-rotate` 停止時は フェーズ 3.9 CHECKER 起動必須** |
+| `abandoned` | タイプ切替発動（`--no-rotate` 時は停止） → **`--no-rotate` 停止時は フェーズ 3.9 CHECKER 起動必須** |
+| `max_generations` | ループ停止。世代上限到達を報告 → **未 PASS の場合 フェーズ 3.9 CHECKER 起動必須** |
 | `continue` | Step 3.5 へ |
 
 **Step 3.4c: 世代完了時の必須アクション（Merged-01）**
@@ -388,6 +388,113 @@ Agent tool で `devil-advocate` エージェントを起動し、改良版を検
 - `abandon_recommendation=true` → この改良を中止、新規生成へ
 
 **Step 3.1 に戻る（新世代で反復）**
+
+### フェーズ 3.9: 構造的限界判定の最終検証（CHECKER protocol、必須）
+
+> **背景** (2026-05-21 追加): 過去セッションでオーケストレーター（このSkill）が「この未達セルは構造的に PASS 不可能」と判断してループを停止したが、後日再確認すると「実は探索不足だった」セルが多数存在した（例: EUR/USD H1 LONG は 9 attempts で「構造的」判定 → 後に EMA200 slope filter 単独追加で PASS）。オーケストレーターの自己判断による"構造的不可"宣言は楽観バイアス／撤退バイアスの温床になるため、**第三者チェック役による独立検証を必須化**する。
+
+**発火条件**（以下のいずれか 1 つでも該当 → CHECKER 起動必須）:
+
+- ループ全体を終了する直前で、停止理由に「構造的限界」「達成不能」「全変数試行済」「これ以上の改良不可」等の **PASS 不可能性を主張するワーディング**が含まれる
+- `current_type` が連続 N 回（N=3）切替後も全て abandon され、`available_types` 全タイプが `type_history` に記録された場合
+- セッション内で attempts >= 3 の未達セルに対し orchestrator が「これ以上試行しない」と判断する場合
+- 直近 5 世代連続で L1 FAIL ／ Soft Score < 0.30 で `--no-rotate` 指定下でループ停止する場合
+
+**起動するエージェント**: `devil-advocate`（sonnet）— 構造的限界の **正当性検証** を専門に行う
+
+**Agent tool への入力（必須セクション、全て JSON または markdown で構造化して渡す）**:
+
+```
+あなたはチェック役 (CHECKER) として、オーケストレーターの「構造的限界による開発断念」判断を独立検証してください。
+甘い判断は禁止です。orchestrator が「構造的不可」と主張するセルに対し、以下を厳密に審査してください。
+
+## オーケストレーターの主張
+<orchestrator が宣言した停止理由（例: "AUD/USD H4 LONG は H4 strategy の WFA 構造的問題で PASS 不可"）>
+
+## 当該セル/タイプの試行履歴（全件、loop_session.json + 各 evaluation/integrated_report.json から構築）
+<JSON配列>
+[
+  {
+    "generation_id": "ATLAS-2026-0520-028",
+    "strategy_type": "mean_reversion",
+    "key_params": {"bb_std": 2.5, "rsi_oversold": 32, "ema_slope": 0.998},
+    "l1_pf": 1.67, "l1_sharpe": 0.87, "l2_pf": 1.20, "l2_sharpe": 0.02,
+    "soft_score": 0.5165,
+    "failed_conditions": ["Soft Score (< 0.70)"],
+    "secondary_pf": 0.87,
+    "abandon_reason_at_time": "WFA Efficiency None / Strategy Drift None"
+  },
+  ...
+]
+
+## 同セル/類似セルでの既 PASS 戦略（あれば）
+<JSON配列、ヒント源として>
+
+## 当該セルに対して未だ試していない要素（orchestrator の自己申告）
+<JSON配列>
+[
+  "strategy_type 違い (現状 mean_reversion のみ、breakout / momentum / hybrid 未試行)",
+  "BT 期間違い (現状 default のみ、別期間 BT 未確認)",
+  "session 時間フィルタ (London/NY 限定など)",
+  "indicator 組合せ (Donchian/SMA cross 未試行)"
+]
+
+## 審査タスク
+
+以下を 5 項目について厳密に判定し、最終判定 (APPROVE / VETO) を返してください:
+
+1. **試行数の十分性**: 当該セルの attempts は >= 10 か？ それ未満なら原則 VETO。
+2. **strategy_type の網羅性**: trend_following / mean_reversion / breakout / momentum / volatility / hybrid の 6 タイプを試したか？ 試していないタイプがあれば VETO。
+3. **near-pass の存在**: Soft Score >= 0.55 の戦略があれば、それは「構造的不可」ではなく「最後の壁が高い」だけ。VETO 必須。
+4. **既知の修正パターン未試行**: EMA slope filter / ADX filter / session limit / RSI tightening 等の「他セルで奏功したパターン」を当該セルで試したか？ 未試行があれば VETO。
+5. **F2 統計プロファイル外れ値**: 親統計から ±30% 内に収まる variant を試したか？ 偏ったパラメータ空間しか試していなければ VETO。
+
+## 返却フォーマット (JSON)
+
+{
+  "verdict": "APPROVE" | "VETO",
+  "verdict_confidence": 0.0-1.0,
+  "rationale": "<判定根拠を 3-5 文で>",
+  "untried_approaches": [
+    {
+      "approach": "<具体的な未試行アプローチ>",
+      "rationale": "<なぜ試すべきか>",
+      "estimated_success_probability": 0.0-1.0,
+      "suggested_parameters": {"...": "..."}
+    },
+    ...
+  ],
+  "audit_findings": {
+    "attempts_count": <int>,
+    "strategy_types_tried": ["mean_reversion", ...],
+    "strategy_types_untried": ["breakout", ...],
+    "near_pass_strategies": ["ATLAS-2026-0520-028 (Soft 0.5165)"],
+    "matched_patterns_not_applied": ["EMA200 slope filter (0520-041 で実証済)"]
+  }
+}
+```
+
+**判定アクション**:
+
+| verdict | Orchestrator 動作 |
+|---------|------------------|
+| `APPROVE` | ループ停止確定、フェーズ4 へ。`logs/loop_session.json::structural_limit_verified` に CHECKER 出力全文を記録 |
+| `VETO` | **ループ停止を撤回**し、`untried_approaches` の最上位 (estimated_success_probability 最高) 1 件を選択して新世代生成。`logs/loop_session.json::checker_veto_history` に追記。フェーズ2（初期生成）に戻る |
+
+**VETO 連続発動の上限**: 同一セルに対する CHECKER VETO は最大 3 回まで。3 回 VETO 後は orchestrator の判断を採用し APPROVE 扱いとする（無限ループ防止）。`logs/loop_alerts.log` に `checker_veto_exhausted` 記録。
+
+**チェック役の独立性確保**:
+
+- CHECKER は **必ず別 Agent 起動** で実施（同一コンテキスト内での自己レビューは禁止、楽観バイアス回避のため）
+- CHECKER 入力には「当該セルの全 attempts JSON」「Soft Score 推移」「未試行リスト」を **必ず構造化して** 渡す
+- CHECKER の `untried_approaches` は orchestrator が裏付けなしに却下してはならない。却下する場合は `rejected_reason` を `logs/loop_session.json::checker_veto_history` に明記
+
+**過去事例ベンチマーク**（このプロトコル発効前の誤判断、CHECKER 必要性の根拠）:
+
+- 2026-05-20 セッション: EUR/USD H1 LONG を "構造的限界" 判定 → 翌日に EMA200 slope filter 単独追加で PASS (0520-041 Soft 0.7200)
+- 同セッション: AUD/USD H4 SHORT cluster cap を "exit-side 変更必須" と誤判断 → 後に entry-side 3 パラのみで PASS (0520-035)
+
+これらは CHECKER による「untried_approaches」提示があれば即時回避できた損失セッションである。
 
 ### フェーズ4: 最終レポート
 
