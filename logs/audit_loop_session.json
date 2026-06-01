@@ -39,7 +39,28 @@
   "max_fixes_per_round": 5,
   "mode": "dry-run / investigate-only",
   "current_round": 1,
-  "verdict": "Phase 2.5 後: CRITICAL 0 + HIGH 9 残 (5 件本セッション修正済)。残課題は次ラウンドへ繰越",
+  "verdict": "Round 2 完了: CRITICAL 0 + HIGH 0 残 (全 14 件本セッション修正済)",
+  "round_2": {
+    "date": "2026-06-01",
+    "trigger": "ユーザー指示「残 HIGH 9 件 も修正してください」",
+    "fixes_applied": {
+      "RE-501": "PostTradeRiskControl UnifiedRunner 配線 (commit 9188fb6)",
+      "RE-508": "KS 再発動ループ防止 + REV-1 保護 (commit 9188fb6)",
+      "DE-502": "SharedDataProvider.poll_latest backlog 全件配信 (commit 9188fb6)",
+      "DE-503": "main.py OANDAStreamReceiver backfill 配線 (commit 9188fb6)",
+      "DE-504": "main.py CandleFetcher state_store 注入 (commit 9188fb6)",
+      "DE-506": "FxDataQualityForcedPublishHigh アラート追加 (commit 9188fb6)",
+      "DM-501": "StrategySlot._metrics 配線 (commit 9188fb6)",
+      "QA-601": "backfill cluster cap 再評価スクリプト + 元 backfill 防御 (commit c1922dd6)",
+      "QA-602": "oos_is_pf_ratio フォールバック撤去 + 6.3.0 backfill 全 1453 戦略 (commit c1922dd6)"
+    },
+    "regression_test_results": {
+      "atlas_golden": "181/181 PASS",
+      "fts_integrated": "2526 passed / 0 failed / 10 xfailed"
+    },
+    "schema_change": "METRICS_SCHEMA_VERSION 6.2.0 → 6.3.0 (QA-602 [change:spec])",
+    "qa_602_impact": "fallback 経路を踏む戦略 = 0 件 (構造的影響ゼロ、新規戦略の将来再発防止が目的)"
+  },
   "rounds": [
     {
       "round": 1,
