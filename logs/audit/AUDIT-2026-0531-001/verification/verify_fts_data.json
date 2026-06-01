@@ -1,0 +1,253 @@
+{
+  "schema_version": "1.0",
+  "audit_id": "AUDIT-2026-0531-001",
+  "verifier": "data-engineer-verifier (cluster C verifier)",
+  "scope": "FTS data layer (data-engineer + qa-tester FTS-side + devops-monitor) + post-fix verification of commit 1945d8b",
+  "verified_at": "2026-06-01",
+  "mode": "evidence-based reproduction",
+  "target_commits": {
+    "fts_head_at_audit": "fca45f23",
+    "fts_head_now": "1945d8b (DE-501/PA-501/PA-502 fix applied in current session)"
+  },
+
+  "test_execution_results": {
+    "test_de501_strategy_id_label_semantics": {
+      "command": ".venv/Scripts/python.exe -m pytest tests/integration/test_de501_strategy_id_label_semantics.py -v",
+      "result": "11 passed in 0.10s",
+      "verdict": "DE-501 fix verified via 11 integration tests, all PASS",
+      "notes": "Test classes: TestObserveStalenessStrategyIdLabel (3), TestBufferAtCapStrategyIdLabel (2), TestPrometheusGaugeLabelIndependence (2), TestProductionCallSitesInjectStrategyId (3 — runner/main/forward_test), TestAlertingRulesAdvisoryUpdated (1)"
+    },
+    "full_regression_run": {
+      "command": ".venv/Scripts/python.exe -m pytest tests/parity tests/unit tests/integration -q",
+      "result": "2061 passed, 10 xfailed, 1 warning in 636.91s",
+      "verdict": "regression intact at commit 1945d8b"
+    },
+    "collected_test_counts": {
+      "parity": 65,
+      "unit": 1254,
+      "integration": 752,
+      "total_in_three_dirs": 2071
+    }
+  },
+
+  "post_fix_verification_of_de501": {
+    "live_store_strategy_id_injection": {
+      "claim_in_summary": "LiveFeatureStore に strategy_id 引数を追加し、UnifiedRunner._setup_slot / main.py / forward_test.py の 3 経路で loaded.strategy_id を注入",
+      "verification": {
+        "live_store.py:138": "strategy_id: str | None = None, — parameter added",
+        "live_store.py:174-178": "self._strategy_id: str = strategy_id if strategy_id else self.primary_tf (fallback to primary_tf)",
+        "live_store.py:464-467": "observe_feature_staleness called with self._strategy_id as first arg (not self.primary_tf)",
+        "live_store.py:474": "primary_tf=self._strategy_id correctly disambiguated",
+        "live_store.py:523-529": "set_feature_store_buffer_at_cap called with strategy_id=self._strategy_id kwarg",
+        "runner.py:765-768": "feature_store = LiveFeatureStore(buffer_size=..., metrics=..., strategy_id=loaded.strategy_id) — confirmed",
+        "main.py:702-704": "feature_store = LiveFeatureStore(...strategy_id=loaded.strategy_id) — confirmed",
+        "main.py:729 + 735": "additional strategy_id=loaded.strategy_id occurrences confirmed",
+        "forward_test.py:158-175": "two strategy_id=loaded.strategy_id call sites confirmed"
+      },
+      "verdict": "FULLY CONFIRMED — all three production call paths inject strategy_id"
+    },
+    "metrics_buffer_at_cap_label_extension": {
+      "claim_in_summary": "set_feature_store_buffer_at_cap gauge のラベル次元を [primary_tf] → [strategy_id, primary_tf] に拡張",
+      "verification": {
+        "metrics.py:514-547": "set_feature_store_buffer_at_cap signature now has *, strategy_id: str | None = None kwarg; both in-process key (f'feature_store_buffer_at_cap_{sid}_{primary_tf}') and prometheus gauge .labels(strategy_id=sid, primary_tf=primary_tf) are 2-axis"
+      },
+      "verdict": "CONFIRMED label dimension extension applied"
+    },
+    "alerting_rules_advisory_update": {
+      "claim_in_summary": "alerting_rules.yml の DE-503 ADVISORY を「DE-501 修正済」に更新",
+      "verification": {
+        "alerting_rules.yml:193-198": "「[ラベル仕様 / DE-501 修正済 (AUDIT-2026-0531-001)] strategy_id ラベルには実 strategy_id (例: \"ATLAS-2026-0508-069\") が入ります」が記載済"
+      },
+      "verdict": "CONFIRMED advisory updated to reflect fix"
+    }
+  },
+
+  "errors_found_in_summary": [
+    {
+      "id": "ERR-VERIF-C-001",
+      "severity": "minor",
+      "category": "metric_count_mismatch_in_commit_message",
+      "claim": "commit 1945d8b の message 末尾: 'DE-501 適用後: parity 65 + unit 70 + integration 582 = 756 passed'",
+      "actual": "collected: parity=65 (一致), unit=1254 (≠70), integration=752 (≠582)。実行結果は 2061 passed, 10 xfailed (parity+unit+integration 全体)",
+      "interpretation": "commit message の '70' / '582' は変更スコープ内のサブセット (touched scope) を指すと推測されるが、commit message 上は『parity 65 + unit 70 + integration 582 = 756 passed』と明示しているため誤読されやすい。実態は parity 65 / unit 1254 / integration 752 / 合計 2061 passed。",
+      "impact": "実害なし (実行結果はすべて緑)。summary 該当文 (P1 推奨次手 行直前の commit 引用) は記述ミス。",
+      "recommendation": "次セッションで commit message を amend するか、verify_summary に 'unit=1254 / integration=752 が正' と注記。"
+    },
+    {
+      "id": "ERR-VERIF-C-002",
+      "severity": "informational",
+      "category": "stale_line_number_in_finding",
+      "claim": "DE-503 finding の location: 'trading_platform/main.py:977-987' / DE-504 location: 'trading_platform/main.py:805-814'",
+      "actual": "現 HEAD (1945d8b) では OANDAStreamReceiver 構築は main.py:1006-1016、CandleFetcher 構築は main.py:834-849。fca45f23 時点では一致していた可能性が高い (commit 1945d8b で main.py が +45 行膨らんだ)。",
+      "interpretation": "DE-501 修正で main.py 各箇所に strategy_id 注入と PA-501 のフラグ管理コードが追加され、後続箇所の行番号が下方シフト。finding 本質 (backfill_fn / state_store 未注入) は依然 true。",
+      "impact": "後続 fix PR 担当者が行番号を直接参照すると見つからない。",
+      "recommendation": "fix PR では行番号でなくシンボル (OANDAStreamReceiver 構築・CandleFetcher 構築) で参照する。"
+    },
+    {
+      "id": "ERR-VERIF-C-003",
+      "severity": "informational",
+      "category": "summary_classification_inconsistency",
+      "claim": "summary.md 表で「**HIGH** : 14」とし、訂正後 severity 分布で post_fix_defect 5 + 新規 9 = 14 と記述",
+      "actual": "summary.md 中の post_fix_defect 表は 5 件 (CSR-601/602, PA-501/502, DE-501) 一覧、本セッションで PA-501/502/DE-501 の 3 件は既に修正済。修正済を post_fix_defect HIGH に含めたまま「HIGH 14 件」と集計しているため、修正適用後の残存 HIGH 数は実態 11 件 (CSR-601/602 + 新規 9)。",
+      "interpretation": "summary 作成は dry-run 時点 (commit fca45f23) の snapshot のため不整合ではない。ただし current HEAD (1945d8b) の残存 HIGH 数を伝える注記が無く、後続審査者が誤読する。",
+      "impact": "残存 HIGH の優先順位付け時に修正済を再修正対象に挙げてしまう可能性。",
+      "recommendation": "summary に「2026-06-01 修正適用後の残存 HIGH = 11 件 (CSR-601/602/RE-501/RE-508/PA-503/DE-502/DE-506/DM-501/QA-601/QA-602 + DE-503・DE-504 統合扱い)」を追記。"
+    },
+    {
+      "id": "ERR-VERIF-C-004",
+      "severity": "minor",
+      "category": "dedup_inconsistency",
+      "claim": "summary.md の重複統合表で 'DE-501 / DE-505 統合' を post_fix_defect 群 (5 件目) に記載しつつ、cluster_c_fts_data.json では 'DE-505 → canonical DE-501 (medium)' と severity_downgrade",
+      "actual": "summary.md 本文の post_fix_defect 群表 (line 81) では DE-501 を HIGH に維持しつつ DE-505 を統合扱い、一方 cluster_c_fts_data.json:62-69 では verdict_severity='medium' で severity_downgrade。両者の severity 表記が不整合。",
+      "interpretation": "summary.md の HIGH 14 件カウントは devil-advocate 訂正前 severity (high) を採用しているが、訂正後分布表 (severity 表) の数値とロジックが二重表記になっている。",
+      "impact": "重大ではないが post_fix_defect の severity 表記が両論並列状態。実装側は 'DE-501 high 修正済' で扱い、本セッション commit は適用済 (整合)。",
+      "recommendation": "summary に 'DE-501/DE-505: 当初 high → devil-advocate により medium 格下げ → ただし post_fix_defect として 1 ラウンド一括修正対象に維持' と注記。"
+    },
+    {
+      "id": "ERR-VERIF-C-005",
+      "severity": "informational",
+      "category": "incorrect_count_in_findings",
+      "claim": "DM-502 findings 記述で「8 種のメトリクス対応アラートルールが未定義」と主張、内訳に DE-506 (fx_data_quality_forced_publish_total) を (4) として含める",
+      "actual": "alerting_rules.yml の総 alert 数=11 件 (grep 'alert:' で確認)。データ品質関連で確認済: FxDataQualityRejectHigh (line 85) のみ存在。fx_data_quality_forced_publish_total / fx_data_quality_warn_total / fx_snapshot_persistence_failures_total / fx_backfill_failures_total / fx_slippage_missing_total / fx_feature_store_compute_errors_total / fx_signal_silence_sec / fx_live_eligible_key_missing_total / fx_kill_switch_cancel_failed のいずれも grep ヒットなし — DM-502 主張通り。DE-506 と DM-502(4) は完全に同一指摘 (重複)。",
+      "interpretation": "summary.md の重複統合表に DE-506 / DM-502(4) は記載されていない。cluster_c_fts_data.json:376 のみが認識している。",
+      "impact": "fix PR を別々に切ると同一 alert 追加を 2 回試行することになる。",
+      "recommendation": "summary の重複統合表に 'DE-506 ⊂ DM-502(4)' を追加。"
+    }
+  ],
+
+  "findings_reverified": [
+    {
+      "finding_id": "DE-501",
+      "original_severity": "high",
+      "devil_advocate_verdict": "medium",
+      "verifier_verdict": "FIXED — closed",
+      "evidence": "commit 1945d8b で 3 経路 (runner.py:765-768, main.py:702/729/735, forward_test.py:158/161/175) すべてに strategy_id=loaded.strategy_id 注入確認。test_de501_strategy_id_label_semantics.py 11 件 PASS。alerting_rules.yml ADVISORY 更新確認。metrics.py:514-547 で gauge ラベル 2 軸 ([strategy_id, primary_tf]) に拡張確認。",
+      "post_fix_residual_risk": "none — fallback (strategy_id=None で primary_tf 採用) 路は旧挙動互換のため AST 後方互換性破壊なし。1 戦略 = 1 LiveFeatureStore 設計のため strategy_id 衝突可能性なし。"
+    },
+    {
+      "finding_id": "DE-502",
+      "original_severity": "critical",
+      "devil_advocate_verdict": "high",
+      "verifier_verdict": "CONFIRMED HIGH — backlog drop 実装は依然 raw_candles[-1] のみ",
+      "evidence": "data_provider.py:251 で latest = OandaCandle.model_validate(raw_candles[-1]) — single bar のみ。data_provider.py:189-275 の poll_latest シグネチャは OandaCandle | None で list 返却に未対応。runner.py:1772-1810 (single bar on_bar) も未修正。",
+      "severity_rationale": "通常運用 (M15 + poll_interval=60s) では backlog 発生せず、影響は再起動・network jitter 時のみ。critical 主張は誇張だが、EWM 永続ドリフト経路がある以上 medium 以下に下げるべきでない。high 妥当。",
+      "fix_required": true
+    },
+    {
+      "finding_id": "DE-503",
+      "original_severity": "high",
+      "devil_advocate_verdict": "medium",
+      "verifier_verdict": "CONFIRMED MEDIUM — main.py 経路は実本番では非使用",
+      "evidence": "main.py:1006-1016 OANDAStreamReceiver 構築で backfill_fn / last_bar_time_fn / backfill_timeframes いずれも未指定 (grep 0 件)。stream_receiver.py の _run_backfill は早期 return。本番 UnifiedRunner は data_provider 経由でストリーム非使用 (DE-502 ルートと別系統)。",
+      "severity_rationale": "main.py 経路の latent dead path のみ。本番影響なし。medium が妥当。",
+      "fix_required": "yes (dev/staging 健全性のため)",
+      "consolidation_note": "DE-504 と同一 fix PR で対応すべき"
+    },
+    {
+      "finding_id": "DE-504",
+      "original_severity": "high",
+      "devil_advocate_verdict": "medium",
+      "verifier_verdict": "CONFIRMED MEDIUM — main.py:834 CandleFetcher 構築箇所で state_store 未注入",
+      "evidence": "main.py:834-849 CandleFetcher() に state_store 引数なし。main.py:932/957 では state_store=self._state_store を KillSwitch・Coordinator に注入しているが、CandleFetcher は除外。同経路は dev/staging のみ。",
+      "severity_rationale": "DE-503 と同根、本番非経路。medium 妥当。"
+    },
+    {
+      "finding_id": "DE-505",
+      "original_severity": "high",
+      "devil_advocate_verdict": "medium",
+      "verifier_verdict": "FIXED — closed via 1945d8b",
+      "evidence": "metrics.py:514-547 で set_feature_store_buffer_at_cap が strategy_id kwarg 追加と gauge ラベル [strategy_id, primary_tf] 拡張。live_store.py:529 で strategy_id=self._strategy_id を kwarg で渡す。DE-501 と同一 fix で解消。",
+      "post_fix_residual_risk": "none"
+    },
+    {
+      "finding_id": "DE-506",
+      "original_severity": "high",
+      "devil_advocate_verdict": "high (confirmed_with_caution: DE-510 同時対応推奨)",
+      "verifier_verdict": "CONFIRMED HIGH — fx_data_quality_forced_publish_total に対応する alerting_rules.yml の expr は依然不在 (grep 'fx_data_quality_forced' = 0 hits)。実際は alerting_rules.yml 全体 11 alert のうち data quality 系は FxDataQualityRejectHigh 1 件のみ。",
+      "evidence": "grep 'fx_data_quality_forced' deploy/prometheus/alerting_rules.yml → no matches",
+      "fix_required": true,
+      "dedup_note": "DM-502 の (4) と完全重複 (summary 重複統合表に欠落)"
+    },
+    {
+      "finding_id": "DM-501",
+      "original_severity": "high",
+      "devil_advocate_verdict": "high (confirmed)",
+      "verifier_verdict": "CONFIRMED HIGH — StrategySlot.__init__ に metrics 引数なし (9 引数のみ)",
+      "evidence": "strategy_slot.py:151-162 で __init__ params: config, loaded_strategy, broker_gateway, ptrc, feature_store, state, event_bus, order_guard, risk_alert_emitter — metrics なし。runner.py:785-797 StrategySlot 生成箇所も metrics=self._metrics なし。",
+      "severity_review": "HIGH 維持妥当。ただし 'FxStalePnlTransientSkipHigh アラート完全 dead' は実害ベース medium 寄り (OANDA 一時障害が頻発しない限り検知漏れは限定的)。CRITICAL ではない。修正コストは極低 (StrategySlot __init__ に metrics 引数追加 + runner.py 1 行修正)。",
+      "fix_required": true
+    },
+    {
+      "finding_id": "DM-507",
+      "original_severity": "medium",
+      "devil_advocate_verdict": "medium (confirmed)",
+      "verifier_verdict": "CONFIRMED — settings.py:211-217 で notify_email_to: str = Field(default='510.cocoa@gmail.com', ...)",
+      "evidence": "実コード読取で hardcode 確認。email アドレスはユーザー実アドレス (CLAUDE memory 通り)。",
+      "privacy_review": "ユーザー個人実アドレス (510.cocoa@gmail.com) が公開リポジトリにコミットされている状況。MEMORY.md (userEmail) と一致するため第三者への漏洩リスクは既存 commit author email でも同様だが、コード上の hardcode は CLAUDE.md ポリシー違反 (秘密情報直書き禁止) に該当。medium 妥当。CRITICAL/HIGH に格上げするほど取引・資金リスクはない。",
+      "fix_required": "yes (default='' へ変更、起動時ガードに委譲)"
+    },
+    {
+      "finding_id": "DM-509",
+      "original_severity": "low",
+      "devil_advocate_verdict": "invalid (rejected)",
+      "verifier_verdict": "REJECTED — devil-advocate 判定支持",
+      "evidence": "health_check.py:204-223 check_all で 'status': 'healthy' if system_status == 'healthy' else 'unhealthy' — system_status が 'degraded' の場合 'unhealthy' を返す。_aggregate_system_status (line 484-504) は critical の unhealthy で 'unhealthy'、それ以外で degraded があれば 'degraded'。is_healthy (line 236) も 'healthy' 以外で False。finding 主張 '/health が healthy を返し続ける' は実コードと矛盾。",
+      "rejection_basis": "finding 記述の '_aggregate_system_status が critical の degraded を unhealthy に昇格しない' は事実だが、'status' キーには 'healthy' / 'unhealthy' の 2 値で degraded → unhealthy にマップされるため、対外 API は healthy を返さない。finding の核心主張誤り。"
+    }
+  ],
+
+  "additional_observations": [
+    {
+      "id": "OBS-VERIF-C-001",
+      "subject": "PA-501 / PA-502 修正の副次効果",
+      "detail": "commit 1945d8b は DE-501 だけでなく PA-501/PA-502 も同梱しているが、PA-501 (rollback_stop / stop() でフラグリセット) は EventBus.start が再 start() で skip される silent dead bus を防ぐもの。AUDIT 監査担当外のクラスタ B 修正だが、本コミットで FTS の全 2061 テスト緑のため副次 regression なしを確認。"
+    },
+    {
+      "id": "OBS-VERIF-C-002",
+      "subject": "DE-503/504 の fix で main.py:805 / 977 の行番号が不確実",
+      "detail": "本セッション 1945d8b 後の現在の main.py では CandleFetcher 構築は line 834、OANDAStreamReceiver 構築は line 1006。findings の line range は fca45f23 snapshot のため、後続 fix PR では行番号でなくシンボル参照を推奨。"
+    },
+    {
+      "id": "OBS-VERIF-C-003",
+      "subject": "DM-502 と DE-506 の重複未統合は summary バグ",
+      "detail": "DM-502 の (4) 'fx_data_quality_forced_publish_total' は DE-506 と完全同一指摘。summary.md の重複統合表 (line 147-152) には記載なく、cluster_c_fts_data.json:376 も独立扱いを許容。fix PR を別々に切ると alert 二重定義になる潜在。"
+    }
+  ],
+
+  "summary_corrections_needed": [
+    {
+      "section": "summary.md エグゼクティブサマリー: HIGH 14",
+      "needed": "DE-501/PA-501/PA-502 は本セッションで commit 1945d8b として修正済。残存 HIGH = 11 件 (CSR-601/602/RE-501/RE-508/PA-503/DE-502/DE-506/DM-501/QA-601/QA-602 + DE-503/504 medium 格下げ後扱い) と注記すべき。"
+    },
+    {
+      "section": "summary.md 確定 HIGH 14 件表",
+      "needed": "post_fix_defect 5 件のうち DE-501/PA-501/PA-502 は status: FIXED (1945d8b) と更新。CSR-601/602 のみ未対応。"
+    },
+    {
+      "section": "summary.md 重複統合表",
+      "needed": "'DE-506 ⊂ DM-502(4)' を追加。"
+    },
+    {
+      "section": "summary.md 推奨次手 P1",
+      "needed": "post_fix_defect 5 件のうち 3 件は 1945d8b 完了済 (PA-501/502/DE-501)。CSR-601/602 のみ ATLAS 側 P1 として残る。"
+    },
+    {
+      "section": "commit message 1945d8b 末尾の test 数値",
+      "needed": "'parity 65 + unit 70 + integration 582 = 756 passed' は変更スコープ内のサブセット集計と推測されるが、文面は全体に見えるため誤解されやすい。実態は parity 65 + unit 1254 + integration 752 = 全体 2061 passed。次セッションで amend または注記推奨。"
+    }
+  ],
+
+  "verification_status": {
+    "total_findings_reviewed": 26,
+    "fixes_verified_passed": 3,
+    "fixes_verified_failed": 0,
+    "active_high_findings_confirmed": 3,
+    "active_medium_findings_confirmed": 6,
+    "rejected_findings_supported": 1,
+    "errors_found_in_summary": 5,
+    "summary_corrections_required": 5,
+    "test_regression_status": "ALL GREEN (2061 passed, 10 xfailed)"
+  },
+
+  "verification_conclusion": "AUDIT-2026-0531-001 summary とクラスタ C devil-advocate 報告 (cluster_c_fts_data.json) の主要 verdict は実コードとほぼ一致。post_fix_defect の DE-501 / DE-505 修正 (1945d8b) は 3 経路注入・gauge ラベル拡張・ADVISORY 更新すべて確認、11 integration テスト全 PASS、回帰 2061 PASS。誤りは主に summary.md の集計表記 (HIGH 14 件カウントが修正前後で揺れ・DE-506/DM-502(4) 重複統合漏れ・commit message の test 数値不整合) の中軽度問題のみで、実コード水準のバグや severity 過大/過小の重大誤りは検出されなかった。DM-509 reject 判断は妥当 (実コードで '/health' は degraded を unhealthy として返す)。DE-502 (high)・DE-506 (high)・DM-501 (high)・DM-507 (medium)・DE-503/504 (medium) はすべて未修正で残存、次ラウンド fix 対象として有効。"
+}

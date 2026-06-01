@@ -1,7 +1,35 @@
 {
   "session_id": "AUDIT-2026-0531-001",
   "session_start": "2026-05-31T23:55:00Z",
-  "session_end": "2026-06-01T01:15:00Z",
+  "session_end": "2026-06-01T03:30:00Z",
+  "phase_2_5_verification": {
+    "date": "2026-06-01",
+    "trigger": "ユーザー指示「調査レポートに間違いがないか確認の上、必要な修正はすべて行ってください」",
+    "verifiers": ["code-safety-reviewer (ATLAS)", "platform-architect (FTS infra)", "data-engineer (FTS data/qa/ops)"],
+    "fixes_applied_in_session_verified": {
+      "CSR-601": "confirmed (bf3e023f, 16/16 tests pass)",
+      "CSR-602": "confirmed (bf3e023f, 16/16 tests pass)",
+      "PA-501": "confirmed (1945d8b, 10/10 tests pass)",
+      "PA-502": "confirmed (1945d8b)",
+      "DE-501": "confirmed (1945d8b, 2061 passed)"
+    },
+    "report_errors_corrected": {
+      "ERR-A-001": "CSR-303 5/8 表記 → 正確な範囲記述に訂正",
+      "ERR-A-002": "cluster_a の CSR-607/608 取り違え記述 (結論影響なし)",
+      "ERR-A-003": "コミットメッセージ 5→4 テストクラス (受容)",
+      "ERR-A-004": "ATLAS HEAD SHA 修正前後併記",
+      "ERR-B-001": "🔴 重大: RE-505 撤回の真因が PaperBroker(1M default) 誤読であることを明記。週末ログ抑制は副次理由",
+      "ERR-B-002": "CC-003 HIGH 6件 → HIGH 5+MEDIUM 5 に分離",
+      "ERR-B-003": "PA-501 修正コスト '4 行' (受容)",
+      "ERR-C-001": "FTS commit 集計表記 (受容)",
+      "ERR-C-002": "DE-503/504 line 番号シフト (1006/834 に更新)",
+      "ERR-C-003": "HIGH 14 → 修正後 9 残 と併記",
+      "ERR-C-004": "DE-501 HIGH 維持 (cluster_c 内 medium と両論)",
+      "ERR-C-005": "DE-506 = DM-502(4) を重複統合表に追加"
+    },
+    "re505_root_cause": "PaperBroker(initial_balance=1_000_000.0) が UnifiedRunner paper slot でも account_balance=1,000,000 を出力する仕様。原 RE-505 の『1M = main.py 固有』前提が誤り。週末ログ抑制ユーザー仕様 (CLAUDE.md記載) は補助根拠として有効だが根本原因ではない",
+    "verification_files": "logs/audit/AUDIT-2026-0531-001/verification/verify_{atlas,fts_infra,fts_data}.json"
+  },
   "limit_minutes": 300,
   "threshold_pct": 94,
   "target": "both",
@@ -11,7 +39,7 @@
   "max_fixes_per_round": 5,
   "mode": "dry-run / investigate-only",
   "current_round": 1,
-  "verdict": "NOT_converged (CRITICAL 1 + HIGH 14 検出、修正未着手)",
+  "verdict": "Phase 2.5 後: CRITICAL 0 + HIGH 9 残 (5 件本セッション修正済)。残課題は次ラウンドへ繰越",
   "rounds": [
     {
       "round": 1,

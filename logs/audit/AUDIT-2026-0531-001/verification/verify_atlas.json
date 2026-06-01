@@ -1,0 +1,162 @@
+{
+  "verifier": "code-safety-reviewer",
+  "cluster": "A_ATLAS",
+  "verification_date": "2026-06-01",
+  "post_fix_verification": {
+    "CSR-601": {
+      "applied": true,
+      "regression": null,
+      "tests_pass": "16/16 PASS (pytest tests/unit/test_csr303_generation_id_cli_validation.py -v confirmed)",
+      "evidence": [
+        "atlas/main.py:32-36: validate_instrument/validate_timeframe import added bf3e023f",
+        "atlas/main.py:792-793: data_fetch wired",
+        "atlas/main.py:814-815: data_fetch_secondary wired",
+        "atlas/main.py:843-844: data_check wired"
+      ],
+      "post_fix_defect_detected": false
+    },
+    "CSR-602": {
+      "applied": true,
+      "regression": null,
+      "tests_pass": "16/16 PASS",
+      "evidence": [
+        "atlas/main.py:659: strategy_id=validate_generation_id(strategy_id) added bf3e023f",
+        "test_csr303_generation_id_cli_validation.py:153-174: TestContextImproveCommandRejectsTraversal 2 tests PASS"
+      ],
+      "post_fix_defect_detected": false
+    }
+  },
+  "errors_found": [
+    {
+      "target": "cluster_a_atlas.json CSR-607 validation entry",
+      "type": "fact_error",
+      "description": "CSR-607 validation content replaced with CSR-608 content (_mem_poll whole-process RSS). CSR-607 area=sandbox/convention_violation (SANDBOX_BUILTINS includes print()) but rationale reads sandbox_runner.py:134-136 psutil RSS = CSR-608. CSR-608 rationale misidentifies CSR-607 as duplicate. Both are independent. validated=true accidentally correct but evidence used is wrong.",
+      "evidence": [
+        "code-safety-reviewer.json CSR-607: area=sandbox/convention_violation title=SANDBOX_BUILTINS includes print()",
+        "code-safety-reviewer.json CSR-608: area=sandbox/memory_poll title=_mem_poll monitors whole-process RSS",
+        "cluster_a_atlas.json CSR-607 rationale: sandbox_runner.py:134-136 psutil = CSR-608 content",
+        "cluster_a_atlas.json CSR-608 rationale: CSR-607 wa douitsu finding = incorrect",
+        "atlas/common/sandbox_builtins.py:44: print:print confirmed"
+      ],
+      "correction": "Re-verify CSR-607 with correct evidence: sandbox_builtins.py:44 print:print and FORBIDDEN_BUILTINS excludes print. CSR-608 is independent."
+    },
+    {
+      "target": "commit bf3e023f message",
+      "type": "fact_error",
+      "description": "Commit message states 5 new test classes but actual are 4: TestContextImproveCommandRejectsTraversal / TestDataFetchCommandRejectsTraversal / TestDataCheckCommandRejectsTraversal / TestDataFetchSecondaryCommandRejectsTraversal. Test count 16 is accurate.",
+      "evidence": [
+        "git show bf3e023f grep +class = 4 classes",
+        "pytest --collect-only = 16 tests (existing 12 + new 6 / 4 classes)"
+      ],
+      "correction": "Change 5 new test classes to 4 new test classes. No behavioral impact."
+    },
+    {
+      "target": "summary_AUDIT-2026-0531-001.md L78 CSR-602 description",
+      "type": "fact_error",
+      "description": "CSR-602 states 5/8 subcommands protected implying 3 unprotected. history_get/converge/compare perform no filesystem Path joins (SQLite only) so have no path traversal risk. Actual unprotected: context improve (CSR-602) + data fetch/fetch-secondary/check (CSR-601) = 4 commands.",
+      "evidence": [
+        "atlas/main.py:677-691: history_get SQLite only no Path join",
+        "atlas/main.py:712-724: converge SQLite only",
+        "atlas/main.py:764-775: compare SQLite only"
+      ],
+      "correction": "CSR-303 protected 5 commands (validate/backtest/metrics/score/evaluate); context improve + data fetch group = 4 unprotected. history/converge/compare not path traversal targets."
+    },
+    {
+      "target": "summary_AUDIT-2026-0531-001.md L8 scope section",
+      "type": "stale_reference",
+      "description": "Summary header ATLAS @ 74888095 is audit baseline. bf3e023f (CSR-601/602 fix) applied this session but HIGH table lacks fixed annotation.",
+      "evidence": [
+        "git log: bf3e023f is one commit after 74888095",
+        "CSR-601/602 HIGH table no fixed annotation"
+      ],
+      "correction": "Add note: ATLAS @ bf3e023f (post CSR-601/602 fix) or annotate CSR-601/602 as fixed in bf3e023f."
+    }
+  ],
+  "findings_reverified": [
+    {
+      "finding_id": "CSR-601",
+      "verdict": "confirmed",
+      "new_severity": "high",
+      "rationale": "Pre-fix 74888095: validate_instrument/validate_timeframe not called in data commands. Post-fix bf3e023f: all 3 data subcommands wired. pytest 16/16 PASS.",
+      "evidence": [
+        "atlas/main.py:792-793 814-815 843-844 wiring confirmed"
+      ]
+    },
+    {
+      "finding_id": "CSR-602",
+      "verdict": "confirmed",
+      "new_severity": "high",
+      "rationale": "Pre-fix 74888095: context improve lacked validate_generation_id. Post-fix bf3e023f L659 wired. pytest 16/16 PASS.",
+      "evidence": [
+        "atlas/main.py:659 wiring confirmed"
+      ]
+    },
+    {
+      "finding_id": "CSR-605",
+      "verdict": "confirmed",
+      "new_severity": "medium",
+      "rationale": "syntax_checker.py:177-186 _check_imports uses ast.walk ignoring TYPE_CHECKING guards confirmed. Forbidden module inside TYPE_CHECKING causes Stage 1 FAIL.",
+      "evidence": [
+        "atlas/validator/syntax_checker.py:177-186"
+      ]
+    },
+    {
+      "finding_id": "CSR-606",
+      "verdict": "confirmed",
+      "new_severity": "low",
+      "rationale": "backfill_v6_2_0_soft_score.py:169 tier1_passed or-logic error confirmed. all_passed=False/passed=True incorrectly True.",
+      "evidence": [
+        "scripts/backfill_v6_2_0_soft_score.py:169"
+      ]
+    },
+    {
+      "finding_id": "CSR-607",
+      "verdict": "confirmed",
+      "new_severity": "low",
+      "rationale": "sandbox_builtins.py:44 print:print exists and syntax_checker.py FORBIDDEN_BUILTINS excludes print confirmed. print-containing strategy passes Stage 1-4. Finding accurate. devil-advocate used wrong evidence (CSR-608) but finding valid.",
+      "evidence": [
+        "atlas/common/sandbox_builtins.py:44: print:print",
+        "atlas/validator/syntax_checker.py:50-56: FORBIDDEN_BUILTINS excludes print"
+      ]
+    },
+    {
+      "finding_id": "CSR-608",
+      "verdict": "confirmed",
+      "new_severity": "low",
+      "rationale": "sandbox_runner.py:134-136 _mem_poll psutil.Process() whole-process RSS confirmed. MEMORY.md AUDIT-2026-0526-001 known bug confirmed. Finding accurate.",
+      "evidence": [
+        "atlas/validator/sandbox_runner.py:134-136"
+      ]
+    },
+    {
+      "finding_id": "QA-601",
+      "verdict": "confirmed",
+      "new_severity": "high",
+      "rationale": "backfill_v6_2_0_soft_score.py:170-172 reuses existing is_duplicate without re-evaluation confirmed. Grep cluster_strategies: 0 matches.",
+      "evidence": [
+        "scripts/backfill_v6_2_0_soft_score.py:170-172",
+        "Grep cluster_strategies: 0 matches"
+      ]
+    },
+    {
+      "finding_id": "QA-602",
+      "verdict": "confirmed",
+      "new_severity": "high",
+      "rationale": "result_parser.py:258-260 profit_factor fallback when is_profit_factor_walks=None confirmed. runner.py:680-682 recalibration docstring confirmed unfixed.",
+      "evidence": [
+        "atlas/backtest/result_parser.py:258-260",
+        "atlas/backtest/runner.py:680-682"
+      ]
+    },
+    {
+      "finding_id": "QA-603",
+      "verdict": "adjusted_severity",
+      "new_severity": "medium",
+      "rationale": "devil-advocate downgrade high to medium justified. balanced 74.0%/short_only 56.5% WFA None are measurement errors from misclassifying no_trade/L1 FAIL as WFA=None. Tier2-reached WFA None=0%. Directional concentration concern valid at medium.",
+      "evidence": [
+        "cluster_a_atlas.json QA-603: balanced n=18 Tier2-reached WFA_None=0 PASS=0"
+      ]
+    }
+  ],
+  "summary_corrections_needed": "[CORRECTION 1 MOST IMPORTANT] cluster_a_atlas.json CSR-607 validation evidence mismatch: CSR-607 (sandbox_builtins print problem) was validated using CSR-608 evidence (_mem_poll RSS). CSR-608 rationale misidentifies CSR-607 as duplicate. Both are independent. Correct CSR-607 evidence: sandbox_builtins.py:44 (print:print) + FORBIDDEN_BUILTINS excludes print. [CORRECTION 2] commit bf3e023f: 5 new test classes should be 4 new test classes. [CORRECTION 3] summary CSR-602 5/8 inaccurate: history/converge/compare use SQLite only, not path traversal targets. Actual unprotected = context improve + data fetch group = 4. [CORRECTION 4 minor] summary header: add bf3e023f applied-this-session note."
+}

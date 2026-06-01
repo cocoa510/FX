@@ -1,0 +1,354 @@
+{
+  "audit_id": "AUDIT-2026-0531-001",
+  "verification_phase": "Phase 2.5",
+  "verifier": "verify-cluster-b-fts-infra",
+  "verification_date": "2026-06-01",
+  "fts_commit_at_verification": "c893c6a (hourly snapshot HEAD)",
+  "fts_fix_commit": "1945d8b",
+  "mode": "empirical_reverification",
+  "scope": "FTS infrastructure cluster B (platform-architect PA-501..508 + risk-execution-engineer RE-501..515 + summary correctness)",
+
+  "verification_summary": {
+    "findings_reverified": 23,
+    "fixes_confirmed_applied": 3,
+    "fixes_regression_tests_passing": 10,
+    "errors_found_in_summary": 4,
+    "critical_summary_corrections_needed": 1,
+    "findings_that_warrant_severity_upgrade_again": 1,
+    "findings_correctly_documented": 19,
+    "overall_summary_quality": "GOOD with one CRITICAL retraction error (RE-505) and several minor numerical inconsistencies"
+  },
+
+  "fix_verification_results": [
+    {
+      "finding": "PA-501",
+      "fix_status": "APPLIED_AND_VERIFIED",
+      "code_evidence": [
+        "trading_platform/main.py:1370-1382 _rollback_stop tail resets both flags to False (confirmed by Read)",
+        "trading_platform/main.py:1475-1481 stop() tail resets both flags to False (confirmed by Read)"
+      ],
+      "test_evidence": [
+        "tests/integration/test_pa501_lifecycle_flag_reset.py has 4 tests covering: stop() flag reset, _rollback_stop flag reset, stop->start cycle keeps event bus alive, stop->start restarts _running",
+        "All 4 tests PASSED in pytest execution"
+      ],
+      "symmetric_bug_in_runner_py": "VERIFIED_ABSENT — grep for _eventbus_started_early|_email_notifier_started in trading_platform/ matches only main.py (0 hits in runner.py)",
+      "regression_test_quality": "GOOD — tests cover both flag-level (assertions on self._eventbus_started_early / _email_notifier_started) and behavioral level (publish reaches subscriber after stop->start)",
+      "verdict": "Fix is correct, complete, and adequately regression-tested"
+    },
+    {
+      "finding": "PA-502",
+      "fix_status": "APPLIED_AND_VERIFIED",
+      "code_evidence": [
+        "trading_platform/main.py:266-290 helper now gates on (notify_email_enabled AND not notify_email_to) before flag set, logs structured ERROR with PA-502 tag, leaves flag False"
+      ],
+      "test_evidence": [
+        "tests/integration/test_pa502_notify_email_empty_to_subscribe_gate.py has 6 tests covering: helper does not set started flag, ERROR log emitted, RISK_ALERT subscribe NOT registered, publish does not invoke email handler, normal path with valid to still works, disabled path still works (no regression)",
+        "All 6 tests PASSED in pytest execution"
+      ],
+      "skip_path_verification": "VERIFIED — test_publish_after_helper_with_empty_to_does_not_invoke_email asserts flag stays False so subsequent start() can retry the standard path",
+      "regression_test_quality": "EXCELLENT — covers all 4 branch conditions of EmailNotifier.start() (enabled=False, enabled=True+to=valid, enabled=True+to=empty, disabled)",
+      "verdict": "Fix is correct and adequately tested. Choice of soft-fail (ERROR log + flag False) over fail-fast (raise) is documented in test docstring"
+    },
+    {
+      "finding": "DE-501",
+      "fix_status": "APPLIED_AND_VERIFIED (not in cluster B scope but cross-checked)",
+      "code_evidence": [
+        "trading_platform/core/monitoring/metrics.py:344-360 buffer_at_cap gauge now has [strategy_id, primary_tf] labels",
+        "trading_platform/core/monitoring/metrics.py:512-548 set_feature_store_buffer_at_cap accepts strategy_id kwarg",
+        "trading_platform/core/monitoring/metrics.py:897-908 observe_feature_staleness docstring updated with DE-501 note",
+        "trading_platform/data/feature_store/live_store.py:strategy_id param added (default=None)",
+        "trading_platform/core/unified_runner/runner.py:+4 lines passing loaded.strategy_id",
+        "trading_platform/forward_test.py:+8 lines",
+        "trading_platform/main.py:697-706 passes strategy_id=loaded.strategy_id"
+      ],
+      "verdict": "Fix is real and includes 11-test contract suite (test_de501_strategy_id_label_semantics.py)"
+    }
+  ],
+
+  "errors_found_in_summary": [
+    {
+      "error_id": "SE-001",
+      "severity": "CRITICAL",
+      "location": "summary_AUDIT-2026-0531-001.md lines 47, 55-65, 156-161 (RE-505/CC-001 retraction)",
+      "summary_claim": "RE-505 retracted because 'weekend log suppression spec' explains absence of unified_runner.20260530.* file; therefore main.py standalone production hypothesis is invalidated",
+      "actual_evidence": [
+        "unified_runner.20260529.stderr.log spans 2026-05-29T01:26:29Z through 2026-05-31T10:10:26Z — UnifiedRunner ran CONTINUOUSLY across 5/30 (grep for '2026-05-30' inside this file yields 32795 entries, including '2026-05-30T00:00:51Z' candle data fetch entries)",
+        "Therefore the 'weekend log absence' premise is FACTUALLY WRONG — UnifiedRunner DID log on 5/30, just under the 20260529 file rotation key (because process was launched 5/29 and not restarted until 5/31 10:10)",
+        "The audit log audit_2026-05-30.jsonl contains 2 kill_switch_activated entries at 02:49:32 and 07:48:05 UTC plus 20 ptrc_rejected entries for ATLAS-2026-0424-001 with available_margin=1000000",
+        "grep 'kill_switch_activated' in unified_runner.20260529.stderr.log: 0 matches. grep 'ptrc_rejected' in same file: 2 matches (5/29 dates only, none on 5/30)",
+        "Stronger evidence on 5/31: unified_runner.20260531.stderr.log is logging continuously starting 10:10:30Z. audit_2026-05-31.jsonl line 1 shows kill_switch_activated at 2026-05-31T23:21:50.023708Z + 15 ptrc_rejected entries at 23:21:55+ with same available_margin=1000000 pattern. grep 'kill_switch_activated|ptrc_rejected' in unified_runner.20260531.stderr.log: 0 matches",
+        "5/31 23:21 UTC is AFTER Sunday 22:00 UTC market reopen — the CLAUDE.md weekend suppression spec explicitly applies only to 'Saturday 22:00 UTC - Sunday 22:00 UTC' window. UnifiedRunner was actively logging candle fetches at 23:20:17Z (proven by grep). So suppression cannot explain absence of these events in stderr",
+        "Conclusion: The audit_<date>.jsonl entries on 5/30 02:49-07:48 and 5/31 23:21 CANNOT have originated from the UnifiedRunner process whose stderr we see. They must originate from a SECOND process (main.py with PA-103 escape hatch) OR from a different runner instance"
+      ],
+      "verification_method": "Read all three audit_log files (5/29-5/31), grep stderr logs for matching events, cross-verify UnifiedRunner running window vs missing event types",
+      "impact": "RE-505 retraction in summary is unsafe. The CC-001 compound risk (main.py standalone + PA-503 detection dead) is NOT actually refuted by the weekend spec. The summary should re-instate RE-505 as HIGH (recommend CRITICAL) and reopen CC-001",
+      "summary_correction_required": "Re-classify RE-505 as HIGH (not INVALIDATED). CC-001 must be re-opened. The weekend log suppression spec is REAL but does not explain this specific anomaly — both KS activations are well outside the documented suppression window OR are accompanied by direct stderr evidence that UnifiedRunner was running and not emitting these events"
+    },
+    {
+      "error_id": "SE-002",
+      "severity": "MEDIUM",
+      "location": "summary_AUDIT-2026-0531-001.md line 167 (CC-003)",
+      "summary_claim": "6 件の HIGH (PA-503/505/506, RE-501/502/503/504, DE-501/505, DM-501) のいずれもが main.py と runner.py の機能セット非対称に起因",
+      "actual_facts": [
+        "Item count listed = 10 (PA-503, PA-505, PA-506, RE-501, RE-502, RE-503, RE-504, DE-501, DE-505, DM-501) but the lead-in says '6 件の HIGH'",
+        "Of these, the summary's HIGH severity table (lines 24-31) classifies only: PA-503, RE-501, RE-508, DE-501 (combined with DE-505), DM-501 as HIGH = 5 HIGH",
+        "PA-505 and PA-506 are MEDIUM in summary (lines 105-107)",
+        "RE-502/503/504 are MEDIUM (lines 109-111)"
+      ],
+      "impact": "Inconsistency between '6 件の HIGH' wording and the actual listed items / severity table. The structural point (dual-implementation drift) is valid, but the count is off",
+      "summary_correction_required": "Reword as '6 件以上の HIGH/MEDIUM (PA-503/PA-505/PA-506/RE-501/RE-502/RE-503/RE-504/DE-501/DM-501)' to match actual severities"
+    },
+    {
+      "error_id": "SE-003",
+      "severity": "LOW",
+      "location": "summary_AUDIT-2026-0531-001.md line 79 (PA-501 修正コスト=4 行)",
+      "summary_claim": "PA-501 修正コスト = 4 行",
+      "actual_diff": "git diff shows commit 1945d8b adds 14 lines including comments at main.py:1375-1381 and 1475-1481 (2 reset blocks × 7 lines each with PA-501 docstring comments)",
+      "impact": "Minor: the actual flag-reset code is 2 lines × 2 blocks = 4 lines, but the commit also adds 5 lines of docstring per block. Wording is technically defensible but slightly understates the change",
+      "summary_correction_required": "Either 'PA-501 修正: 4 行 (+ 10 行コメント)' or leave as is — informational only"
+    },
+    {
+      "error_id": "SE-004",
+      "severity": "LOW",
+      "location": "summary_AUDIT-2026-0531-001.md line 25 (Severity distribution table)",
+      "summary_claim": "CRITICAL = 0 (after invalidation of RE-505)",
+      "actual_situation": "If SE-001 is accepted (RE-505 retraction is incorrect), CRITICAL would be 1 again. Summary numbers are internally consistent given the retraction but the retraction itself is flawed",
+      "impact": "Cascades from SE-001",
+      "summary_correction_required": "Depends on SE-001 resolution"
+    }
+  ],
+
+  "finding_reverification_results": {
+    "PA-501": {
+      "original_verdict": "confirmed/high",
+      "reverification_verdict": "CONFIRMED + FIX APPLIED + REGRESSION COVERED",
+      "evidence": "Code at main.py:1370-1382 and 1475-1481 confirmed; 4 tests PASS",
+      "criticism": "None — fix is well-targeted"
+    },
+    "PA-502": {
+      "original_verdict": "confirmed/high",
+      "reverification_verdict": "CONFIRMED + FIX APPLIED + REGRESSION COVERED",
+      "evidence": "Code at main.py:266-290 confirmed; 6 tests PASS; choice of soft-fail vs fail-fast is documented",
+      "criticism": "None — fix preserves system uptime while warning the operator"
+    },
+    "PA-503": {
+      "original_verdict": "confirmed/high (5 detection methods dead in main.py)",
+      "reverification_verdict": "CONFIRMED — exact grep counts verified",
+      "evidence": [
+        "grep on main.py for 5 detection names: 0 matches for live_orders_silent / exposure_near_cap / position_reconcile_mismatch / account_position_mismatch / _verify_oanda_account_consistency / _check_live_health_alerts",
+        "grep on runner.py finds all 5 at expected line ranges: 877-941 (_verify_oanda_account_consistency), 972-1064 (_check_live_health_alerts), 1070-1094 (_maybe_reconcile_live_positions), 943-970 (_track_live_order_submissions), and all 4 alert types in _ALERT_LEVEL_BY_TYPE (1377-1381)"
+      ],
+      "additional_observation": "PA-503 combined with SE-001 (RE-505 actually still standing) means the live anomaly detection DEAD path is plausibly REALIZED on 5/30 and 5/31, not just theoretical",
+      "criticism": "summary correctly flags PA-503 as HIGH and lists in must_fix"
+    },
+    "PA-504": {
+      "original_verdict": "confirmed/medium",
+      "reverification_verdict": "CONFIRMED (code-level semantics issue, low operational impact)",
+      "evidence": "email_notifier.py:386-391 has 'escape_hatch': 0.0 in _EMAIL_THROTTLE_INTERVAL_SEC; combined with _should_throttle logic causes throttle=never effective for escape_hatch",
+      "criticism": "Severity medium is appropriate — does not affect happy-path runtime"
+    },
+    "PA-505": {
+      "original_verdict": "confirmed/medium",
+      "reverification_verdict": "CONFIRMED",
+      "evidence": "grep 'GlobalRiskSupervisor' in main.py: 1 match (comment-only at line 145 noting it's unused). grep '_ALERT_LEVEL_BY_TYPE' in trading_platform/: 1 file (runner.py only)",
+      "criticism": "Severity medium is appropriate — current alert paths in main.py use hardcoded levels with limited types. Risk is forward-looking (additional alert types added later)"
+    },
+    "PA-506": {
+      "original_verdict": "confirmed/medium (StrategyLifecycle dead code)",
+      "reverification_verdict": "PARTIALLY_CONFIRMED — finding overstates 'wire 0 import' claim",
+      "evidence": [
+        "grep 'StrategyLifecycle' in trading_platform/: 1 file only (lifecycle.py itself) — production code 0 imports",
+        "But: grep in tests/: hits tests/unit/test_phase3_platform.py — there IS a unit test (Phase 3 platform test). This contradicts finding.evidence claim 'main.py / runner.py / forward_test.py / loader.py / worker.py で 0 件' which is true BUT the broader claim that 'StrategyLifecycle FSM の参照は本モジュール内のみ' is FALSE if interpreted as 'no consumer whatsoever'"
+      ],
+      "criticism": "The dead-code finding is substantively correct (no production wiring), but the surface-level claim 'wired nowhere' could be tightened. Severity medium remains appropriate"
+    },
+    "PA-507": {
+      "original_verdict": "confirmed/medium (helper partial-failure dead-path)",
+      "reverification_verdict": "CONFIRMED but reproduction conditions rare (requires Redis-down + Gate rejection collision)",
+      "evidence": "code at main.py:235-248 verified — helper logs exception and returns without resetting flag",
+      "criticism": "Severity medium appropriate"
+    },
+    "PA-508": {
+      "original_verdict": "confirmed/low (OANDA-side restoration missing in main.py)",
+      "reverification_verdict": "CONFIRMED",
+      "evidence": "grep '_restore_all_positions' in main.py: 0 matches; in runner.py: line 731-749 exists; main.py:505-515 explicit PA-103 warning text confirmed by re-reading",
+      "criticism": "Severity low appropriate (already documented via PA-103 warning)"
+    },
+    "RE-501": {
+      "original_verdict": "confirmed/high (PTRC-Post unwired in UnifiedRunner)",
+      "reverification_verdict": "CONFIRMED EXACTLY AS DESCRIBED",
+      "evidence": [
+        "grep 'PostTradeRiskControl|ptrc_post|PostTrade' in trading_platform/core/unified_runner/: 0 matches across all files (runner.py / strategy_slot.py / risk_supervisor.py)",
+        "grep same in main.py: lines 915-958 confirm: PostTradeRiskControl instantiated, ptrc_post=self._ptrc_post injected to coordinator",
+        "coordinator.py:521 await self._run_post_trade_risk() exists in main.py path only"
+      ],
+      "criticism": "Severity high warranted given Level 3 compound KS chain is structurally dead in production"
+    },
+    "RE-502": {
+      "original_verdict": "confirmed/medium",
+      "reverification_verdict": "CONFIRMED",
+      "evidence": "circuit_breaker.py CircuitBreaker / KillSwitch classes only used in main.py:893-908; absent in runner.py",
+      "criticism": "Severity medium appropriate"
+    },
+    "RE-503": {
+      "original_verdict": "confirmed/medium (LatencyMonitor unwired)",
+      "reverification_verdict": "CONFIRMED",
+      "evidence": "LatencyMonitor only wired through ExecutionCoordinator (main.py path)",
+      "criticism": "Severity medium appropriate"
+    },
+    "RE-504": {
+      "original_verdict": "confirmed/medium (RetryManager unwired)",
+      "reverification_verdict": "CONFIRMED",
+      "evidence": "retry_manager.py docstring documents 'submit_with_retry() は本番 LIVE 経路では呼ばれていない'",
+      "criticism": "Severity medium appropriate"
+    },
+    "RE-505": {
+      "original_verdict_in_summary": "INVALIDATED via weekend log suppression spec",
+      "reverification_verdict": "INVALIDATION_REJECTED — finding stands at HIGH (CRITICAL upgrade arguable)",
+      "evidence_against_invalidation": [
+        "(1) unified_runner.20260529.stderr.log covers 5/30 with 32795 log entries (NOT suppressed). Audit log kill_switch_activated on 5/30 02:49 has 0 matching entries in this file. The audit log entry must have come from a DIFFERENT process",
+        "(2) unified_runner.20260531.stderr.log is active continuously starting 10:10:30Z including 23:20:17Z candle fetch. Audit log kill_switch_activated at 23:21:50Z has 0 matching entries in this file. 5/31 23:21 UTC is AFTER Sunday 22:00 UTC reopen — outside the documented suppression window",
+        "(3) In UnifiedRunner code path: PortfolioSnapshot.available_margin = account_info.available_margin (risk_supervisor.py:862) — comes from OANDA broker ~298k. The 1_000_000 default ONLY exists in settings.py:130 (PlatformSettings) and coordinator.py:62 (Coordinator parameter), both used by main.py path. UnifiedRunner cannot produce available_margin=1000000 because account_info.balance fallback is 300_000.0 (strategy_slot.py:540)",
+        "(4) Therefore: the audit log entries demonstrably came from a non-UnifiedRunner process. Hypothesis: main.py running with PLATFORM_ALLOW_MAIN_PRODUCTION_LIVE escape hatch (likely in dev/research mode, not literally LIVE) or a stale dev-side coordinator process"
+      ],
+      "weakened_part_of_original_finding": "RE-505 originally suggested 'main.py standalone production' but the simpler hypothesis is 'main.py running concurrently with UnifiedRunner, possibly in paper or research mode, with default 1M balance'. Either way, dual runner risk is real",
+      "criticism": "summary's retraction relied on misinterpretation. The week-end log suppression spec is REAL (CLAUDE.md confirmed) but does not cover the specific time windows of these audit entries"
+    },
+    "RE-506": {
+      "original_verdict": "confirmed/medium (EUR_JPY trade_id=333 16x alerts)",
+      "reverification_verdict": "TIME-BOXED CONFIRMATION — would require log inspection of position_reconcile_mismatch entries today; not fully re-verified in scope",
+      "evidence": "Original finding cites logs/unified_runner.20260531.stderr.log timestamps",
+      "criticism": "accepted as-is for now"
+    },
+    "RE-507": {
+      "original_verdict": "confirmed/medium",
+      "reverification_verdict": "CONFIRMED",
+      "evidence": "trading_platform/core/models/risk.py:204-207 still shows 0.05 with 'A phase' TODO",
+      "criticism": "Severity medium appropriate"
+    },
+    "RE-508": {
+      "original_verdict_in_summary": "HIGH (upgraded from medium)",
+      "reverification_verdict": "CONFIRMED EXACTLY",
+      "evidence": [
+        "audit_2026-05-30.jsonl line 1: kill_switch_activated at 02:49:32.023654Z reason=daily_realized_loss_exceeded daily_realized_pnl_total=-11000.0 limit_jpy=-10000.0",
+        "audit_2026-05-30.jsonl line 12: kill_switch_activated at 07:48:05.611281Z SAME reason SAME pnl SAME limit",
+        "5h 0m 33s gap, identical reason — indicates restart-only release contract is broken by daily_realized_pnl_jpy persistence in state.json (REV-1 contract violation)"
+      ],
+      "criticism": "Summary correctly upgraded to HIGH; finding is exactly as described"
+    },
+    "RE-509": {
+      "original_verdict": "confirmed/medium",
+      "reverification_verdict": "CONFIRMED (latent risk for SHORT strategies)",
+      "evidence": "ptrc.py:783-812 sums quantity without direction",
+      "criticism": "Severity medium appropriate"
+    },
+    "RE-510": {
+      "original_verdict": "confirmed/low (LatencyMonitor._pending leak)",
+      "reverification_verdict": "CONFIRMED (gated by RE-503 being fixed first)",
+      "criticism": "Severity low appropriate"
+    },
+    "RE-511": {
+      "original_verdict": "confirmed/medium",
+      "reverification_verdict": "CONFIRMED at the structural level",
+      "criticism": "accepted"
+    },
+    "RE-512": {
+      "original_verdict": "confirmed/medium",
+      "reverification_verdict": "CONFIRMED",
+      "criticism": "accepted"
+    },
+    "RE-513": {
+      "original_verdict": "confirmed/low",
+      "reverification_verdict": "CONFIRMED",
+      "criticism": "accepted"
+    },
+    "RE-514": {
+      "original_verdict": "confirmed/low",
+      "reverification_verdict": "CONFIRMED",
+      "criticism": "accepted"
+    },
+    "RE-515": {
+      "original_verdict": "confirmed/info",
+      "reverification_verdict": "CONFIRMED",
+      "criticism": "accepted"
+    }
+  },
+
+  "summary_corrections_needed": [
+    {
+      "id": "CORR-001",
+      "priority": "HIGH",
+      "section": "summary L19-22, L25-31, L47, L55-65, L156-161, L178",
+      "current_text": "RE-505 invalidated, CC-001 retracted, CRITICAL count = 0",
+      "required_change": "Re-open RE-505 at HIGH (CRITICAL recommended) and CC-001. Replace the 'weekend log suppression' justification with: 'Weekend log suppression spec (CLAUDE.md Saturday 22:00 UTC - Sunday 22:00 UTC) is documented but does not apply to the 5/30 02:49 / 07:48 UTC or 5/31 23:21 UTC events. UnifiedRunner stderr (unified_runner.20260529.stderr.log + unified_runner.20260531.stderr.log) is confirmed actively logging during these windows but does not contain matching kill_switch_activated or ptrc_rejected entries. The audit_<date>.jsonl entries with available_margin=1000000 demonstrably originate from a non-UnifiedRunner process. Recommended action: add PID + process_name to JsonlAuditWriter (RE-505 recommendation c) and conduct file-locking-based exclusive startup check.'",
+      "evidence_basis": "see errors_found_in_summary.SE-001"
+    },
+    {
+      "id": "CORR-002",
+      "priority": "MEDIUM",
+      "section": "summary L167 (CC-003)",
+      "current_text": "6 件の HIGH (PA-503/505/506, RE-501/502/503/504, DE-501/505, DM-501)",
+      "required_change": "Rewrite to '6+ 件の HIGH/MEDIUM (HIGH: PA-503, RE-501, DE-501/505, DM-501; MEDIUM: PA-505, PA-506, RE-502, RE-503, RE-504)' for severity consistency",
+      "evidence_basis": "see errors_found_in_summary.SE-002"
+    },
+    {
+      "id": "CORR-003",
+      "priority": "LOW",
+      "section": "summary L79 (PA-501 修正コスト)",
+      "current_text": "PA-501 修正コスト: 4 行",
+      "required_change": "Clarify as '4 行のフラグ・リセット (+ 2 ブロック 計 10 行のコメント)'",
+      "evidence_basis": "see errors_found_in_summary.SE-003"
+    }
+  ],
+
+  "additional_observations": [
+    {
+      "id": "OBS-001",
+      "topic": "UnifiedRunner does NOT write ptrc_rejected to audit log",
+      "finding": "strategy_slot.py:658 emits logger.warning('ptrc_rejected') to stderr only. It does NOT call audit_logger.record(). The audit log entries come solely from ptrc._fire_ptrc_audit() module-level helper which uses the global _audit_logger set in runner.py:487.",
+      "implication": "Since _fire_ptrc_audit IS called from ptrc.evaluate() (line 281, 321, 402), audit log entries SHOULD appear when UnifiedRunner processes a PTRC rejection. The 0-match in unified_runner.20260529.stderr.log strongly suggests the PTRC evaluations on 5/30 02:49 did NOT go through UnifiedRunner at all. This further strengthens the dual-runner hypothesis."
+    },
+    {
+      "id": "OBS-002",
+      "topic": "5/30 was Saturday (weekend window calculation)",
+      "finding": "5/30/2026 is Saturday. Per CLAUDE.md weekend suppression spec, OANDA market closes Saturday 22:00 UTC. The 02:49 UTC and 07:48 UTC events on 5/30 are 14h+ BEFORE the closure window. They cannot be suppressed by this spec.",
+      "implication": "The summary's retraction conflates 'weekend' (Sat-Sun calendar) with the specific 24h suppression window 'Sat 22:00 - Sun 22:00 UTC'. These are different concepts."
+    },
+    {
+      "id": "OBS-003",
+      "topic": "DE-505 (now folded into DE-501) fix touched alerting_rules.yml",
+      "finding": "git diff shows deploy/prometheus/alerting_rules.yml updated to mark DE-503 ADVISORY as 'DE-501 修正済'. This may require operator awareness to re-verify alerting routing",
+      "implication": "informational only — fix is correct"
+    },
+    {
+      "id": "OBS-004",
+      "topic": "PA-506 minor evidence overstatement",
+      "finding": "PA-506 finding claims 'StrategyLifecycle 参照は本モジュール内のみ (1 ファイル)' but tests/unit/test_phase3_platform.py imports it",
+      "implication": "Substantively correct (no PRODUCTION wiring) but textual claim is slightly imprecise. Suggest tightening to 'no production wiring; only unit test in test_phase3_platform.py'"
+    }
+  ],
+
+  "test_execution_log": {
+    "command": ".venv/Scripts/python.exe -m pytest tests/integration/test_pa501_lifecycle_flag_reset.py tests/integration/test_pa502_notify_email_empty_to_subscribe_gate.py -v",
+    "result": "10 passed in 1.61s",
+    "tests_individual_status": [
+      "test_pa501_lifecycle_flag_reset.py::test_stop_resets_lifecycle_flags PASSED",
+      "test_pa501_lifecycle_flag_reset.py::test_rollback_stop_resets_lifecycle_flags PASSED",
+      "test_pa501_lifecycle_flag_reset.py::test_stop_start_cycle_keeps_eventbus_alive PASSED",
+      "test_pa501_lifecycle_flag_reset.py::test_stop_start_cycle_restarts_event_bus_running PASSED",
+      "test_pa502_notify_email_empty_to_subscribe_gate.py::test_helper_does_not_set_started_when_notify_email_to_empty PASSED",
+      "test_pa502_notify_email_empty_to_subscribe_gate.py::test_helper_logs_error_when_notify_email_to_empty PASSED",
+      "test_pa502_notify_email_empty_to_subscribe_gate.py::test_risk_alert_subscribe_not_registered_when_notify_email_to_empty PASSED",
+      "test_pa502_notify_email_empty_to_subscribe_gate.py::test_publish_after_helper_with_empty_to_does_not_invoke_email PASSED",
+      "test_pa502_notify_email_empty_to_subscribe_gate.py::test_helper_normal_path_with_valid_notify_email_to PASSED",
+      "test_pa502_notify_email_empty_to_subscribe_gate.py::test_helper_notify_email_disabled_still_starts PASSED"
+    ]
+  },
+
+  "conclusion": {
+    "fixes_quality": "HIGH — PA-501/502/DE-501 are correctly applied and adequately regression-tested",
+    "summary_quality": "MIXED — most findings are accurately documented and severity-classified, but the RE-505/CC-001 retraction is unsafe and based on a misapplication of the weekend log suppression spec",
+    "main_recommendation": "REOPEN RE-505 at HIGH (CRITICAL recommended) and CC-001. Conduct file-locking based exclusive startup check (RE-505 recommendation c) immediately. Investigate why audit_log entries exist on dates/times when UnifiedRunner stderr proves it was running but emitted no matching events — this is the smoking gun for a second writer process.",
+    "verification_completeness": "Time-boxed within 20 min budget. PA-501/502/DE-501 fixes verified in code and tests. PA-503/RE-501/RE-508 high-severity findings re-confirmed by grep. RE-505 retraction empirically refuted. Items not re-verified due to scope: RE-506 (recent stderr inspection), parts of RE-511 (cancel_open_orders failure paths)."
+  }
+}
