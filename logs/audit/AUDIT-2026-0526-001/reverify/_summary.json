@@ -1,0 +1,71 @@
+{
+  "audit_id": "AUDIT-2026-0526-001",
+  "phase": "phase2.5_second_team_empirical_reverification",
+  "date": "2026-05-26",
+  "method": "専門家7名が引用file:lineを実コードで再検証+定量主張を実測再現+platform-architectがhigh群を独立クロス検証+親による機械grep三角測量",
+  "verdict_by_agent": {
+    "risk-execution-engineer": {"confirmed": 5, "adjusted": 0, "refuted": 0},
+    "data-engineer": {"confirmed": 2, "adjusted": 1, "refuted": 0},
+    "devops-monitor": {"confirmed": 5, "adjusted": 3, "refuted": 0},
+    "quant-analyst": {"confirmed": 5, "adjusted": 0, "refuted": 0},
+    "code-safety-reviewer": {"confirmed": 5, "adjusted": 1, "refuted": 0},
+    "qa-tester": {"confirmed": 3, "adjusted": 0, "refuted": 2},
+    "platform-architect": {"confirmed": 3, "adjusted": 0, "refuted": 0}
+  },
+  "corrections": [
+    {
+      "id": "DE-201",
+      "change": "high -> medium",
+      "reason": "根拠戦略 ATLAS-2026-0508-069 は execution_mode=paper かつ 2026-05-20 demote 済みで Live でない。実Live22戦略の最大EWM period=100(warmup2000でk=20収束)、period200の唯一例0511-059はSMA。現Live経路にtrading-affectingな高period EMA戦略は皆無。コード欠陥自体は実在。",
+      "verified_by": ["data-engineer", "platform-architect", "parent_grep"],
+      "evidence": ["strategies/imported/ATLAS-2026-0508-069/runner_config.json (execution_mode=paper,_demoted_at=2026-05-20)", "logs/unified_state/ATLAS-2026-0508-069.state.json"]
+    },
+    {
+      "id": "DM-204",
+      "change": "high 維持 / 主張訂正",
+      "reason": "FxKillSwitchTriggered は本番で発火する(runner.py:1087-1093 で GlobalRiskSupervisor(metrics=self._metrics) 注入→risk_supervisor.py:1123 inc_kill_switch_triggered)。dead なのは module-singleton 経由の FxCircuitBreakerTriggered(fx_circuit_breaker_triggered_total) と FxPtrcRejectSpike(fx_ptrc_reject_total) の2件。fx_fill_total は実際 fx_fills_total で inc_fill 呼出元ゼロ。",
+      "verified_by": ["devops-monitor", "platform-architect", "parent_grep"],
+      "evidence": ["runner.py:1087-1093", "risk_supervisor.py:1122-1123", "runner.py set_metrics_collector=0件"]
+    },
+    {
+      "id": "QT-202",
+      "change": "medium -> refuted",
+      "reason": "因果分析が誤り。_unsafe_static_in_live は OANDA_ENVIRONMENT=='live' のみ True(ptrc.py:223-226)。テストでは未設定で RE-001 failsafe 不発動。xfail は合成データでシグナル未発生が原因で RE-001 と無関係。fixture乖離の副次問題は実在するが medium は過大。",
+      "verified_by": ["qa-tester"],
+      "evidence": ["ptrc.py:223-226"]
+    },
+    {
+      "id": "QT-205",
+      "change": "low -> refuted (対応済み)",
+      "reason": "conftest.py:51 に os.environ.setdefault('STRICT_SKIP','1')(QT-F-01恒久対策)が既存でデフォルト有効。前提解消済みの重複登録。",
+      "verified_by": ["qa-tester"],
+      "evidence": ["tests/conftest.py:51"]
+    },
+    {
+      "id": "DM-208",
+      "change": "informational(却下) -> low に復帰",
+      "reason": "コメントdriftは実在(漏れは position_mismatch/live_anomaly の2種。position_reconcile_mismatch は live_anomaly に集約のため3種ではない)。devil-advocate の却下は過剰、low で記録すべき。",
+      "verified_by": ["devops-monitor"],
+      "evidence": ["metrics.py:356-362", "email_notifier.py:294-296"]
+    }
+  ],
+  "minor_inaccuracies_conclusion_unchanged": [
+    "QA-201: 誤発火率 実測504/606(83.2%) vs 主張517/606(85.3%)。境界-0.5に40件密集+commit間戦略変更が差因。結論不変",
+    "QA-202: 緩和機構 EFFECTIVE_WEIGHT_FLOOR=0.70(膨張上限1.43x)の記述欠落",
+    "RE-201: record_close 実呼出は1689(引用1675はif行)。レンジ内で実質正確",
+    "QT-204: メソッド名 _restore_all_positions() は不在(実体は initialize() 内)。本質は正しい",
+    "QA-202: WFA関数引用 1718->1714 の軽微オフセット"
+  ],
+  "final_severity_after_reverification": {
+    "critical": 0,
+    "high": 2,
+    "high_ids": ["RE-201", "DM-204"],
+    "medium": 10,
+    "low": 21,
+    "refuted_or_invalid": 2,
+    "refuted_ids": ["QT-202", "QT-205"]
+  },
+  "final_must_fix": ["RE-201", "DM-204", "QA-201", "QT-204"],
+  "conditional_fix": ["DE-201 (高period EMA を Live 投入する前に要修正)"],
+  "overall_assessment": "初版レポートのコード引用・計算精度は高い(行ズレ数件のみ)。ただし影響度の前提に事実誤認2件(DE-201のLive稼働=実はpaper、DM-204のKillSwitch dead=実は生存)。RE-201/QA-201/QT-204 の妥当性は実測・三角測量で強化。high は 3->2 に確定。"
+}

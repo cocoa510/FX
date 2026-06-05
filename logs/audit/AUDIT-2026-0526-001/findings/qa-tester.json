@@ -1,0 +1,82 @@
+{
+  "agent": "qa-tester",
+  "audit_id": "AUDIT-2026-0526-001",
+  "target_commit": "dd2dd82",
+  "audit_date": "2026-05-26",
+  "summary": "テスト網羅性・pytest.xfail濫用・サイレントドロップの調査。INC-2026-0526-001（幻エクスポージャー）に関する4サブインシデントは全て専用テストで適切にカバーされており回帰防護は機能している。主な問題はE2Eフローテストの条件付きアサーション（シグナル未発生時に約定・ポジション経路が無テストになる）と、統合テストのPTRCフィクスチャがStaticConverterを使用しているため非JPY戦略でRE-001フェイルセーフが発動しPTRCビジネスロジック到達前にxfail化する問題。runner.pyのmulti-slot claimed_trade_ids共有ループ自体の統合テストも欠如。これらはcriticalには該当しないが、medium/low対応が推奨される。",
+  "inc_coverage": {
+    "INC-2026-0526-001_dead_path_1_1": "tests/unit/test_inc0526_main_audit_wiring.py — TradingPlatform.__init__ の AuditLogger 配線を契約テスト化済み（カバー済み）",
+    "INC-2026-0526-001_dead_path_1_2": "tests/unit/test_inc0526_killswitch_audit.py — KillSwitch全発動経路のAuditLogger記録を5テストで検証済み（カバー済み）",
+    "INC-2026-0526-001_dead_path_1_3": "tests/unit/test_inc0526_supervisor_reject_audit.py — GlobalRiskSupervisor.can_open_position全REJECT経路のAuditEntry記録を8テストで検証済み（カバー済み）",
+    "INC-2026-0526-001_phantom_exposure": "tests/unit/test_strategy_slot_restore_position_mismatch.py — claimed_trade_ids排他制御・非タグトレード非採用・ペーパーモードスキップを4シナリオで検証済み（カバー済み）"
+  },
+  "findings": [
+    {
+      "id": "QT-201",
+      "severity": "medium",
+      "confidence": "high",
+      "area": "integration/test_signal_flow.py",
+      "title": "E2Eフロー統合テストで約定・ポジション更新経路が条件付きアサーション（シグナル未発生時にサイレントスキップ）",
+      "description": "test_full_signal_to_fill_flow はシグナル生成・PTRC・約定・ポジション更新の全経路を検証する設計だが、line 290 の `if fills_completed > 0:` により atlas_strategy_001 が合成データでシグナル0件の場合に約定経路とポジション更新のアサーションがいずれも実行されない。pytest.xfail マーカーもなく、テスト結果は PASSED と表示されるため偽緑になる。また test_signal_generation_with_data (line 97) はバーカウントのみアサートし、テスト名が約束する「シグナル生成が動作すること」の確認（少なくとも1シグナル発生）を行っていない。",
+      "evidence": [
+        "tests/integration/test_signal_flow.py:287-292: コメント『シグナルが出ない場合もあるため』＋ if fills_completed > 0: assert len(positions) > 0",
+        "tests/integration/test_signal_flow.py:95-97: コメント『出ない場合もあり得る』＋ assert feature_store.bar_count == len(sample_ohlcv_df) のみ（シグナル発生を不確認）"
+      ],
+      "suggested_fix": "fill/position経路の検証は専用の発火確定フィクスチャ（test_xfail_scenario_signals.py と同様のシナリオデータ）を使用するか、シグナル未発生時に pytest.xfail() を明示的に呼び出す。test_signal_generation_with_data はシグナルを期待しないスモークテストとして名称変更するか、シナリオデータを使い少なくとも1シグナルを保証する。"
+    },
+    {
+      "id": "QT-202",
+      "severity": "medium",
+      "confidence": "high",
+      "area": "integration/test_atlas_top3_strategies.py",
+      "title": "統合テストのPTRCフィクスチャがStaticConverter使用のためRE-001フェイルセーフが非JPY戦略でPTRCビジネスロジック到達前にxfailを誘発",
+      "description": "test_atlas_top3_strategies.py line 229-230 の ptrc フィクスチャは `PreTradeRiskControl()` を引数なしで生成する（currency_converter=StaticConverter相当）。RE-101修正後の本番では OandaCurrencyConverter が注入されるが、このテストフィクスチャは修正を反映していない。EUR_USD・AUD_USD等の非JPY戦略でシグナルが出た場合、PTRCの通貨換算がStaticConverterのフェイルセーフREJECTを返し、ptrc_tested=False → pytest.xfail() (line 457-461) に到達する。この結果、Fat Finger / Exposure / Margin / Daily Loss チェックがテストされていないにもかかわらずxfailとして処理されテスト通過扱いになる。",
+      "evidence": [
+        "tests/integration/test_atlas_top3_strategies.py:229-230: @pytest.fixture def ptrc() -> PreTradeRiskControl: return PreTradeRiskControl() （currency_converter引数なし）",
+        "tests/integration/test_atlas_top3_strategies.py:457-461: if not ptrc_tested: pytest.xfail(... 合成データでシグナル未発生 ...)",
+        "trading_platform/core/risk_engine/ptrc.py: StaticConverter使用時にREJECT+RiskAlertを返す（RE-101のフェイルセーフ設計）"
+      ],
+      "suggested_fix": "ptrc フィクスチャに MockCurrencyConverter（全レート固定値を返す）を注入し、通貨換算エラーによるフェイルセーフREJECTがビジネスロジックテストと混在しないようにする。integration/conftest.py の ptrc フィクスチャ定義も同様に確認・修正する。"
+    },
+    {
+      "id": "QT-203",
+      "severity": "low",
+      "confidence": "high",
+      "area": "integration/test_atlas_top3_strategies.py",
+      "title": "test_no_crash_with_data の例外ハンドラが例外詳細を捨てるため障害診断が困難",
+      "description": "TestSignalGeneration.test_no_crash_with_data (lines 299-313) は generate_signal() の例外を try/except Exception で捕捉してカウンタをインクリメントするのみで、例外クラス名・メッセージ・スタックトレースを記録しない。テストは `assert errors == 0` により正しく失敗するが、失敗メッセージは「{errors}件のエラー発生」のみであり、どの戦略のどの処理で何が起きたかが失敗メッセージから読み取れない。",
+      "evidence": [
+        "tests/integration/test_atlas_top3_strategies.py:299-313: except Exception: errors += 1 （例外情報の記録なし）",
+        "tests/integration/test_atlas_top3_strategies.py:313: assert errors == 0, f'シグナル生成中に{errors}件のエラー発生'"
+      ],
+      "suggested_fix": "except Exception as e: errors.append(repr(e)) に変更し、assert len(errors) == 0, '\\n'.join(errors) でエラー内容を表示する。またはloggingで traceback.format_exc() を記録する。"
+    },
+    {
+      "id": "QT-204",
+      "severity": "medium",
+      "confidence": "high",
+      "area": "integration/ （runner.pyマルチスロット restore_positions）",
+      "title": "runner.py の multi-slot claimed_trade_ids 共有ループ（INC-2026-0526-001 R2修正箇所）に統合レベルのテストが存在しない",
+      "description": "INC-2026-0526-001（幻エクスポージャー）の根本修正は runner.py:491-496 の claimed_trade_ids set を複数 StrategySlot 間で共有し fan-out を防ぐ設計。ユニットテスト（test_strategy_slot_restore_position_mismatch.py）は StrategySlot 単体に mock 引数を渡した検証のみで、runner.py の _restore_all_positions() が複数スロットにまたがって実際に claimed_trade_ids を共有するループを統合レベルで実行するテストが存在しない。将来のリファクタリングでループが分割されると、ユニットテストはパスしたまま fan-out が再発する可能性がある。",
+      "evidence": [
+        "trading_platform/core/unified_runner/runner.py:488-497: claimed_trade_ids: set[str] = set() → forループで複数slotへ渡す",
+        "tests/unit/test_strategy_slot_restore_position_mismatch.py: StrategySlot単体テストのみ（runnerループの統合テストなし）",
+        "tests/integration/ に runner._restore_all_positions を複数スロットで呼ぶテストが存在しないことをGrepで確認"
+      ],
+      "suggested_fix": "tests/integration/test_restore_positions_multi_slot.py を新規作成し、2つ以上の LiveStrategySlot に同一 trade_id を持つ OANDA トレードリストを渡したときに1スロットのみが採用し残りが skipped となることを runner レベルで検証する。FaultOANDAClient またはモックブローカーを使用。"
+    },
+    {
+      "id": "QT-205",
+      "severity": "low",
+      "confidence": "medium",
+      "area": "tests/conftest.py",
+      "title": "STRICT_SKIP=1 ガバナンスがデフォルト無効のため存在チェック系スキップの自動検知がCI標準フローで機能しない",
+      "description": "conftest.py:365 の pytest_terminal_summary フックは `os.environ.get('STRICT_SKIP') == '1'` の場合のみスキップを警告・失敗扱いにする。test_no_existence_skip.py は _VIOLATION_PATTERNS によるパターンマッチングで多くの存在チェック系スキップを静的に検出するが、新たに追加されたスキップ文がパターンに合致しない場合は STRICT_SKIP=1 を明示しない限り CI 標準実行では素通りする。",
+      "evidence": [
+        "tests/conftest.py:365: if os.environ.get('STRICT_SKIP') == '1' and len(skipped) > 0: （デフォルト無効）",
+        "tests/integration/test_no_existence_skip.py: _VIOLATION_PATTERNS によるAST/grep静的検出（実行時スキップは別）"
+      ],
+      "suggested_fix": "CI パイプライン（GitHub Actions 等）の pytest 実行コマンドに STRICT_SKIP=1 を常時付与するか、conftest.py のデフォルトを有効にして whitelist で許容スキップを明示管理する。"
+    }
+  ]
+}

@@ -1,0 +1,657 @@
+{
+  "schema_version": "1.0",
+  "cluster": "C",
+  "cluster_name_ja": "FTS data and operations",
+  "validator": "devil-advocate",
+  "audit_id": "AUDIT-2026-0530-001",
+  "validated_at": "2026-05-30",
+  "target_commits": {
+    "fts_reviewed": "9998a7a",
+    "fts_head": "d1e73b1"
+  },
+  "triple_overlap_resolution": {
+    "subject": "OANDABroker metrics= not injected - production instrumentation dead path",
+    "canonical_finding": "DM-402",
+    "duplicates": [
+      "DE-402"
+    ],
+    "rationale": "DM-402 and DE-402 describe same defect (metrics= not passed in runner.py:343/main.py:335). forward_test.py:239 is DE-402-unique but not production LIVE path. DM-402 canonical. DE-402 is duplicate.",
+    "forward_test_py_status": "DE-402 forward_test.py:239 verified correct but not production LIVE path so no severity change.",
+    "confirmed_severity": "high"
+  },
+  "findings_review": [
+    {
+      "finding_id": "DE-401",
+      "source_agent": "data-engineer",
+      "claimed_severity": "high",
+      "verdict_severity": "medium",
+      "verdict": "severity_downgrade",
+      "fact_check": {
+        "discovery_py_124_159": "confirmed no period check",
+        "loader_py_430_534": "confirmed no period gate"
+      },
+      "adversarial_review": [
+        {
+          "type": "severity_downgrade",
+          "criticism": "bypass requires OS filesystem access or insider. Zero current harm in 22 LIVE strategies.",
+          "evidence": "post_fix_verification: warmup drift absent in 22 LIVE strategies",
+          "counter_proposal": "Downgrade to medium",
+          "adoption_level": "should_consider"
+        }
+      ],
+      "post_fix_defect_assessment": "confirmed as medium"
+    },
+    {
+      "finding_id": "DE-402",
+      "source_agent": "data-engineer",
+      "claimed_severity": "high",
+      "verdict_severity": "duplicate",
+      "verdict": "duplicate_of_DM-402",
+      "duplicate_of": "DM-402",
+      "adversarial_review": [
+        {
+          "type": "duplicate_declaration",
+          "criticism": "Identical defect to DM-402. DM-402 is canonical. DE-402 is duplicate.",
+          "adoption_level": "informational"
+        }
+      ],
+      "post_fix_defect_assessment": "handled under DM-402"
+    },
+    {
+      "finding_id": "DE-403",
+      "source_agent": "data-engineer",
+      "claimed_severity": "high",
+      "verdict_severity": "high",
+      "verdict": "confirmed_with_note",
+      "fact_check": {
+        "live_store_py_431_446": "age_sec=bar interval ~3600s for H1. Fact.",
+        "alerting_rules_yml_98_111": "max>60 for 3m fires constantly for H1. Mathematically certain.",
+        "live_store_comment_434": "live_store.py:434 states bar interval is intent. Conflicts with 60s threshold."
+      },
+      "adversarial_review": [
+        {
+          "type": "design_comment_vs_alert_threshold",
+          "criticism": "live_store.py:434 explicitly states bar interval is design intent producing ~3600s for H1. 60s threshold in alerting_rules is inconsistent from design.",
+          "evidence": "live_store.py:434 intent=bar interval. alerting_rules.yml:99 threshold=60s",
+          "counter_proposal": "Quick: alerting_rules.yml threshold >=7200s. Root: semantics change to current_time-last_bar_time on heartbeat.",
+          "adoption_level": "must_fix"
+        }
+      ],
+      "post_fix_defect_assessment": "confirmed incomplete DM-302 fix"
+    },
+    {
+      "finding_id": "DE-404",
+      "source_agent": "data-engineer",
+      "claimed_severity": "medium",
+      "verdict_severity": "medium",
+      "verdict": "confirmed",
+      "fact_check": {
+        "client_py_368_373": "submit_order metric only inside async with. TimeoutError drops metric.",
+        "client_py_497_528": "cancel_order alone has TimeoutError metric branch."
+      },
+      "adversarial_review": [
+        {
+          "type": "joint_fix_recommendation",
+          "criticism": "DE-404 and DM-403 share same root cause. Bundle with DM-402 PR.",
+          "adoption_level": "should_consider"
+        }
+      ],
+      "post_fix_defect_assessment": "confirmed"
+    },
+    {
+      "finding_id": "DE-405",
+      "source_agent": "data-engineer",
+      "claimed_severity": "medium",
+      "verdict_severity": "low",
+      "verdict": "severity_downgrade",
+      "fact_check": {
+        "quality_engine_py_736_786": "Friday 22:00 UTC fixed. DST not considered. Fact."
+      },
+      "adversarial_review": [
+        {
+          "type": "quantitative_impact",
+          "criticism": "DST impact ~32 H1 bars/year (52wk x 0.62 x 1bar). Holidays ~3 days. Total ~35 bars/year. Forced publish absorbs parity impact. Low harm.",
+          "evidence": "52 weeks x 0.62 = ~32 bars/year plus ~3 holiday bars",
+          "counter_proposal": "Downgrade to low. Defer zoneinfo migration.",
+          "adoption_level": "informational"
+        }
+      ],
+      "post_fix_defect_assessment": "confirmed as low-severity"
+    },
+    {
+      "finding_id": "DE-406",
+      "source_agent": "data-engineer",
+      "claimed_severity": "medium",
+      "verdict_severity": "medium",
+      "verdict": "confirmed_with_note",
+      "fact_check": {
+        "data_provider_py_300_373": "one-shot design confirmed",
+        "runner_py_1608_1631": "RE-305 uses periodic refire but DE-303 does not. Inconsistency fact."
+      },
+      "adversarial_review": [
+        {
+          "type": "fix_conflicts_with_DM-404",
+          "criticism": "DE-406 suggested fix (periodic refire in DE-303) worsens DM-404. DE-303 refiring every 30min collides with 12h throttle. Must resolve DESIGN-C-001 first.",
+          "evidence": "DE-406 fix adds periodic refire to DE-303 => DM-404 throttle collision guaranteed",
+          "counter_proposal": "Resolve DESIGN-C-001 first then decide DE-406 fix direction.",
+          "adoption_level": "should_consider"
+        }
+      ],
+      "post_fix_defect_assessment": "confirmed"
+    },
+    {
+      "finding_id": "DE-407",
+      "source_agent": "data-engineer",
+      "claimed_severity": "medium",
+      "verdict_severity": "medium",
+      "verdict": "confirmed",
+      "fact_check": {
+        "runner_py_1413": "MAX_WARMUP_BARS=5000 cap exists. Fact.",
+        "parity_test_dir": "tests/parity lacks asymmetric warmup test. Fact."
+      },
+      "adversarial_review": [
+        {
+          "type": "dependency_on_DE-401",
+          "criticism": "High period strategy cannot reach LIVE unless DE-401 bypass performed first. 22 LIVE strategies have zero high-period strategies currently. Test gap is future safety net.",
+          "evidence": "post_fix_verification: warmup drift absent in 22 LIVE strategies",
+          "counter_proposal": "Medium maintained. Implement alongside DE-401 fix.",
+          "adoption_level": "should_consider"
+        }
+      ],
+      "post_fix_defect_assessment": "not_a_post_fix_defect"
+    },
+    {
+      "finding_id": "DE-408",
+      "source_agent": "data-engineer",
+      "claimed_severity": "medium",
+      "verdict_severity": "medium",
+      "verdict": "confirmed_with_evidence_error",
+      "fact_check": {
+        "backfill_missing_exists": "FACT ERROR: CandleFetcher.backfill_missing() exists at candle_fetcher.py:416. DE-408 claim of no hits is incorrect.",
+        "data_provider_py_85": "Automatic integration from poll_latest does not exist. Core problem is correct."
+      },
+      "adversarial_review": [
+        {
+          "type": "fact_error_in_evidence",
+          "criticism": "candle_fetcher.py:416 implements backfill_missing. DE-408 evidence is factually incorrect. Core problem (no auto-integration from poll_latest) is correct and requires correction.",
+          "evidence": "candle_fetcher.py:416: async def backfill_missing. fault/test_oanda_reconnect_backfill.py tests it.",
+          "counter_proposal": "Correct evidence. Minimum fix: raise CEILING to 5000.",
+          "adoption_level": "should_consider"
+        }
+      ],
+      "post_fix_defect_assessment": "confirmed core problem correct but evidence partially inaccurate"
+    },
+    {
+      "finding_id": "DE-409",
+      "source_agent": "data-engineer",
+      "claimed_severity": "low",
+      "verdict_severity": "low",
+      "verdict": "confirmed",
+      "fact_check": {
+        "live_store_py_617_625": "cache_valid uses last_ts+len only. Head timestamp unchecked. Fact."
+      },
+      "adversarial_review": [
+        {
+          "type": "reproduction_probability",
+          "criticism": "Trim with unchanged tail ts requires aux TF duplicate-second bar. Extremely rare. Cache invalidates correctly in normal operation. Low severity appropriate. 1-line fix.",
+          "adoption_level": "informational"
+        }
+      ],
+      "post_fix_defect_assessment": "not_a_post_fix_defect"
+    },
+    {
+      "finding_id": "DE-410",
+      "source_agent": "data-engineer",
+      "claimed_severity": "low",
+      "verdict_severity": "low",
+      "verdict": "confirmed_with_note",
+      "fact_check": {
+        "live_store_py_215_219": "_last_primary_bar_time=None init. warmup and normal poll share same path. Fact."
+      },
+      "adversarial_review": [
+        {
+          "type": "de403_dependency",
+          "criticism": "DE-403 fix raising threshold to >=7200s would make warmup transition age_sec (H1 max ~3600s) fall below threshold, eliminating false FIRING. Fix DE-403 first then re-evaluate DE-410.",
+          "evidence": "DE-403 fix (A): threshold >=7200s. Warmup H1 age_sec max ~3600s below new threshold.",
+          "counter_proposal": "Fix DE-403 first then re-evaluate.",
+          "adoption_level": "informational"
+        }
+      ],
+      "post_fix_defect_assessment": "confirmed regression_of DM-302 correct"
+    },
+    {
+      "finding_id": "QT-401",
+      "source_agent": "qa-tester",
+      "claimed_severity": "medium",
+      "verdict_severity": "medium",
+      "verdict": "confirmed",
+      "fact_check": {
+        "test_pa303_126_182": "Test builds its own MagicMock and calls record/publish itself. main.py:462-505 never executed. RE-201 structural false-green is fact.",
+        "main_py_gate_rejection_path": "main.py:462-505 implements StrategyLoadError handling for live_mode=True. Not exercised."
+      },
+      "adversarial_review": [
+        {
+          "type": "false_green_scope",
+          "criticism": "Only main.py path (PLATFORM_ALLOW_MAIN_PRODUCTION_LIVE=1 escape hatch) untested. Normally blocked by PA-103. Actual harm probability low. Medium appropriate.",
+          "evidence": "main.py:441-444: escape hatch path dead-path coverage is intent",
+          "counter_proposal": "Elevate to integration test calling TradingPlatform.initialize() in minimal config.",
+          "adoption_level": "should_consider"
+        }
+      ],
+      "post_fix_defect_assessment": "not_a_post_fix_defect"
+    },
+    {
+      "finding_id": "QT-402",
+      "source_agent": "qa-tester",
+      "claimed_severity": "medium",
+      "verdict_severity": "low",
+      "verdict": "severity_downgrade",
+      "fact_check": {
+        "data_provider_py_300_310": "_reset_poll_failure_state sets _poll_alert_active[key]=False. Re-fire logic correctly implemented. Test gap only."
+      },
+      "adversarial_review": [
+        {
+          "type": "test_gap_priority",
+          "criticism": "Implementation correct. Re-fire logic exists. DE-406 resolution may change test requirements. Low appropriate.",
+          "evidence": "data_provider.py:310: _poll_alert_active[key]=False enabling re-fire",
+          "counter_proposal": "Downgrade to low. Add test after DE-406 decision.",
+          "adoption_level": "informational"
+        }
+      ],
+      "post_fix_defect_assessment": "not_a_post_fix_defect"
+    },
+    {
+      "finding_id": "QT-403",
+      "source_agent": "qa-tester",
+      "claimed_severity": "low",
+      "verdict_severity": "low",
+      "verdict": "confirmed",
+      "adversarial_review": [
+        {
+          "type": "flaky_risk",
+          "criticism": "Current tests pass. Future runner changes could cause silent PASS via try/except Exception: pass. Low appropriate.",
+          "adoption_level": "informational"
+        }
+      ],
+      "post_fix_defect_assessment": "not_a_post_fix_defect"
+    },
+    {
+      "finding_id": "QT-404",
+      "source_agent": "qa-tester",
+      "claimed_severity": "medium",
+      "verdict_severity": "medium",
+      "verdict": "confirmed_with_note",
+      "fact_check": {
+        "client_py_366_373": "submit_order metric inside async with only. TimeoutError drops. Same as DE-404.",
+        "submit_order_test_absent": "No submit_order instrumentation test in test_dm302. Fact."
+      },
+      "adversarial_review": [
+        {
+          "type": "ordering_dependency_on_DM-402",
+          "criticism": "DM-402 unfixed means broker._metrics=None so submit_order _record_api_metric early returns. QT-404 test addition must accompany DM-402 fix.",
+          "evidence": "DM-402: runner.py:343 no metrics= => broker._metrics=None",
+          "counter_proposal": "Fix DM-402 first then add QT-404 tests in same PR.",
+          "adoption_level": "should_consider"
+        }
+      ],
+      "post_fix_defect_assessment": "not_a_post_fix_defect"
+    },
+    {
+      "finding_id": "QT-405",
+      "source_agent": "qa-tester",
+      "claimed_severity": "low",
+      "verdict_severity": "low",
+      "verdict": "confirmed_minor",
+      "adversarial_review": [
+        {
+          "type": "risk_assessment",
+          "criticism": "Currently functional. Move make_sample_ohlcv to tests/helpers.py is low-cost root fix.",
+          "adoption_level": "informational"
+        }
+      ],
+      "post_fix_defect_assessment": "not_a_post_fix_defect"
+    },
+    {
+      "finding_id": "QT-406",
+      "source_agent": "qa-tester",
+      "claimed_severity": "medium",
+      "verdict_severity": "low",
+      "verdict": "severity_downgrade",
+      "fact_check": {
+        "test_de306_57_72": "test_friday_23_to_monday_00_pass_case exists providing unit-level partial coverage. End-to-end gap from test_pr16 removal is fact."
+      },
+      "adversarial_review": [
+        {
+          "type": "coverage_gap_impact",
+          "criticism": "Unit tests cover boundary values. End-to-end deletion is low risk when unit coverage exists.",
+          "counter_proposal": "Downgrade to low. Restore scenario to test_pr16_data_layer.py.",
+          "adoption_level": "informational"
+        }
+      ],
+      "post_fix_defect_assessment": "not_a_post_fix_defect"
+    },
+    {
+      "finding_id": "QT-407",
+      "source_agent": "qa-tester",
+      "claimed_severity": "low",
+      "verdict_severity": "low",
+      "verdict": "confirmed",
+      "adversarial_review": [
+        {
+          "type": "risk_realism",
+          "criticism": "Inadvertent autouse removal is rare. Adding deletion-forbidden comment to conftest.py is sufficient.",
+          "adoption_level": "informational"
+        }
+      ],
+      "post_fix_defect_assessment": "not_a_post_fix_defect"
+    },
+    {
+      "finding_id": "QT-408",
+      "source_agent": "qa-tester",
+      "claimed_severity": "low",
+      "verdict_severity": "low",
+      "verdict": "confirmed_minor",
+      "fact_check": {
+        "broker_gateway_407_410": "cancel_order: return await broker.cancel_order only. No BrokerUnavailableError wrapping. Fact."
+      },
+      "adversarial_review": [
+        {
+          "type": "exception_policy",
+          "criticism": "If StrategySlot catches only BrokerUnavailableError, cancel_order ConnectionError leaks. Document exception policy in docstring first.",
+          "adoption_level": "informational"
+        }
+      ],
+      "post_fix_defect_assessment": "not_a_post_fix_defect"
+    },
+    {
+      "finding_id": "QT-409",
+      "source_agent": "qa-tester",
+      "claimed_severity": "low",
+      "verdict_severity": "low",
+      "verdict": "confirmed_minor",
+      "adversarial_review": [
+        {
+          "type": "tz_naive_risk",
+          "criticism": "OANDA API returns ISO 8601 with timezone. tz-naive injection via normal path is rare. Low appropriate.",
+          "adoption_level": "informational"
+        }
+      ],
+      "post_fix_defect_assessment": "not_a_post_fix_defect"
+    },
+    {
+      "finding_id": "QT-410",
+      "source_agent": "qa-tester",
+      "claimed_severity": "medium",
+      "verdict_severity": "low",
+      "verdict": "severity_downgrade",
+      "adversarial_review": [
+        {
+          "type": "flaky_risk_quantification",
+          "criticism": "CPython sleep(0) x2 provides 2 coroutine switches. Sufficient for 1-await KillSwitch. No current flaky reports. Future risk hypothetical. Low appropriate.",
+          "adoption_level": "informational"
+        }
+      ],
+      "post_fix_defect_assessment": "not_a_post_fix_defect"
+    },
+    {
+      "finding_id": "DM-401",
+      "source_agent": "devops-monitor",
+      "claimed_severity": "LOW",
+      "verdict_severity": "low",
+      "verdict": "confirmed",
+      "fact_check": {
+        "email_notifier_778_783": "_LIVE_ANOMALY_LABELS missing 3 alert_types. Fact.",
+        "email_notifier_808": "Falls back to generic Live anomaly label. Triage impossible by subject. Fact."
+      },
+      "adversarial_review": [
+        {
+          "type": "impact_assessment",
+          "criticism": "alert_type is in body so info not lost. Subject filter inability is operational inconvenience not functional failure. 3-line fix. Joint with DM-405.",
+          "adoption_level": "should_consider"
+        }
+      ],
+      "post_fix_defect_assessment": "confirmed incomplete DM-306 completion"
+    },
+    {
+      "finding_id": "DM-402",
+      "source_agent": "devops-monitor",
+      "claimed_severity": "HIGH",
+      "verdict_severity": "high",
+      "verdict": "confirmed_canonical",
+      "fact_check": {
+        "runner_py_343_347": "OANDABroker without metrics=. Confirmed.",
+        "runner_py_205_208": "self._metrics exists. 3-line fix possible.",
+        "client_py_841_843": "if self._metrics is None: return skips all. Production completely dead.",
+        "main_py_335_339": "no metrics=. Confirmed."
+      },
+      "adversarial_review": [
+        {
+          "type": "3line_fix_structural_analysis",
+          "criticism": "3-line fix resolves yet missed as DM-302 post_fix_defect. Root cause: test_dm302 uses mock and cannot detect production wiring omission (QT-404 blind spot). After fix add AST test. DE-402 is duplicate.",
+          "evidence": "runner.py:205-208: self._metrics exists. runner.py:343-347: no metrics=.",
+          "counter_proposal": "must_fix. Fix DM-402 and QT-404 in same PR with AST test.",
+          "adoption_level": "must_fix"
+        }
+      ],
+      "post_fix_defect_assessment": "confirmed post_fix_defect=true fully justified"
+    },
+    {
+      "finding_id": "DM-403",
+      "source_agent": "devops-monitor",
+      "claimed_severity": "LOW",
+      "verdict_severity": "low",
+      "verdict": "confirmed",
+      "fact_check": {
+        "client_py_700_727": "close_trade no _record_api_metric. Fact.",
+        "client_py_564_587": "get_trade no _record_api_metric. Fact."
+      },
+      "adversarial_review": [
+        {
+          "type": "close_trade_importance",
+          "criticism": "close_trade latency directly impacts fill-close delays and slippage. FxOandaApiLatencyHigh blind to close_trade. Bundle with DM-402 PR.",
+          "adoption_level": "should_consider"
+        }
+      ],
+      "post_fix_defect_assessment": "not_a_post_fix_defect"
+    },
+    {
+      "finding_id": "DM-404",
+      "source_agent": "devops-monitor",
+      "claimed_severity": "MEDIUM",
+      "verdict_severity": "medium",
+      "verdict": "confirmed",
+      "fact_check": {
+        "runner_py_1608_1631": "RE-305 publishes live_orders_silent at 30-multiples. Comment says notify until recovery. Fact.",
+        "email_notifier_349": "live_orders_silent throttle=43200s (12h). 30-min periodic refire suppressed. Mathematically certain."
+      },
+      "adversarial_review": [
+        {
+          "type": "design_conflict",
+          "criticism": "RE-305 continuous notification design conflicts with live_orders_silent 12h throttle introduced without cross-audit coordination. Also conflicts with DE-406. Option A (dedicated kind with throttle=0) is most consistent. Requires DESIGN-C-001 decision.",
+          "counter_proposal": "User decision first (DESIGN-C-001). Recommend option A: separate kind oanda_poll_error_escalation.",
+          "adoption_level": "should_consider"
+        }
+      ],
+      "post_fix_defect_assessment": "confirmed 12h throttle invalidated RE-305 design"
+    },
+    {
+      "finding_id": "DM-405",
+      "source_agent": "devops-monitor",
+      "claimed_severity": "LOW",
+      "verdict_severity": "low",
+      "verdict": "confirmed",
+      "fact_check": {
+        "email_notifier_827_840": "Response procedure text inappropriate for OANDA connection loss (shows phantom exposure steps). Fact."
+      },
+      "adversarial_review": [
+        {
+          "type": "joint_fix_with_DM-401",
+          "criticism": "DM-401 and DM-405 can be fixed in same commit. alert_type branch in _build_live_anomaly_message resolves both.",
+          "adoption_level": "informational"
+        }
+      ],
+      "post_fix_defect_assessment": "confirmed"
+    },
+    {
+      "finding_id": "DM-406",
+      "source_agent": "devops-monitor",
+      "claimed_severity": "LOW",
+      "verdict_severity": "low",
+      "verdict": "confirmed_minor",
+      "adversarial_review": [
+        {
+          "type": "phase2_scope",
+          "criticism": "Prometheus+Grafana is Phase 2 (CLAUDE.md). Email-only Phase 1 acceptable. DM-402 fix enables Prometheus counters as byproduct. alerting_rules additions deferred.",
+          "evidence": "CLAUDE.md: monitoring = Prometheus + Grafana (Phase 2)",
+          "adoption_level": "informational"
+        }
+      ],
+      "post_fix_defect_assessment": "not_a_post_fix_defect"
+    },
+    {
+      "finding_id": "DM-407",
+      "source_agent": "devops-monitor",
+      "claimed_severity": "LOW",
+      "verdict_severity": "low",
+      "verdict": "confirmed_minor",
+      "adversarial_review": [
+        {
+          "type": "comment_structure",
+          "criticism": "Managing kind list in comments is root problem. Consolidating to _RISK_ALERT_KINDS is structural solution. Replace metrics.py comment with single-line reference to _RISK_ALERT_KINDS.",
+          "adoption_level": "informational"
+        }
+      ],
+      "post_fix_defect_assessment": "not_a_post_fix_defect"
+    },
+    {
+      "finding_id": "DM-408",
+      "source_agent": "devops-monitor",
+      "claimed_severity": "LOW",
+      "verdict_severity": "low",
+      "verdict": "confirmed_as_documentation_issue",
+      "fact_check": {
+        "metrics_py_838_850": "arg named strategy_id but live_store:439 passes primary_tf. Mismatch fact."
+      },
+      "adversarial_review": [
+        {
+          "type": "de403_design_dependency",
+          "criticism": "DE-403 fix may redesign LiveFeatureStore to inject strategy_id via StrategySlot, naturally resolving DM-408. Standalone fix may conflict. Fix DE-403 first.",
+          "adoption_level": "informational"
+        }
+      ],
+      "post_fix_defect_assessment": "not_a_post_fix_defect"
+    },
+    {
+      "finding_id": "DM-409",
+      "source_agent": "devops-monitor",
+      "claimed_severity": "INFO",
+      "verdict_severity": "info",
+      "verdict": "confirmed_minor",
+      "adversarial_review": [
+        {
+          "type": "ssrf_context",
+          "criticism": "INFO severity appropriate. Streamlit for local/intranet. Env var admin-set. Phase 2 authentication is right time for whitelist validation.",
+          "adoption_level": "informational"
+        }
+      ],
+      "post_fix_defect_assessment": "not_a_post_fix_defect"
+    }
+  ],
+  "cluster_summary": {
+    "total_findings_reviewed": 29,
+    "duplicates_resolved": 1,
+    "effective_findings": 28,
+    "severity_adjustments": [
+      {
+        "finding_id": "DE-401",
+        "original": "high",
+        "adjusted": "medium",
+        "reason": "Zero current harm bypass requires OS filesystem access"
+      },
+      {
+        "finding_id": "DE-405",
+        "original": "medium",
+        "adjusted": "low",
+        "reason": "~35 bars/year only forced publish absorbs parity"
+      },
+      {
+        "finding_id": "QT-402",
+        "original": "medium",
+        "adjusted": "low",
+        "reason": "Implementation correct test gap only"
+      },
+      {
+        "finding_id": "QT-406",
+        "original": "medium",
+        "adjusted": "low",
+        "reason": "Unit test covers boundary values"
+      },
+      {
+        "finding_id": "QT-410",
+        "original": "medium",
+        "adjusted": "low",
+        "reason": "No current flaky reports hypothetical risk"
+      }
+    ],
+    "fact_errors_found": [
+      {
+        "finding_id": "DE-408",
+        "error": "grep backfill_missing no hits (absent) is incorrect. CandleFetcher.backfill_missing() exists at candle_fetcher.py:416.",
+        "corrected_fact": "backfill_missing implemented but auto-integration from poll_latest does not exist"
+      }
+    ],
+    "must_fix_findings": [
+      {
+        "finding_id": "DM-402",
+        "reason": "Production OANDA API instrumentation completely dead. 3-line fix: add metrics= to runner.py:343/main.py:335. DE-402 integrated as canonical.",
+        "blocking": true
+      },
+      {
+        "finding_id": "DE-403",
+        "reason": "FxFeatureStorestaleHigh constantly FIRING for H1/H4 strategies (threshold 60s vs H1 bar interval ~3600s). Quick fix: alerting_rules.yml threshold >=7200s."
+      }
+    ],
+    "should_consider_findings": [
+      "DE-401 (loader.py gate)",
+      "DE-404 and DM-403 (timeout metric unification bundle with DM-402)",
+      "DE-406 (DE-303 periodic refire after DESIGN-C-001)",
+      "DE-407 (asymmetric warmup parity test)",
+      "DE-408 (raise CEILING or integrate backfill correct evidence)",
+      "QT-401 (integration test for main.py path)",
+      "QT-404 (submit_order test after DM-402)",
+      "DM-401 and DM-405 (email label and body text fix)",
+      "DM-403 (close_trade instrumentation bundle with DM-402)",
+      "DM-404 (RE-305 vs 12h throttle after DESIGN-C-001)"
+    ],
+    "informational_findings": [
+      "DE-409",
+      "DE-410",
+      "QT-402",
+      "QT-403",
+      "QT-405",
+      "QT-406",
+      "QT-407",
+      "QT-408",
+      "QT-409",
+      "DM-405",
+      "DM-406",
+      "DM-407",
+      "DM-408",
+      "DM-409"
+    ],
+    "design_decisions_required": [
+      {
+        "decision_id": "DESIGN-C-001",
+        "description": "Resolve conflict: RE-305 continuous notification design (fires every 30-multiples) vs live_orders_silent 12h throttle (user request 2026-05-29)",
+        "options": [
+          "A: Separate RE-305 path to dedicated kind oanda_poll_error_escalation with throttle=0",
+          "B: Change RE-305 design to send only 1 initial notification"
+        ],
+        "blocking_findings": [
+          "DM-404",
+          "DE-406"
+        ]
+      }
+    ]
+  }
+}

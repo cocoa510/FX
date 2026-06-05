@@ -1,0 +1,103 @@
+{
+  "session": "AUDIT-2026-0529-001",
+  "agent": "data-engineer",
+  "phase": "Phase 3/4 implementation",
+  "date": "2026-05-29",
+  "commit_status": "NOT committed — ユーザーレビュー待ち（指示により本セッションでは commit/push しない）",
+  "fixes": [
+    {
+      "id": "DE-303",
+      "severity": "high",
+      "type": "[fix:bug]",
+      "title": "SharedDataProvider.poll_latest silent failure → 連続失敗 RiskAlert 配線",
+      "files_modified": [
+        "trading_platform/core/unified_runner/data_provider.py",
+        "trading_platform/core/monitoring/email_notifier.py"
+      ],
+      "tests_added": [
+        "tests/fault/test_de303_poll_latest_failure_alert.py"
+      ],
+      "summary": "SharedDataProvider に _consecutive_poll_failures カウンタ + _poll_alert_active one-shot フラグを追加。閾値 POLL_FAILURE_ALERT_THRESHOLD=30 回連続失敗で RiskAlertEvent(alert_type='market_data_poll_failure', level=CRITICAL) を 1 回 publish し、成功でリセットする。EmailNotifier._RISK_ALERT_KINDS に 'market_data_poll_failure': 'live_anomaly' を追加し、900s throttle で連投抑制（DM-306 と同方針）。event_bus 未注入時は警告ログのみで継続（dev/テスト互換）。",
+      "verification": "新規 6 テスト PASS（閾値未満→無発火 / 閾値到達→1 件発火 / 失敗継続中→再発火なし / 成功でリセット / event_bus None でクラッシュなし / per-key 独立性）。既存テスト test_de101_quality_engine_production_wiring.py / test_no_dict_passing.py / test_data_quality* / test_email_notifier.py 全 PASS。Unit + Fault 1273 件 PASS。",
+      "prevention": "閾値到達まで silent failure だった経路が、運用者への Email 通知 + Prometheus 経由監視に統合された。"
+    },
+    {
+      "id": "DE-304",
+      "severity": "medium",
+      "type": "[fix:bug]",
+      "title": "poll_latest count=3 固定 → 動的算出で複数バー gap silent drop を緩和",
+      "files_modified": [
+        "trading_platform/core/unified_runner/data_provider.py"
+      ],
+      "tests_added": [
+        "tests/unit/test_de304_poll_dynamic_count.py"
+      ],
+      "summary": "poll_latest 内で count を `max(3, ceil((now - last_poll) / tf_sec) + 2)` に動的算出（[3, 200] にクランプ）。成功時のみ _last_poll_time を更新し、失敗時は更新しないことで backlog 推定が広がって救済される設計。最終バーのみを返す既存挙動は維持（多バー逐次配信は StrategySlot 側の状態保証ロジック変更を伴うため別タスク）。",
+      "verification": "新規 7 テスト PASS（初回 floor / 直後再 poll floor / 長時間 gap で 12 本 / 24h ブランクで ceiling=200 / 未知 TF で floor / per-key 独立性 / 失敗時 last_poll 非更新）。",
+      "prevention": "再起動直後や回線断 backlog 発生時、count=3 で OANDA レスポンスに最新バーが含まれない確率を構造的に低減。"
+    },
+    {
+      "id": "DE-306",
+      "severity": "medium",
+      "type": "[fix:bug]",
+      "title": "_count_weekend_seconds を OANDA 公式市場時間（金 22:00 UTC〜日 22:00 UTC）ベースに修正",
+      "files_modified": [
+        "trading_platform/data/quality/quality_engine.py",
+        "tests/unit/test_pr16_data_layer.py"
+      ],
+      "tests_added": [
+        "tests/unit/test_de306_weekend_seconds.py"
+      ],
+      "summary": "旧実装は『UTC 00:00 起点で土日全日』を閉鎖期間としていたため、金曜後半〜日曜深夜の H1/H4 バー判定で effective_gap が誤って大きく残るケースがあった（特に Fri 21:00 → Sun 22:00 OANDA open シナリオで誤 FAIL）。OANDA 公式市場時間ベースで各週末ウィンドウを構築し、区間との重なりを分単位精度で積算する実装に差し替えた。第 2 チーム検証で初期 finding の『金 23:00 → 月 00:00』シナリオは実態としては Sun 22:00 / 23:00 の H1 バー欠落（2h）を意味し FAIL が正解と判明したため、PR16 既存テスト 1 件を新仕様（OANDA Sun open 直後の H1 バー = effective_gap=0 PASS）に合わせて更新。",
+      "verification": "新規 11 テスト PASS（単一週末内 / 金 21→日 22 OANDA open / 金 23→月 00 / 平日のみ / end<=start 防御 / 境界 22:00 ぴったり / 複数週末跨ぎ / end-to-end _check_gap）。既存 test_pr16_data_layer.py / test_weekend_gap.py / test_gap_kill_switch.py 全 PASS。",
+      "prevention": "OANDA 実市場時間との乖離が解消され、月曜開場直後の H1/H4 で誤 CRITICAL RiskAlert が出る経路を排除（alert fatigue 軽減）。"
+    },
+    {
+      "id": "DE-301",
+      "severity": "medium",
+      "severity_change": "high → medium (構造的予防のみ)",
+      "type": "feat",
+      "title": "import_atlas_strategy に live + period > 384 戦略投入の確認 gate を追加",
+      "files_modified": [
+        "scripts/import_atlas_strategy.py"
+      ],
+      "tests_added": [
+        "tests/unit/test_de301_import_period_gate.py"
+      ],
+      "summary": "MAX_LIVE_SAFE_PERIOD=384 (= MAX_WARMUP_BARS 5000 / WARMUP_CONVERGENCE_FACTOR 13) を導入。execution_mode='live' で投入する戦略の config.json::parameters から period 系キー（*_period / period）の最大値を抽出し、> 384 の場合は警告ログ + 対話確認プロンプト（yes/no）を出す。CI 環境（CI=true / GITHUB_ACTIONS=true / 非 TTY）では auto-deny、--allow-large-period フラグで明示許可可能。現状の Live 22 戦略（最大 SMA50）には影響なし、将来の ema_800 等の Live 投入を構造的に防ぐ予防策。",
+      "verification": "新規 13 テスト PASS（_extract_max_period 7 ケース + import_one gate 6 ケース、CI 強制 fixture で対話プロンプトを skip）。既存 test_import_atlas_strategy.py 全 PASS。",
+      "prevention": "live + 大 period 戦略を CI 経由で誤って投入する経路を構造的に遮断（手動投入は対話確認が必須化）。"
+    },
+    {
+      "id": "DE-311",
+      "severity": "medium",
+      "severity_change": "high → medium (暫定保留、コメント追加のみ)",
+      "type": "docs",
+      "title": "StateStore docstring に本番経路は StateManager 担当である旨を明示",
+      "files_modified": [
+        "trading_platform/data/state_store/redis_store.py"
+      ],
+      "tests_added": [],
+      "summary": "redis_store.py の module docstring に DE-311 注記を追加。本番経路（UnifiedRunner / scripts/run_unified.py）では永続化を core.unified_runner.state_manager.StateManager が担当する（JSONL + atomic snapshot）旨と、StateStore は main.py（dev/staging FastAPI モード）のみで使用される dev 経路である旨を明示。AioRedisBackend の正規実装は 5-8 ファイル規模のため次回 audit-loop / 別タスクで実施する旨を明記。",
+      "verification": "ドキュメント変更のみ、テスト影響なし。",
+      "prevention": "後続レビュー時に同じ過大評価が再発しない（finding 受領者向けの正本注記）。"
+    }
+  ],
+  "test_summary": {
+    "new_tests": 37,
+    "modified_existing_tests": 1,
+    "unit_fault_full_run": "1273 passed",
+    "integration_full_run": "710 passed, 10 xfailed",
+    "regressions": "なし"
+  },
+  "lint_status": {
+    "scope": "新規追加コード",
+    "result": "新規導入の lint 違反なし（既存の ANN401 broker:Any / UP017 timezone.utc は pre-existing で本セッション対象外）"
+  },
+  "deferred": [
+    "DE-302 (MTF 遅延 allocation NaT 充填) — 別タスク",
+    "DE-305 (warmup_bars_for TF 分離) — 別タスク",
+    "DE-307/308/309/310 (low) — 別タスク",
+    "DE-311 (AioRedisBackend 正規実装) — 次回 audit-loop / 5-8 ファイル規模"
+  ]
+}

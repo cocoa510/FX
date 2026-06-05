@@ -1,0 +1,69 @@
+{
+  "audit_id": "AUDIT-2026-0529-001",
+  "session": "code-safety-reviewer Phase 3/4",
+  "date": "2026-05-29",
+  "agent": "code-safety-reviewer",
+  "fixes": [
+    {
+      "finding_id": "CSR-302",
+      "severity": "MEDIUM",
+      "title": "metadata.json::parent_id パストラバーサル (LLM 生成 metadata 経由)",
+      "status": "FIXED",
+      "files_modified": [
+        "ATLAS/atlas/main.py"
+      ],
+      "files_added": [
+        "ATLAS/atlas/utils/__init__.py",
+        "ATLAS/atlas/utils/path_safety.py"
+      ],
+      "description": "atlas/utils/path_safety.py を新規作成し validate_generation_id(value: str) -> str を実装 (正規表現 ^[A-Za-z0-9_-]{1,80}$ でバリデーション、不一致時は ValueError)。main.py の _load_parent_forbidden_patterns 内で parent_id を Path 結合前に validate_generation_id 経由で検証。不正値 (../../../tmp/evil 等) は ValueError → logger.warning 記録 → 空リスト返却でパストラバーサルを防止。",
+      "regression_test": "ATLAS/tests/unit/test_csr302_parent_id_traversal.py (22 tests, all PASS)",
+      "backward_compat": "既存の ATLAS-YYYY-MMDD-NNN / FTS-YYYY-MMDD-NNN 形式はすべて正規表現を通過。golden tests 176/176 PASS 確認済み。"
+    },
+    {
+      "finding_id": "CSR-303",
+      "severity": "MEDIUM",
+      "title": "generation_id CLI 引数バリデーション不在 - strategies/ 外への読み書きが可能",
+      "status": "FIXED",
+      "files_modified": [
+        "ATLAS/atlas/main.py",
+        "ATLAS/atlas/backtest/runner.py",
+        "ATLAS/atlas/analyzer/metrics.py"
+      ],
+      "files_added": [],
+      "description": "CSR-302 で作成した validate_generation_id を以下の全箇所に適用: (1) main.py の validate/backtest/metrics/score/evaluate 各サブコマンド冒頭で generation_id を検証し不正値は sys.exit(1) + error JSON を返す。(2) runner.py の _strategies_dir() 冒頭で多層防御として validate_generation_id を呼び出し ValueError を raise。(3) metrics.py の load_backtest_result() 冒頭で validate_generation_id を呼び出し。これにより strategies/ 外への Path 結合が多層で阻止される。runner.py への import も追加 (WFA_OOS_MONTHS 直後)。",
+      "regression_test": "ATLAS/tests/unit/test_csr303_generation_id_cli_validation.py (13 tests, all PASS)",
+      "backward_compat": "CLI に正常な generation_id を渡す既存の全 usage は影響なし。golden tests 176/176 PASS 確認済み。"
+    },
+    {
+      "finding_id": "CSR-306",
+      "severity": "LOW",
+      "title": "context_builder.py の except Exception 握りつぶし - CLAUDE.md 規約違反",
+      "status": "FIXED",
+      "files_modified": [
+        "ATLAS/atlas/feedback/context_builder.py"
+      ],
+      "files_added": [],
+      "description": "context_builder.py:546-549 の `except Exception: return None` を `except Exception as exc:` に変更し、直後に logger.warning('market_statistics_parquet_read_failed', instrument=..., timeframe=..., parquet_path=..., error=str(exc), exc_info=True) を追加。CLAUDE.md 規約「例外は握りつぶさず必ずログに記録してから再raise or 適切な処理をする」への準拠。None 返却は維持 (フォールバック動作の変更なし)。",
+      "regression_test": "ATLAS/tests/unit/test_csr306_context_builder_exception_logging.py (3 tests, all PASS)",
+      "backward_compat": "例外時の戻り値 None は変更なし。正常パスの動作も変更なし。"
+    },
+    {
+      "finding_id": "ATLAS-MISSED-004",
+      "severity": "LOW",
+      "title": "instrument / timeframe CLI 引数の path traversal ガード",
+      "status": "FIXED",
+      "files_modified": [],
+      "files_added": [],
+      "description": "path_safety.py に validate_instrument (^[A-Z]{3}_[A-Z]{3}$) と validate_timeframe (^(M1|M5|M15|H1|H4|D1|W1)$) を追加実装。現状 instrument/timeframe はファイルパス結合に直接使われず data_loader 経由のため即時適用は対象外だが、将来の呼び出し元向けにバリデータを提供。generation_id / parent_id の修正で CSR-303 同型のリスクを主要攻撃経路で遮断済み。",
+      "regression_test": "validate_generation_id の単体テスト内に validate_instrument/validate_timeframe のドキュメントテスト形式で記述済み",
+      "backward_compat": "ライブラリ関数追加のみ (既存コードへの影響なし)"
+    }
+  ],
+  "test_summary": {
+    "new_tests": 35,
+    "all_pass": true,
+    "golden_regression": "176/176 PASS",
+    "ruff_violations": 0
+  }
+}

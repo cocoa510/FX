@@ -1,0 +1,206 @@
+{
+  "agent": "data-engineer",
+  "scope": "FTS データ層 (commit eccab9a 事後検証 + 新規)",
+  "review_target_commit": "eccab9a",
+  "head_commit": "9f605e0",
+  "files_reviewed_count": 14,
+  "files_reviewed": [
+    "trading_platform/data/feature_store/live_store.py",
+    "trading_platform/data/feature_store/indicators.py (import only)",
+    "trading_platform/core/monitoring/metrics.py",
+    "trading_platform/data/common/timeframes.py",
+    "trading_platform/data/market_data/stream_receiver.py",
+    "trading_platform/data/market_data/bar_builder.py",
+    "trading_platform/data/quality/quality_engine.py",
+    "deploy/prometheus/alerting_rules.yml",
+    "docs/runbook/feature_staleness.md",
+    "tests/unit/test_de403_feature_staleness_semantics.py",
+    "tests/unit/test_dm302_metrics_instrumentation.py (delta)",
+    "ATLAS/atlas/backtest/data_loader.py (TF_SECONDS reference)",
+    "trading_platform/main.py (OANDAStreamReceiver wiring)",
+    "trading_platform/forward_test.py (OANDAStreamReceiver wiring)"
+  ],
+  "post_fix_verification": {
+    "DE-403_staleness_redesign": "concerns: runbook 未更新 (新 expr/閾値と旧文書の乖離=DE-503) + alerting_rules.yml に D1/M1/M5/M30 用閾値ブランチ欠落 (DE-502) + 週末閉場時の全戦略 staleness 一斉 FIRING リスク (DE-504) + Phase 4.5 ADVISORY (strategy_id ラベル誤用) の改修計画が docstring 内のみで ADR/TODO 未起票 (DE-505)。コア semantics の math は正しく、TF_SECONDS は ATLAS 側と一致、tests 9 件は妥当に semantics を検証している。"
+  },
+  "findings": [
+    {
+      "id": "DE-501",
+      "severity": "high",
+      "area": "monitoring / data observability",
+      "title": "DM-302 後続の dead metrics: observe_event_bus_latency / set_order_success_rate が本番計装 0 箇所",
+      "description": "MetricsCollector に DM-F-002/DM-F-008 として定義された `observe_event_bus_latency(event_type, latency_ms)` と `set_order_success_rate(rate)` は本番コード (trading_platform/**) から一度も呼ばれていない。Grep 結果: 呼び出し箇所は metrics.py の定義行と tests/unit/test_prometheus_metrics_dm_f_002.py の 2 ヶ所 (テスト) のみ。これは AUDIT-2026-0530-001 の RE-401 (OANDABroker metrics= 4 箇所未注入) と完全同型の dead instrumentation 欠陥で、DM-302 で「ヘルパー追加」だけ終わって calling site への配線が複数箇所漏れた連鎖の続編。観測影響: alerting_rules.yml に fx_event_bus_latency_ms / fx_order_success_rate を参照する rule が無いため fail-silent (アラートも仕様も対応 dashboard も常に空) で発覚遅延が大きい。DE-403 (staleness) と並列で確認したため本ラウンドで検出。",
+      "evidence": [
+        "trading_platform/core/monitoring/metrics.py:550-565 (observe_event_bus_latency 定義)",
+        "trading_platform/core/monitoring/metrics.py:831-839 (set_order_success_rate 定義)",
+        "Grep observe_event_bus_latency in trading_platform/ → 0 callsites",
+        "Grep set_order_success_rate in trading_platform/ → 0 callsites",
+        "Grep fx_event_bus_latency in deploy/prometheus/ → no alert rules",
+        "Grep fx_order_success_rate in deploy/prometheus/ → no alert rules"
+      ],
+      "reproduction": "rg -n 'observe_event_bus_latency|set_order_success_rate' trading_platform/ で本番 callsite ゼロを確認。Prometheus /metrics エンドポイントを叩いても fx_event_bus_latency_ms_bucket は WITHOUT_VALUE / fx_order_success_rate は 0.0 のまま (未 set) になる。",
+      "suggested_fix": "(1) Event Bus publish/consume パスに observe_event_bus_latency 呼出を追加 (RedisEventBus / InMemoryEventBus 双方の subscriber dispatcher で publish timestamp との差分計測)。(2) OANDABroker / OrderManager の submit→fill 集計ループで set_order_success_rate を定期更新 (1 分窓 fills/orders 比)。(3) tests/contract/test_metrics_wired.py を AST 契約テストとして拡張し RE-401 と同じく callsite 存在を強制。(4) alerting_rules.yml に対応 rule (例: fx_event_bus_latency_ms P95 > 100ms for 5m / fx_order_success_rate < 0.95 for 10m) を追加。",
+      "parity_impact": "なし (計装のみ、計算ロジック不変)",
+      "regression_of": "DM-302 (AUDIT-2026-0529-001 で同型欠陥 RE-401 を見逃した連鎖。本件はその第 5/6 ヶ所)",
+      "post_fix_defect": false
+    },
+    {
+      "id": "DE-502",
+      "severity": "medium",
+      "area": "alerting_rules.yml / TF coverage",
+      "title": "FxFeatureStorestaleHigh の PromQL ブランチが M15/H1/H4 のみで D1/M1/M5/M30 が silent",
+      "description": "alerting_rules.yml:109-117 の新 expr は `primary_tf=\"M15\"` / `\"H1\"` / `\"H4\"` の 3 ブランチを `or` で連結。LiveFeatureStore の TF_SECONDS には M1/M5/M30/D1 も定義されている (live_store.py:93-101) ため、これらの TF を主 TF とする戦略は staleness gauge は発行されてもアラートは絶対に FIRING しない (silent failure)。現状 imported 戦略は M15/H1/H4 のみで実害ゼロ (実測: rg '\"timeframe\"' strategies/imported → M15/H1/H4 の 3 値のみ) だが、将来 D1 戦略や M1/M5 スキャル戦略を投入した瞬間に observability が穴落ちする。DE-403 修正の構造的弱点。",
+      "evidence": [
+        "deploy/prometheus/alerting_rules.yml:109-117 (3 ブランチ or 連結、D1/M1/M5/M30 なし)",
+        "trading_platform/data/feature_store/live_store.py:93-101 (TF_SECONDS: M1/M5/M15/M30/H1/H4/D1)",
+        "trading_platform/data/feature_store/live_store.py:445 (bar_interval = TF_SECONDS.get(self.primary_tf, 3600))",
+        "imported 戦略の runner_config.json timeframe 集合 = {M15, H1, H4} (本日時点)"
+      ],
+      "reproduction": "primary_tf=\"D1\" の LiveFeatureStore を立て、24h 以上バー配信を停止 (mock) しても FxFeatureStorestaleHigh は発火しない。Prometheus query: `fx_feature_staleness_sec{primary_tf=\"D1\"}` で値は記録されているのに alert は Inactive。",
+      "suggested_fix": "alerting_rules.yml の expr を全 TF カバレッジに拡張: `fx_feature_staleness_sec{primary_tf=\"M1\"} > 120 or ... > 600 (M5) or ... > 3600 (M30) or ... > 172800 (D1)` のように TF_SECONDS × 2 を機械生成。または PromQL group_left で TF→threshold マップを使い「if-not-listed-then-default」フォールバックを導入。tests/unit/test_de403_*.py に「未対応 TF で alert silent」回帰テストを追加。",
+      "parity_impact": "なし",
+      "regression_of": null,
+      "post_fix_defect": true
+    },
+    {
+      "id": "DE-503",
+      "severity": "medium",
+      "area": "docs / runbook",
+      "title": "Runbook feature_staleness.md が DE-403 修正前の旧 semantics/閾値のまま放置",
+      "description": "docs/runbook/feature_staleness.md は最終更新 2026-05-24 で `max(fx_feature_staleness_sec) > 60` for 3m (旧 expr) と「fx_feature_staleness_sec が 60 秒以上継続」(旧 semantics) を記述したまま。eccab9a の DE-403 修正で expr/閾値/semantics が全変更されたが runbook は未更新。オペレータは alert 発火時にこの runbook を見て「60s 超過」を探し、実際には 1800s/7200s/28800s の閾値判定であることを誤認する。`fx_feature_staleness_sec{strategy_id, timeframe}` という古い label 名 (現在は strategy_id + primary_tf) や `severity: warning` の表現も乖離。対応アクションの WARN ヒステリシス節 (PR32) も旧設計参照のまま。",
+      "evidence": [
+        "docs/runbook/feature_staleness.md:4 (\"`max(fx_feature_staleness_sec) > 60` for 3m\")",
+        "docs/runbook/feature_staleness.md:19 (\"Gauge が 60 秒を超えて 3 分継続した状態\")",
+        "docs/runbook/feature_staleness.md:27 (\"fx_feature_staleness_sec{strategy_id, timeframe}\" — 古い label セット)",
+        "deploy/prometheus/alerting_rules.yml:109-131 (新 expr/閾値/label セット)"
+      ],
+      "reproduction": "FxFeatureStorestaleHigh 発火時の `annotations.description` は \"docs/runbook/feature_staleness.md\" を指す (alerting_rules.yml:131) が、開いた runbook は旧 60s 前提で oncall を混乱させる。",
+      "suggested_fix": "runbook を以下で更新: (a) Prometheus 条件を TF 別閾値 (M15:1800s / H1:7200s / H4:28800s = バー間隔×2) に書き換え、(b) staleness の新 semantics 「次バー到達遅延 = max(0, now - expected_next_bar_at)」を冒頭に明示、(c) labels セットを `{strategy_id (=TF代用), primary_tf}` に訂正し Phase 4.5 ADVISORY を脚注で説明、(d) 週末閉場時の予期発火 (DE-504) との切り分け節を追加、(e) PR32 WARN ヒステリシス節は実装状況確認。改訂履歴に 2026-05-30 行を追加。",
+      "parity_impact": "なし",
+      "regression_of": null,
+      "post_fix_defect": true
+    },
+    {
+      "id": "DE-504",
+      "severity": "high",
+      "area": "alerting_rules.yml / market hours",
+      "title": "週末市場閉場で FxFeatureStorestaleHigh が全戦略一斉 FIRING する設計欠陥",
+      "description": "新 semantics の staleness は `max(0, now - (last_bar_time + bar_interval))` で、バー配信が止まるたびに wall-clock 単位で線形増加する。FX 市場の週末閉場 (金曜 22:00 UTC ～ 日曜 22:00 UTC ≈ 48h) では全戦略が:\n  - M15: 48h - 15m = ~172,000s (閾値 1800s の ~95 倍)\n  - H1:  48h - 1h = ~169,000s (閾値 7200s の ~23 倍)\n  - H4:  48h - 4h = ~158,000s (閾値 28800s の ~5.5 倍)\nに到達し、3m 持続条件を満たして FIRING する。stream_receiver は `_is_weekend_utc()` で heartbeat_timeout を 15s→300s に緩和する weekend awareness を持つが (stream_receiver.py:301-322 / 51)、alerting_rules.yml にはそれが無く設計の非対称性。runbook (DE-503) にも週末発火想定の記述なし。oncall への週末ノイズ ~22 戦略 (H1/H4)、SMTP rate-limit と相まって email pager fatigue の悪化が予見される。DE-403 修正の前は「常時 FIRING」、修正後は「平日通常 / 週末 FIRING」と発火条件は変わったが本質的問題は転移しただけ。",
+      "evidence": [
+        "deploy/prometheus/alerting_rules.yml:109-131 (週末 mute なし / for: 3m)",
+        "trading_platform/data/feature_store/live_store.py:443-460 (monotonic ベースで wall-clock 週末停止を直接観測)",
+        "trading_platform/data/market_data/stream_receiver.py:51 / 301-322 (週末判定が data 層に存在するが alert 層に未連携)",
+        "trading_platform/data/quality/quality_engine.py:695-737 (quality_engine は weekend_seconds 控除済み、設計の非対称性)"
+      ],
+      "reproduction": "Prometheus 上で `time() - (timestamp(fx_feature_staleness_sec) - fx_feature_staleness_sec)` を金曜夜から日曜深夜に観測すると線形増加が確認できる。Alertmanager で FxFeatureStorestaleHigh が金曜 22:00+3m に primary_tf=H1/H4 全戦略で発火、月曜オープンまで FIRING 継続することがシミュレートできる (live 起動して土曜実測でも再現)。",
+      "suggested_fix": "案 A: alerting_rules.yml の expr に market_open ゲートを掛ける。Prometheus に `fx_market_open` gauge (1/0) を追加して `... > 7200 and on() fx_market_open == 1`。案 B: live_store 側で `_is_weekend_utc()` 相当の判定を入れ週末は staleness=0 を観測値とする (quality_engine と同じ対称化)。案 A 推奨 (semantic を曲げない / runbook 説明が直感的)。tests/unit/test_de403_*.py に「金曜 22:00 UTC 直後の H1 戦略で staleness > 28800 でも alert 抑止」を追加。",
+      "parity_impact": "なし (計算ロジック不変、alert routing のみ)",
+      "regression_of": null,
+      "post_fix_defect": true
+    },
+    {
+      "id": "DE-505",
+      "severity": "medium",
+      "area": "design hygiene / Phase 4.5 ADVISORY follow-up",
+      "title": "strategy_id ラベル誤用の改修計画が docstring 内 ADVISORY のみで ADR/TODO 未起票",
+      "description": "metrics.py:858-868 の docstring に Phase 4.5 ADVISORY として「LiveFeatureStore は strategy_id を保持しないため self.primary_tf を strategy_id 引数として渡している。Prometheus label `strategy_id` には実態として TF 名 が入る。将来 LiveFeatureStore が strategy_id を持つように改修されるまで TF 名のままとなる」と明記されたが、(a) docs/ 配下に ADR/TODO/設計メモは一切なし (rg \"LiveFeatureStore.*strategy_id\" docs/ → 0 hits)、(b) issue tracker 連携も無く、(c) いつ・誰が・どのトリガーで改修着手するかの判定基準も不明。docstring のみの宣言は「discoverable but actionable でない」状態で、Phase 4.5 が ADVISORY を発見した目的 (「将来事故防止」) を達成していない。同様に alerting_rules.yml:130 にも「影響戦略は strategy_id ラベルで特定できます」と書かれているが、現状 strategy_id ラベルには TF 名しか入らないため per-strategy 特定はそもそも不可能 — annotations が実態と乖離して oncall を誤誘導する二次的欠陥も含む。",
+      "evidence": [
+        "trading_platform/core/monitoring/metrics.py:858-868 (Phase 4.5 ADVISORY docstring)",
+        "rg LiveFeatureStore.*strategy_id docs/ → no matches",
+        "rg DE-403 docs/ → no matches",
+        "deploy/prometheus/alerting_rules.yml:130 (\"影響戦略は strategy_id ラベルで特定できます\" — 実装と矛盾)"
+      ],
+      "reproduction": "Grafana で `fx_feature_staleness_sec` を strategy_id でグループ化しても \"H1\" / \"H4\" / \"M15\" の 3 系列しか出ない (期待: ~22 系列)。oncall は alert 発火戦略を特定できず、結局 logs/unified_runner.*.stdout.log を grep する羽目になる (= alert の存在価値減退)。",
+      "suggested_fix": "(1) docs/adr/ または docs/spec_change_log.md に「LiveFeatureStore strategy_id 持参改修」エントリを追加し、計画フェーズ・担当・前提条件 (PR 番号 / contract 変更) を明示。(2) StrategyWorker → LiveFeatureStore に strategy_id を伝播する API (例: LiveFeatureStore.set_strategy_context(strategy_id) または __init__ 追加) を提案 PR として起票。(3) 中間対策として alerting_rules.yml の annotations を「影響戦略は primary_tf ラベルで TF 群を特定」+「個別戦略は logs/unified_runner.*.stdout.log の strategy_id を確認」に書き換えて誤誘導を解消。(4) ALERT ADVISORY の改修期限 (例: 次回 monthly audit でステータス確認) を docstring に追記。",
+      "parity_impact": "なし",
+      "regression_of": null,
+      "post_fix_defect": true
+    },
+    {
+      "id": "DE-506",
+      "severity": "medium",
+      "area": "market_data wiring / dead instrumentation",
+      "title": "OANDAStreamReceiver の backfill_fn / backfill_timeframes / state_store / last_bar_time_fn / kill_switch_fn が main.py + forward_test.py の本番呼出で未注入",
+      "description": "FTS-DATA-005/009 として実装された re-connect backfill 機構 (stream_receiver.py:411-580 周辺) は、main.py:977 の `OANDAStreamReceiver(...)` と forward_test.py:204 の同呼出のいずれでも `backfill_fn=None`, `backfill_timeframes=None`, `state_store=None`, `last_bar_time_fn=None`, `kill_switch_fn=None` のまま — 設計上の機能が config 不在で dead。main.py:986 の quality_engine 注入は明示的に追加されているが、それ以外の 5 引数は全 default。stream_receiver.py:487-491 で `_backfill_fn is None or not _backfill_timeframes` の早期 return が走るため backfill ロジックは一行も実行されない。FTS-DATA-009 (起動時 warmup + 再接続時 backfill) は AUDIT-2026-0525-001/002 で実装され「本番投入準備完了」と記録されたが、ここでも RE-401 / DE-501 同型の「ヘルパー作っただけ・配線忘れた」連鎖。UnifiedRunner (core/unified_runner/runner.py) 経由の起動パスが別配線を持つ可能性はあるが、main.py / forward_test.py が dev/staging で動く以上ここも修正必要。",
+      "evidence": [
+        "trading_platform/main.py:977-987 (OANDAStreamReceiver 呼出、quality_engine 以外の DATA-005/009 引数欠落)",
+        "trading_platform/forward_test.py:204-210 (同上、quality_engine すら未注入で更に薄い)",
+        "trading_platform/data/market_data/stream_receiver.py:487-491 (早期 return 条件)",
+        "trading_platform/data/market_data/stream_receiver.py:71-126 (5 引数の任意性)"
+      ],
+      "reproduction": "main.py 起動後、OANDA Streaming を一時切断→再接続させると、再接続成功後 fx_backfill_bars_total が 0 のまま (rg `inc_backfill_bars` で本番計装パスが backfill_fn 呼出経路にしかないため、backfill_fn=None だと counter も上がらない)。LiveFeatureStore の主 TF バー欠損ギャップが永続。",
+      "suggested_fix": "(1) main.py / forward_test.py で CandleFetcher.backfill_missing を `backfill_fn` に渡し、`backfill_timeframes` に主 TF + auxiliary_tfs を渡す。`last_bar_time_fn` は LiveFeatureStore の最終バー時刻を返す closure。`kill_switch_fn` は既存 KillSwitch 経由。`state_store` は RedisStateStore。(2) UnifiedRunner 経由の起動パスが本番なら main.py を archive 化または deprecate 宣言 (PA-407 関連)。(3) tests/contract/test_oanda_stream_receiver_wired.py を新設し AST 検証で 5 引数全部の注入を強制。",
+      "parity_impact": "間接的に大 (backfill 不在 → 再接続後 LiveFeatureStore に gap → EWM 系指標が ATLAS BT と永続ドリフト)",
+      "regression_of": "FTS-DATA-009 (実装は完成、配線が欠落)",
+      "post_fix_defect": false
+    },
+    {
+      "id": "DE-507",
+      "severity": "low",
+      "area": "warmup / observability",
+      "title": "warmup 期間中 + 再起動直後の最初のバーで feature_staleness gauge が一度も発行されない",
+      "description": "live_store.py:444 の `if self._metrics is not None and self._last_primary_bar_time is not None` ガードにより、初回主 TF バー到達時には gauge を発行しない (`_last_primary_bar_time = None` から)。warmup 中はバックフィルバーを順次流すため `_last_primary_bar_time` は確立するが、warmup と本番の境界・再起動直後の最初の本物バー到達直後までは gauge value が「直前のプロセスの値 (zero-fill or 未定義)」のまま。Prometheus 側では `absent(fx_feature_staleness_sec{primary_tf=\"H1\"})` で「データなし」と判定されうるが、recording rule や current alert は値 absent を扱っていない (alerting_rules.yml:109-117 は `> 1800` 等のスカラ比較のみ)。staleness が absent な期間は alert silent。実害は限定的だが、再起動繰り返しの場合に observability gap が積算する。",
+      "evidence": [
+        "trading_platform/data/feature_store/live_store.py:443-460",
+        "trading_platform/data/feature_store/live_store.py:219 (self._last_primary_bar_time: float | None = None)",
+        "deploy/prometheus/alerting_rules.yml:109-117 (absent() 検出なし)"
+      ],
+      "reproduction": "プロセスを kill → 即再起動 → Prometheus /metrics を 1 秒以内に scrape すると fx_feature_staleness_sec ラベルが存在しないか labels なし状態 (gauge は scrape 時に Python オブジェクトが初期化済みなら 0、未初期化なら absent)。",
+      "suggested_fix": "(1) 初回バー到達時にも staleness=0.0 を観測値として発行 (warmup 中の正常状態を示す signal として有用)。または (2) alerting_rules.yml に `absent(fx_feature_staleness_sec{primary_tf=\"H1\"}) for 10m` を追加して「scrape 開始しても gauge が出ていない」状態を検知。(1) を推奨 — observability のための gauge は missing より 0 が望ましい。",
+      "parity_impact": "なし",
+      "regression_of": null,
+      "post_fix_defect": true
+    },
+    {
+      "id": "DE-508",
+      "severity": "low",
+      "area": "TF 表記揺れ / 既知問題",
+      "title": "stream_receiver._TF_SECONDS が 'D' / live_store.TF_SECONDS が 'D1' で表記揺れが残存 (DE-R2-001 の元因)",
+      "description": "trading_platform/data/market_data/stream_receiver.py:58-61 で _TF_SECONDS = {..., 'D': 86400} と定義され、live_store.py:93-101 の TF_SECONDS = {..., 'D1': 86400} と表記不一致。data/common/timeframes.py:23-32 で TIMEFRAME_SECONDS は両キー受け付け (D も D1 も 86400) として正規化しているが、stream_receiver は data/common/timeframes に切り替えず独自定義を保持 (循環 import 回避コメント line 57)。'D1' 戦略を導入し OANDAStreamReceiver の backfill_timeframes に渡した場合 (DE-506 と複合)、stream_receiver._TF_SECONDS.get('D1') が None を返し backfill が即 skip される。AUDIT-2026-0416-002 で DE-R2-001 として detected→downgraded されたが、本質的解消は未了。",
+      "evidence": [
+        "trading_platform/data/market_data/stream_receiver.py:58-61",
+        "trading_platform/data/feature_store/live_store.py:93-101",
+        "trading_platform/data/common/timeframes.py:23-32 (両キー対応の共通モジュール、stream_receiver から未参照)",
+        "logs/audit/summary_AUDIT-2026-0416-002.md:122 (downgraded record)"
+      ],
+      "reproduction": "OANDAStreamReceiver(..., backfill_timeframes=['D1']) で起動。stream_receiver.py:498 の `tf_sec = _TF_SECONDS.get('D1')` は None → line 500 で `初回 backfill: 未知の timeframe、スキップ` の WARN ログのみ。fx_backfill_failures_total すら立たない silent skip。",
+      "suggested_fix": "stream_receiver も trading_platform.data.common.timeframes.TIMEFRAME_SECONDS を import する。循環 import の懸念は実際には根拠薄い (timeframes.py が他の data.* を一切 import しない設計のため)。または stream_receiver._TF_SECONDS に 'D1': 86400 を追加する暫定対応。tests/unit/test_stream_receiver_*.py に 'D1' backfill_timeframes ケースを追加。",
+      "parity_impact": "Live と BT で D1 戦略の挙動分岐 (BT で backfill 完全 / Live で D1 backfill 即 skip → 重大乖離)",
+      "regression_of": "DE-R2-001 (AUDIT-2026-0416-002 で downgrade した未解消問題)",
+      "post_fix_defect": false
+    },
+    {
+      "id": "DE-509",
+      "severity": "low",
+      "area": "test 品質 / DE-403 regression coverage",
+      "title": "test_de403_*.py が 'D1' / 'M1' / 'M5' / 'M30' parametrize を欠く",
+      "description": "tests/unit/test_de403_feature_staleness_semantics.py の TestStalenessNearZeroAfterBar / TestStalenessPositiveOnDelay は H1 / H4 / M15 のみカバー。DE-502 (alerting branch 欠落) との合わせ技で、未対応 TF 戦略の staleness semantics 回帰が test されていない。primary_tf='D1' で `bar_interval = TF_SECONDS.get('D1', 3600) = 86400` が正しく適用されるかの直接検証なし (現状 TF_SECONDS.get default=3600 にフォールバックして偽通過するリスクは少ないが、将来 TF_SECONDS から D1 が削除された場合に bar_interval=3600 で staleness が誤算される — silent regression)。",
+      "evidence": [
+        "tests/unit/test_de403_feature_staleness_semantics.py:52-105 (H1/H4/M15 の 3 test しかない)",
+        "trading_platform/data/feature_store/live_store.py:445 (TF_SECONDS.get(..., 3600) フォールバック default)"
+      ],
+      "reproduction": "primary_tf='D1' で同じ test 構造を実装すると、現コードは pass する (TF_SECONDS に D1 があるため)。だが TF_SECONDS から D1 を削除すると bar_interval=3600 にフォールバックして 24h バーで staleness が大きく算出され silently 誤動作する。",
+      "suggested_fix": "pytest.parametrize で 7 TF 全網羅 (M1/M5/M15/M30/H1/H4/D1)。さらに `primary_tf='UNKNOWN_TF'` ケースで `bar_interval=3600` フォールバックが意図的か明示的 ValueError かを policy 決定する test を追加。",
+      "parity_impact": "なし",
+      "regression_of": null,
+      "post_fix_defect": true
+    },
+    {
+      "id": "DE-510",
+      "severity": "low",
+      "area": "DESIGN-C-001 data-layer impact assessment",
+      "title": "DESIGN-C-001 (RE-305 vs 12h throttle) のデータ層影響: 無し (情報共有 finding)",
+      "description": "DESIGN-C-001 (RE-305 復旧通知 vs live_orders_silent 12h throttle 矛盾) は runner.py:1611-1634 と email_notifier.py の _EMAIL_THROTTLE_INTERVAL_SEC の責務領域に閉じている。データ層 (feature_store / market_data / quality / trade_context / state_store) のコードパスには波及しないことを grep で確認 (DE-505 の strategy_id ラベル誤用ともラベル空間が衝突しない: live_orders_silent kind は EmailNotifier 側、staleness gauge は Prometheus 側)。LiveFeatureStore が live_orders_silent イベントの subscriber でもないため staleness 計算ループへの影響もない。データ層からは追加検知すべき欠陥なしと判定。",
+      "evidence": [
+        "trading_platform/core/unified_runner/runner.py:1611-1634 (RE-305 復旧通知 publish 箇所、データ層 import なし)",
+        "rg live_orders_silent trading_platform/data/ → no matches",
+        "rg RE-305 trading_platform/data/ → no matches"
+      ],
+      "reproduction": "N/A (informational)",
+      "suggested_fix": "DESIGN-C-001 解決はユーザー判断 (runner / email 系の throttle policy) に委ね、データ層側で追加対応は不要。",
+      "parity_impact": "なし",
+      "regression_of": null,
+      "post_fix_defect": false
+    }
+  ]
+}

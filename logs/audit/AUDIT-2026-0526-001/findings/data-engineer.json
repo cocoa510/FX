@@ -1,0 +1,57 @@
+{
+  "agent": "data-engineer",
+  "summary": "Live FeatureStore のインジケータ計算ロジック・MTF align・DataQualityEngine 配線は ATLAS BT と高い一致度で実装され、DE-101（DataQualityEngine 0インスタンス）は main.py / unified_runner/runner.py の両本番経路で実体化済み + AST 退行テストで保護済みと確認した（再報告せず）。一方、ウォームアップ本数（WARMUP_BARS）と FeatureStore の EWM 収束要件のミスマッチが未解消で、現に Live 配信中の高 period EMA 戦略（ATLAS-2026-0508-069, ema_slow_period=800）で BT/Live のシグナル分岐を変えうる parity ドリフトが構造的に発生する。parity テストは双方に全データを与える設計のためこの欠陥を検出できない。加えて UnifiedRunner の poll_latest が直近3本のみ取得しセッション内マルチバーギャップを silent skip する点（in-session backfill 不在）を検出。",
+  "findings": [
+    {
+      "id": "DE-201",
+      "severity": "high",
+      "confidence": "high",
+      "area": "FeatureStore warmup / EWM parity",
+      "title": "WARMUP_BARS=2000 が ema_800 戦略の EWM 収束に不足し、Live 稼働中戦略でシグナル分岐を変える parity ドリフトを発生させる",
+      "description": "LiveFeatureStore は登録インジケータの max(period) × BUFFER_SAFETY_FACTOR(=50) を必要バッファ長として _effective_buffer_size に設定する（live_store.py:435-458, BUFFER_SAFETY_FACTOR の設計根拠は EWM(adjust=False) 初期値が period×k バーで exp(-2k) に減衰し 1e-10 以下にするには k>=13 必要というもの, live_store.py:43-49）。しかし UnifiedRunner 起動時の warmup は WARMUP_BARS=2000 固定（runner.py:74, _warmup_all runner.py:1226-1228）であり、FeatureStore に最初に投入される確定バーは 2000 本のみ。現に Live 配信中の戦略 ATLAS-2026-0508-069（GBP_USD H1, ema_slow_period=800; unified_state/ATLAS-2026-0508-069.state.json 存在 + 2026-05-26 までの unified_runner ログに出現）は ema(span=800, adjust=False) を登録する（strategy.py:82）。span=800 に対し warmup=2000 では k=2.5 にしかならず、初期値の残差は ((800-1)/(800+1))^2000 ≈ exp(-5) ≈ 6.7e-3（価格水準比 約0.67%）に達する。この EMA(800) の誤差は ATLAS BT がデータ系列先頭から収束させた値と Live の値を乖離させ、戦略 generate_signal の `uptrend = ema_fast(200) > ema_slow(800)` / `downtrend = ema_fast < ema_slow` 判定（strategy.py:172-173, 186/200 で SHORT/LONG 分岐に直結）をクロス付近で反転させうる。すなわち BT で LONG/SHORT が出るバーで Live が逆方向 or 沈黙する誤シグナルを生む。Live で追加される H1 バーは現実時間で1本/時のため、warmup 直後から数千時間（数ヶ月〜年単位）にわたり乖離が残存する。MAX_REGISTRABLE_PERIOD=1000 をこの戦略のために 400→1000 に引き上げた経緯（live_store.py:53-89）からも本戦略が想定運用対象であることは明白だが、warmup 側はそれに追従していない。round_9/validation.json でも DEFAULT_INITIAL_WARMUP_BARS=300 について同型の指摘が high 維持されているが、UnifiedRunner 経路（2000）でも依然 ema_800 をカバーできていない点が現 HEAD で未解消。",
+      "evidence": [
+        "trading_platform/core/unified_runner/runner.py:74",
+        "trading_platform/core/unified_runner/runner.py:1226",
+        "trading_platform/data/feature_store/live_store.py:43",
+        "trading_platform/data/feature_store/live_store.py:435",
+        "trading_platform/strategies/imported/ATLAS-2026-0508-069/config.json:9",
+        "trading_platform/strategies/imported/ATLAS-2026-0508-069/strategy.py:82",
+        "trading_platform/strategies/imported/ATLAS-2026-0508-069/strategy.py:172",
+        "logs/unified_state/ATLAS-2026-0508-069.state.json",
+        "logs/audit/round_9/validation.json:94"
+      ],
+      "suggested_fix": "warmup 本数を固定値ではなく FeatureStore の必要バッファ長から動的に導出する。具体的には各 slot 登録後に LiveFeatureStore._effective_buffer_size（= max(period)×50）を参照し、min(必要長, 5000=OANDA上限) を get_warmup_bars の count に渡す。ema_800 は 800×50=40000 が理論要件だが OANDA 上限 5000 で頭打ちのため、せめて 5000 本（k=6.25, 残差 exp(-12.5)≈3.7e-6）まで引き上げる。これでも 1e-10 には届かないため、(a) ema_slow_period の上限を warmup 可能範囲（period<=100 程度: 100×50=5000）に制約する運用ガード、または (b) 高period EMA戦略は EWM 初期シードを ATLAS BT と同一の系列先頭から再現する別経路（過去 parquet からの完全リプレイ warmup）を用意する、のいずれかを併用する。同時に parity テストに『Live が warmup N本のみ→以降逐次』『ATLAS が全系列』という非対称シナリオを追加し、本欠陥を回帰検出できるようにする。"
+    },
+    {
+      "id": "DE-202",
+      "severity": "medium",
+      "confidence": "high",
+      "area": "Market Data Pipeline / gap recovery",
+      "title": "UnifiedRunner の poll_latest が直近3本のみ取得し、セッション内マルチバーギャップを silent に欠落させる（in-session backfill 不在）",
+      "description": "UnifiedRunner 本番経路は CandleFetcher / EventBus / FTS-DATA-009 backfill を一切使わず、SharedDataProvider.poll_latest のみで確定バーを FeatureStore に供給する（runner.py 内に backfill/last_bar_time/fetch_range/CandleFetcher の参照ゼロを Grep で確認）。poll_latest は get_candles(count=3) で直近3本を取得し raw_candles[-1]（最新1本）のみを返し、_last_bar_time をその最新時刻に更新する（data_provider.py:155-184）。POLL_INTERVAL_SEC=60（runner.py:73）で、OANDA タイムアウト・account_info 取得遅延・GIL/executor 競合等で1サイクルが2分以上遅延すると、M1（60s足）では2本以上の確定バーが poll 間に発生する。その場合 poll_latest は中間バーを返さず _last_bar_time を最新へ進めるため、中間の確定バーが恒久的に FeatureStore バッファから欠落する。欠落は LiveFeatureStore のバー列を ATLAS BT より短くし、EWM 系（adjust=False）指標を以後永続ドリフトさせる（CandleFetcher/SharedDataProvider の DE-002 コメントが繰り返し警告している『1本ずれ→永続ドリフト』そのものが poll 経路では防げていない）。CandleFetcher は last/bar_time<=last 判定でマルチバーを順次 emit しギャップを埋める設計（candle_fetcher.py:222-250, backfill_missing:416-450）だが、UnifiedRunner はこれを使っていない。H1/H4/M15 では poll(60s)<<period のため通常は単一新バーで実害は小さいが、M1 戦略やポーリング遅延時に latent。プロセス再起動時は warmup で 2000 本再シードされるため再起動ギャップは別系統で吸収される（こちらは DE-201 の収束問題に帰着）。",
+      "evidence": [
+        "trading_platform/core/unified_runner/data_provider.py:155",
+        "trading_platform/core/unified_runner/data_provider.py:168",
+        "trading_platform/core/unified_runner/data_provider.py:177",
+        "trading_platform/core/unified_runner/runner.py:73",
+        "trading_platform/core/unified_runner/runner.py:1398",
+        "trading_platform/data/market_data/candle_fetcher.py:416"
+      ],
+      "suggested_fix": "poll_latest を『前回 _last_bar_time より後の全確定バーを時系列順に返す』方式に変更する。get_candles の count を直近3固定ではなく『現在時刻 - _last_bar_time を TF 秒数で割った推定本数 + マージン』に動的拡大し（CandleFetcher.fetch_range:380-394 と同じ式）、prev_time より後の確定バーを全て list で返す。_poll_cycle 側は返り値が複数の場合に各バーを順に slot.on_bar へ流す。代替案として UnifiedRunner にも last_bar_time 永続化 + 起動時 backfill（FTS-DATA-009 経路）を結線する。回帰テストは『poll 間に N本欠落→次 poll で N本全てが順に FeatureStore へ供給される』を検証する。"
+    },
+    {
+      "id": "DE-203",
+      "severity": "low",
+      "confidence": "high",
+      "area": "FeatureStore warmup / forward test",
+      "title": "forward_test.py の WARMUP_BARS=200 は period-50 以上の EWM 指標で parity を満たさない",
+      "description": "forward_test.py は WARMUP_BARS=200 固定で warmup candles を取得する（forward_test.py:246, 266）。FeatureStore の必要バッファ長は max(period)×50 のため、period=50 の EMA でも理論要件 2500 に対し 200 本は k=4（残差 exp(-8)≈3.4e-4）と大幅に不足し、period=200（ema_slow_period=200 の多数戦略 ATLAS-2026-0511-006/009/092/093 等）では k=1（残差 exp(-2)≈0.135）と桁違いに乖離する。forward_test は paper/forward 検証用途で実発注の Live 経路ではないため severity は low だが、forward 検証結果を Live 投入判断に使う運用では BT 不一致の forward 数値で誤った採否判断を招く。DE-201 と同根（warmup 固定値と EWM 収束要件の乖離）。",
+      "evidence": [
+        "trading_platform/forward_test.py:246",
+        "trading_platform/forward_test.py:266",
+        "trading_platform/data/feature_store/live_store.py:435"
+      ],
+      "suggested_fix": "DE-201 と同様に warmup 本数を FeatureStore._effective_buffer_size から min(必要長, 5000) で動的決定する共通ヘルパに統一し、UnifiedRunner / forward_test / stream_receiver(DEFAULT_INITIAL_WARMUP_BARS=300) の3箇所の固定値を撤廃する。"
+    }
+  ]
+}

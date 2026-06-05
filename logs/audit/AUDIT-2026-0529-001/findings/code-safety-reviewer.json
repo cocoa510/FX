@@ -1,0 +1,107 @@
+{
+  "agent": "code-safety-reviewer",
+  "scope": "ATLAS 計算層",
+  "audit_id": "AUDIT-2026-0529-001",
+  "commit": "02bee7f1",
+  "scanned_paths": [
+    "C:/data/works/FX/ATLAS/atlas/validator/sandbox_runner.py",
+    "C:/data/works/FX/ATLAS/atlas/validator/syntax_checker.py",
+    "C:/data/works/FX/ATLAS/atlas/validator/interface_checker.py",
+    "C:/data/works/FX/ATLAS/atlas/common/sandbox_builtins.py",
+    "C:/data/works/FX/ATLAS/atlas/common/models.py",
+    "C:/data/works/FX/ATLAS/atlas/backtest/runner.py",
+    "C:/data/works/FX/ATLAS/atlas/backtest/event_simulator.py",
+    "C:/data/works/FX/ATLAS/atlas/backtest/result_parser.py",
+    "C:/data/works/FX/ATLAS/atlas/backtest/vectorbt_engine.py",
+    "C:/data/works/FX/ATLAS/atlas/backtest/_mc_kernels.py",
+    "C:/data/works/FX/ATLAS/atlas/config/defaults.py",
+    "C:/data/works/FX/ATLAS/atlas/main.py",
+    "C:/data/works/FX/ATLAS/atlas/analyzer/metrics.py",
+    "C:/data/works/FX/ATLAS/atlas/feedback/context_builder.py",
+    "C:/data/works/FX/ATLAS/atlas/history/queries.py"
+  ],
+  "findings": [
+    {
+      "id": "CSR-301",
+      "severity": "medium",
+      "area": "atlas/validator/syntax_checker + atlas/common/sandbox_builtins",
+      "title": "SANDBOX_BUILTINS の __import__ が本物の組み込み関数のまま — 禁止モジュール制限がランタイム層で機能しない",
+      "description": "sandbox_builtins.py:29 の __import__: __import__ は Python import protocol に必須だがランタイムで禁止モジュールを何も制限しない。禁止はAST静的解析層のみ。CSR-101でName参照は遮断済みだが深層防御がない。カスタム __import__ への置換が推奨。",
+      "evidence": [
+        "C:/data/works/FX/ATLAS/atlas/common/sandbox_builtins.py:29"
+      ],
+      "reproduction": "理論的: AST 検査をすり抜ける未知の Name 参照経路が発見された場合、実行時に本物の __import__ が禁止モジュールの import を許可してしまう。",
+      "suggested_fix": "SANDBOX_BUILTINS の __import__ を禁止モジュールをチェックするカスタム関数に置換する。",
+      "regression_of": null
+    },
+    {
+      "id": "CSR-302",
+      "severity": "medium",
+      "area": "atlas/main.py",
+      "title": "metadata.json::parent_id をサニタイズせずに Path 結合 — パストラバーサルで strategies/ 外ファイルを読み込める",
+      "description": "main.py:144 で Path(strategies) / parent_id / evaluation / weakness.json のように parent_id を直接結合。parent_id に ../../../etc/passwd 等を設定した metadata.json があれば strategies/ 外のファイルが読み込まれ forbidden_patterns として LLM プロンプトに注入される（情報漏洩 + prompt injection）。",
+      "evidence": [
+        "C:/data/works/FX/ATLAS/atlas/main.py:141-144"
+      ],
+      "reproduction": "metadata.json に parent_id: ../../../tmp/evil を設定し strategies/../../../tmp/evil/evaluation/weakness.json を配置して atlas evaluate を実行する。",
+      "suggested_fix": "parent_id を r^ATLAS-\\d{4}-\\d{4}-\\d{3}$ の正規表現で検証し、不一致ならスキップ。結合後パスを .resolve().is_relative_to() で検証する。",
+      "regression_of": null
+    },
+    {
+      "id": "CSR-303",
+      "severity": "medium",
+      "area": "atlas/main.py + atlas/backtest/runner.py + atlas/analyzer/metrics.py",
+      "title": "generation_id CLI 引数をバリデーションなしに Path 結合 — strategies/ 外への読み書きが可能",
+      "description": "atlas validate / backtest / metrics 等の全 CLI コマンドが generation_id を Path(strategies) / generation_id / ... に直接結合する。generation_id に ../../../tmp/evil 等を渡せば strategies/ 外の読み書きが可能。save_backtest_result（runner.py:1525）は任意ディレクトリへの JSON 書き込みを可能にする。",
+      "evidence": [
+        "C:/data/works/FX/ATLAS/atlas/main.py:177-178",
+        "C:/data/works/FX/ATLAS/atlas/backtest/runner.py:1525-1526",
+        "C:/data/works/FX/ATLAS/atlas/analyzer/metrics.py:26"
+      ],
+      "reproduction": "python -m atlas.main validate ../../../tmp/evil を実行し strategies/../../../tmp/evil/strategy.py が存在すれば検証処理が走ることを確認する。",
+      "suggested_fix": "CLI 先頭で generation_id を r^ATLAS-\\d{4}-\\d{4}-\\d{3}$ で検証。_strategies_dir() で resolved_path.is_relative_to(_ATLAS_ROOT) を確認する。",
+      "regression_of": null
+    },
+    {
+      "id": "CSR-304",
+      "severity": "low",
+      "area": "atlas/validator/syntax_checker + atlas/common/sandbox_builtins",
+      "title": "type() 3 引数形式（動的クラス生成）が AST 検査を通過",
+      "description": "FORBIDDEN_BUILTINS に type は含まれず SANDBOX_BUILTINS にも type が含まれる。type(name, bases, dict) は動的クラス生成であり AST 検査（_check_forbidden_calls / _check_forbidden_builtin_names）のいずれでも検出されない。埋め込まれた callable が exec/eval/__import__ 等を使えば AST で遮断されるため既知 RCE 経路はないが攻撃面縮小の観点から禁止が推奨される。",
+      "evidence": [
+        "C:/data/works/FX/ATLAS/atlas/validator/syntax_checker.py:51-56",
+        "C:/data/works/FX/ATLAS/atlas/common/sandbox_builtins.py:45"
+      ],
+      "reproduction": "strategy.py に MyClass = type(\"X\", (object,), {\"f\": lambda s: None}) を記述して atlas validate Stage 1 を通過することを確認する。",
+      "suggested_fix": "_check_forbidden_calls に ast.Call の func.id == type かつ len(args) == 3 のケースを禁止パターンとして追加する。",
+      "regression_of": null
+    },
+    {
+      "id": "CSR-305",
+      "severity": "low",
+      "area": "atlas/backtest/event_simulator.py",
+      "title": "WFA 並列実行（ProcessPoolExecutor）時に子プロセスで __builtins__ サンドボックス制限が引き継がれない",
+      "description": "ATLAS_WFA_PARALLEL_WORKERS >= 2 時に ProcessPoolExecutor が strategy_cls を pickle して子プロセスへ渡す。子プロセスは spawn で起動されるため module.__builtins__ = _SANDBOX_BUILTINS の制限は引き継がれない。子プロセス内の strategy 実行時に __builtins__ が完全な Python builtins になる。Stage 1-4 を全てすり抜けた場合のみ影響。デフォルト ATLAS_WFA_PARALLEL_WORKERS=1 のため通常運用では不発動。",
+      "evidence": [
+        "C:/data/works/FX/ATLAS/atlas/backtest/event_simulator.py:1785-1799",
+        "C:/data/works/FX/ATLAS/atlas/backtest/event_simulator.py:1710-1717"
+      ],
+      "reproduction": "ATLAS_WFA_PARALLEL_WORKERS=2 を設定して backtest を実行し _walk_worker 内で __builtins__ が完全な builtins であることを確認する。",
+      "suggested_fix": "_walk_worker 先頭で sandbox_builtins を再適用するか WFA 並列化を subprocess + JSON 通信に変更する。",
+      "regression_of": null
+    },
+    {
+      "id": "CSR-306",
+      "severity": "low",
+      "area": "atlas/feedback/context_builder.py",
+      "title": "parquet 読み込み失敗を except Exception: return None でログなし握りつぶし — CLAUDE.md 規約違反",
+      "description": "context_builder.py:546-549 の except Exception: return None は CLAUDE.md コーディング規約（例外は握りつぶさず必ずログに記録する）に違反する。市場データ破損時にログが出力されず None が返され、コンテキスト構築が無音でフォールバックする。",
+      "evidence": [
+        "C:/data/works/FX/ATLAS/atlas/feedback/context_builder.py:546-549"
+      ],
+      "reproduction": "対象 parquet を破損させて atlas context を実行し ログに何も出力されないことを確認する。",
+      "suggested_fix": "except 節で logger.warning を追加し例外種類と対象パスを記録する。",
+      "regression_of": null
+    }
+  ]
+}

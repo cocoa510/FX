@@ -1,0 +1,109 @@
+{
+  "agent": "platform-architect",
+  "scope": ["PR22", "PR25", "PR26", "PR29", "PR30", "PR33", "PR36", "PR23"],
+  "findings": [
+    {
+      "id": "PA-001",
+      "severity": "high",
+      "pr": "PR30",
+      "area": "monitoring/kill_switch reason ラベル (H-2)",
+      "title": "PR30 が計算した trigger_reason が metrics に到達しない — H-2 は症状を移動しただけで根治していない",
+      "description": "H-2 の本質は『fx_kill_switch_triggered_total の reason が常に ptrc_post_unknown に丸まる』こと。PR29 は Counter に reason ラベルを追加し、PR30 は coordinator.py:557-563 で triggers(複数) を読んで trigger_reason (例 'ptrc_post_daily_loss_100pct') を正しく算出し force_activate(reason=trigger_reason) に渡すよう直した。しかし KillSwitch.force_activate(reason, source) は最終的に _activate() を呼ぶだけで、実際にメトリクスを増やす唯一の本番呼び出しは circuit_breaker.py:323 の `_metrics.inc_kill_switch_triggered()` であり、ここに reason 引数が渡されていない。inc_kill_switch_triggered の default は reason='unknown' なので、PR30 が苦労して算出した trigger_reason は _activate に到達する前に捨てられ、メトリクスは『常に reason=unknown』のまま。`git grep inc_kill_switch_triggered` の本番呼び出しは circuit_breaker.py:323 の1箇所のみで、reason を渡す経路は存在しない。すなわち PR29+PR30 の reason ラベル機構は本番でデータソースを持たず、H-2(『複合トリガが可視化されない』) は未解決。計画 v3 PR30 詳細(plan:452)は coordinator 内で `self._metrics.inc_kill_switch_triggered(reason=trigger_reason)` を直接呼ぶ設計だったが、実装は force_activate 経由に変えた結果、reason 伝播が断線した。",
+      "evidence": [
+        "trading_platform/core/execution_engine/coordinator.py:560",
+        "trading_platform/core/execution_engine/coordinator.py:564",
+        "trading_platform/core/risk_engine/circuit_breaker.py:323",
+        "trading_platform/core/risk_engine/circuit_breaker.py:485",
+        "trading_platform/core/monitoring/metrics.py:478"
+      ],
+      "verdict": "fix_incomplete",
+      "suggested_fix": "circuit_breaker._activate() に reason を伝播させる。force_activate(reason, source) と evaluate_and_activate() の双方が _activate(reason=...) を渡し、_activate 内で `_metrics.inc_kill_switch_triggered(reason=reason)` を呼ぶ (evaluate_and_activate 経由は reason='daily_realized_loss_exceeded' 等を渡す)。あるいは coordinator 側で force_activate 後に self._metrics.inc_kill_switch_triggered(reason=trigger_reason) を直接呼ぶ (plan v3 PR30 の元設計)。いずれにせよ end-to-end (coordinator → _activate → メトリクス) で reason ラベルが付くことを検証するテストを追加する。"
+    },
+    {
+      "id": "PA-002",
+      "severity": "medium",
+      "pr": "PR30",
+      "area": "test 実効性 (H-2)",
+      "title": "PR30 のテストが coordinator ロジックをヘルパで再実装し、本番のメトリクス到達を検証しない false-green",
+      "description": "test_coordinator_ptrc_post_triggers.py の _invoke_handle_action はテスト用ヘルパで coordinator.py:551-567 のロジックを『再実装』し、AsyncMock の force_activate が正しい reason 引数で呼ばれたかだけを assert する。実際の KillSwitch._activate → inc_kill_switch_triggered のメトリクス経路は一切実行されないため、PA-001 の断線 (reason がメトリクスに届かない) を検出できない。test_single_trigger_uses_ptrc_post_prefix が green でも、本番では reason='unknown' が記録される。要件 (reason ラベルが実際の trigger を反映) を検証しておらず、実装(force_activate 呼び出し)をなぞるだけ。残りは grep ベースの存在確認 (test_coordinator_no_longer_uses_singular_trigger_key 等) で、キー食い違いの再発は防ぐが reason 伝播は担保しない。",
+      "evidence": [
+        "tests/unit/test_coordinator_ptrc_post_triggers.py:38",
+        "tests/unit/test_coordinator_ptrc_post_triggers.py:71",
+        "tests/unit/test_coordinator_ptrc_post_triggers.py:81"
+      ],
+      "verdict": "false_green",
+      "suggested_fix": "ExecutionCoordinator + 実 KillSwitch (isolated MetricsCollector(registry=CollectorRegistry()) 注入) + PTRCPostAction(triggers=[...]) で _run_post_trade_risk を実行し、collector の内部カウンタ kill_switch_triggered_ptrc_post_daily_loss_100pct が +1 になることを assert する統合寄りテストに置換または追加する。"
+    },
+    {
+      "id": "PA-003",
+      "severity": "medium",
+      "pr": "PR36",
+      "area": "data/market_data 再接続ログ (H-9)",
+      "title": "再接続 logger.info が `_metrics is not None` ガード内にあり、PR が解消対象とした『Prometheus 未起動の Paper 期間』では発火しない",
+      "description": "PR36 の目的(コミットメッセージ明記)は『Prometheus 未起動の Paper シャドー期間でも再接続履歴を unified_runner.jsonl で追跡可能にする』こと。しかし新規 logger.info('OANDA Stream再接続成功') は stream_receiver.py:223 の `if not self._is_first_connect and _metrics is not None:` ブロック内に配置されている。Prometheus/_metrics が None の環境 (まさに PR が想定する Paper 監視シナリオ) では _metrics is not None が False となり、reconnect ログも一緒にスキップされる。結果、PR が解消すると謳ったケースで H-9 は依然未解決。なお :214 の汎用『OANDA Stream接続成功』ログは _metrics に関係なく出るが初回/再接続を区別しない (v2 が PARTIAL とした点) ため、再接続識別の改善は _metrics ありの環境に限定されてしまう。",
+      "evidence": [
+        "trading_platform/data/market_data/stream_receiver.py:223",
+        "trading_platform/data/market_data/stream_receiver.py:225"
+      ],
+      "verdict": "fix_incomplete",
+      "suggested_fix": "logger.info を `_metrics is not None` ガードの外、`if not self._is_first_connect:` 直下に移動し、メトリクス記録 (inc_stream_reconnect) のみ `if _metrics is not None:` で内側にネストする。これで Prometheus 有無に関わらず reconnect が jsonl に必ず記録される。"
+    },
+    {
+      "id": "PA-004",
+      "severity": "low",
+      "pr": "PR36",
+      "area": "test 実効性 (H-9)",
+      "title": "PR36 テストが logger をガード内に固定する構造を assert し、PA-003 の欠陥を仕様として固着させる false-green",
+      "description": "test_stream_receiver_reconnect_log.py は全て source-text/行番号ベース。test_reconnect_log_is_inside_non_first_connect_branch は『if not self._is_first_connect かつ _metrics を含む行』の直後 8 行以内に再接続ログがあることを assert する (line 66 の条件は両キーワードを含む行=_metrics ガード行にマッチ)。つまり PA-003 の誤った配置 (_metrics ガード内) を正しい状態として固定してしまう。reconnect 経路を実際に走らせ _metrics=None でもログが出ることを検証するテストは無い。",
+      "evidence": [
+        "tests/unit/test_stream_receiver_reconnect_log.py:57",
+        "tests/unit/test_stream_receiver_reconnect_log.py:66",
+        "tests/unit/test_stream_receiver_reconnect_log.py:76"
+      ],
+      "verdict": "false_green",
+      "suggested_fix": "PA-003 修正後、OANDAStreamReceiver を _metrics=None で生成し _is_first_connect=False の再接続をシミュレートして structlog capture (capsys/structlog testing) で 'OANDA Stream再接続成功' が出力されることを assert する behavioral テストへ置換する。行番号/ガード位置への依存を排除する。"
+    },
+    {
+      "id": "PA-005",
+      "severity": "low",
+      "pr": "PR25",
+      "area": "test 実効性 (C-2)",
+      "title": "PR25 のテストが大半 source/AST grep で、計画 v3 が要求した behavioral assert (slot.feature_store._metrics is runner._metrics / compute error counter increment) が未実装",
+      "description": "実コード上 C-2 の根本原因 (本番 LIVE 経路で LiveFeatureStore に metrics 未注入) は正しく解消されている: runner.py:368-371 で metrics=self._metrics、live_store.py の _record_compute_error→inc_feature_compute_error 経路 (live_store.py:472, 呼出元 526/546/598) も生きており、本番で fx_feature_store_compute_errors_total が発火する配線になっている (検証済、ここは PASS)。ただし test_unified_runner_metrics_injection.py の 7 テスト中 6 件は runner.py のソース文字列/AST 検査 (metrics=self._metrics が書かれているか) であり、計画 v3 PR25 詳細が示した test_metrics_injected_to_feature_store (slot.feature_store._metrics is runner._metrics) と test_feature_compute_error_counter_increments (不正 indicator→ValueError→counter+1) という実挙動検証が実装されていない。配線自体は正しいので致命ではないが、将来 _setup_slot の構築が変わっても string が残れば green になり得る弱さがある。",
+      "evidence": [
+        "tests/unit/test_unified_runner_metrics_injection.py:68",
+        "tests/unit/test_unified_runner_metrics_injection.py:80",
+        "trading_platform/core/unified_runner/runner.py:368",
+        "trading_platform/data/feature_store/live_store.py:472"
+      ],
+      "verdict": "false_green",
+      "suggested_fix": "UnifiedRunner を isolated metrics で initialize() し、各 slot.feature_store._metrics is runner._metrics を assert するテストと、LiveFeatureStore に不正特徴量を投入して _feature_compute_errors / inc_feature_compute_error が増えることを確認するテストを追加する (計画 v3 PR25 §テスト追加 の3本)。"
+    },
+    {
+      "id": "PA-006",
+      "severity": "low",
+      "pr": "PR22",
+      "area": "ADR-0004 整合 (C-2/F-1)",
+      "title": "ADR-0004 が PositionReconciler を UnifiedRunner の DI 注入対象と明記するが、UnifiedRunner は PositionReconciler を構築せず PR25 でも未注入 (ADR と実装の乖離)",
+      "description": "ADR-0004 (PR22) は line 46/73 で PositionReconciler を『UnifiedRunner から metrics=self._metrics を注入』する対象として列挙する。しかし UnifiedRunner は PositionReconciler を一切構築しておらず (runner.py に Reconciler の生成・参照なし、関連記述は risk_supervisor.py のコメントのみ)、PR25 でも注入されていない。実害は無い (構築点が無いので注入のしようがない) が、ADR の記述が実装と乖離しており、後続 PR が『未注入=欠陥』と誤認するリスクがある。F-1 (self._metrics AttributeError) と C-2 (LiveFeatureStore/EmailNotifier 注入) は確実に解消されているため重要度は low。",
+      "evidence": [
+        "docs/adr/0004_metrics_collector_dependency_injection.md:46",
+        "docs/adr/0004_metrics_collector_dependency_injection.md:73",
+        "trading_platform/core/unified_runner/runner.py:357"
+      ],
+      "verdict": "doc_gap",
+      "suggested_fix": "ADR-0004 の注入対象表で PositionReconciler を『main.py(FastAPI) 経路のみ。UnifiedRunner は Reconciler を直接構築しないため対象外』と注記訂正する (R4/PR60 のドキュメント整理に同梱可)。"
+    }
+  ],
+  "pr_verdicts": {
+    "PR22": "PARTIAL",
+    "PR25": "PASS",
+    "PR26": "PASS",
+    "PR29": "PARTIAL",
+    "PR30": "PARTIAL",
+    "PR33": "PASS",
+    "PR36": "PARTIAL",
+    "PR23": "PASS"
+  },
+  "summary": "R2 アーキテクチャ修正の検証結果: C-2 (PR25/PR26) と C-3 (PR23) は根本原因を確実にクローズ。PR25 は runner.py:368-371 で LiveFeatureStore に metrics=self._metrics を注入し、live_store.py の _record_compute_error→inc_feature_compute_error 経路まで生きているため、本番 LIVE で fx_feature_store_compute_errors_total が実発火する配線が成立 (PR12 計装のデッドコード化を解消)。EmailNotifier への注入も配線済。PR23 は autorefresh の二重発火を _AUTOREFRESH_AVAILABLE で完全に相互排他化。PR33 は計画通り docs-only (実装は R3/PR37)。一方、最重要の指摘は H-2 (PR29+PR30): coordinator は triggers(複数)を正しく読み trigger_reason を算出するようになったが、その reason が KillSwitch.force_activate→_activate を経由する際に circuit_breaker.py:323 の inc_kill_switch_triggered() へ伝播されず (引数なしで default 'unknown')、本番メトリクスは依然 reason='unknown' 固定。『複合トリガが可視化されない』という H-2 の症状は ptrc_post_unknown から unknown に名前が変わっただけで根治していない (PA-001)。PR30 のテストは coordinator ロジックをヘルパで再実装し AsyncMock の force_activate 呼び出しを assert するのみで、この断線を検出できない false-green (PA-002)。PR36 (H-9) は再接続 logger.info を _metrics is not None ガード内に置いたため、PR 自身が解消対象とした『Prometheus 未起動の Paper 期間』では発火せず未解決 (PA-003)、かつテストがその誤配置を固定する false-green (PA-004)。PR25 のテスト弱さ (PA-005) と ADR-0004 の PositionReconciler 記述乖離 (PA-006) は low。総括: Critical (C-2/C-3) はクローズ済だが、High の H-2 はメトリクス到達経路の断線で実質未クローズ、H-9 は条件付き未クローズ。R2 完了判定基準『/metrics に fx_kill_switch_triggered_total{reason} 出現』は label 自体は出るが reason は常に unknown となり、意図した可観測性は得られていない。PA-001 (H-2 reason 伝播) を R2 のうちに追修正することを強く推奨。"
+}

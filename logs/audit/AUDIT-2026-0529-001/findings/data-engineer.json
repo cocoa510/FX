@@ -1,0 +1,219 @@
+{
+  "agent": "data-engineer",
+  "scope": "FTS データ層（FeatureStore / Parity / Market Data / Data Quality / 永続化 / イベント駆動）",
+  "audit_commit": "2803be57b058b8a963f9224185195ffeeb73d71c",
+  "files_reviewed": [
+    "trading_platform/data/feature_store/live_store.py",
+    "trading_platform/data/feature_store/indicators.py",
+    "trading_platform/data/market_data/bar_builder.py",
+    "trading_platform/data/market_data/candle_fetcher.py",
+    "trading_platform/data/market_data/stream_receiver.py",
+    "trading_platform/data/quality/quality_engine.py",
+    "trading_platform/data/state_store/redis_store.py",
+    "trading_platform/data/trade_context/snapshot_writer.py",
+    "trading_platform/data/common/timeframes.py",
+    "trading_platform/core/unified_runner/runner.py",
+    "trading_platform/core/unified_runner/data_provider.py",
+    "trading_platform/core/unified_runner/strategy_slot.py",
+    "trading_platform/core/models/payloads.py",
+    "trading_platform/broker/oanda_adapter/client.py",
+    "trading_platform/common/iso_time.py",
+    "scripts/run_unified.py",
+    "scripts/import_atlas_strategy.py",
+    "tests/parity/test_feature_store_parity.py",
+    "tests/parity/test_feature_store_parity_buffer_trim.py",
+    "tests/parity/test_feature_store_parity_mtf.py",
+    "tests/parity/test_bar_source_parity.py",
+    "tests/parity/test_mtf_lookahead_red_team.py",
+    "tests/unit/test_de201_dynamic_warmup.py",
+    "tests/unit/test_candle_fetcher_complete_contract.py"
+  ],
+  "findings": [
+    {
+      "id": "DE-301",
+      "severity": "high",
+      "area": "parity",
+      "title": "WARMUP_CONVERGENCE_FACTOR=13 が MAX_WARMUP_BARS=5000 で頭打ちになる高 period 戦略で EWM 残差 ~3.78e-6 の Parity ドリフトが残存（ATLAS-2026-0508-069 ema_800 実例）",
+      "description": "DE-201 修正で warmup 本数を `max_period × 13` に動的化したが、OANDA candle API 上限の MAX_WARMUP_BARS=5000 で強制クランプされる。period=800（ATLAS-2026-0508-069 が ema_800 を使用、確認済み）では required=10400 だが capped to 5000、EWM(adjust=False) 残差 = ((800-1)/(800+1))^5000 ≈ exp(-12.49) ≈ 3.78e-6 となる。これは Live FeatureStore の文書化 Parity 許容 1e-10 の約 38000 倍。LiveFeatureStore 側 buffer (`_effective_buffer_size = 800×50 = 40000`) は時間経過で埋まるが、warmup 直後〜数万バー（H1 で約 4 年）の Live 運用初期で ATLAS BT との signal 分岐が反転する可能性がある。test_de201_dynamic_warmup.py:88 のコメントも「残差 exp(-12.5)≈3.7e-6」と本数値を明記しており、開発側は drift を認知したまま「OANDA API 上限のため受容」している状態。当該戦略が live execution_mode に昇格した瞬間に Parity 保証が失われる構造リスク。",
+      "evidence": [
+        "trading_platform/core/unified_runner/runner.py:71-80",
+        "trading_platform/core/unified_runner/runner.py:1357-1384",
+        "trading_platform/strategies/imported/ATLAS-2026-0508-069/strategy.py:66 (ema_slow_period=800)",
+        "trading_platform/strategies/imported/ATLAS-2026-0508-069/strategy.py:82 (register ema_800)",
+        "trading_platform/data/feature_store/live_store.py:38-49 (BUFFER_SAFETY_FACTOR=50)",
+        "trading_platform/data/feature_store/live_store.py:89 (MAX_REGISTRABLE_PERIOD=1000)",
+        "tests/unit/test_de201_dynamic_warmup.py:84-92"
+      ],
+      "reproduction": "1. ATLAS-2026-0508-069 の strategy.py を読むと ema_800 を register。2. runner._warmup_bars_for は max_period=800 → required=10400 → MAX_WARMUP_BARS=5000 にクランプ。3. ATLAS BT は MTFBundle 全 history (~万本オーダー) で EWM を計算するため初期値は完全収束。4. Live は 5000 本 warmup 後の初期 EMA 値が ATLAS BT の同時刻 EMA 値と 3.78e-6 程度乖離。5. ema_fast > ema_slow のクロス判定が境界近傍で反転 → signal 不一致発生。MAX_REGISTRABLE_PERIOD=1000 は許可しているが収束保証は与えていない不整合。",
+      "suggested_fix": "(a) MAX_REGISTRABLE_PERIOD を `MAX_WARMUP_BARS / WARMUP_CONVERGENCE_FACTOR = 5000/13 ≈ 384` まで引き下げ register() で早期 ValueError、または (b) MAX_WARMUP_BARS を OANDA から複数リクエスト分割（5000×N）で取得して required を満たす実装、または (c) `live_eligible` 判定時に `max_registered_period > 384` の戦略を live mode に投入禁止する gate を loader / import_atlas_strategy に追加。最低限、period が capped 領域に入った場合は当該 strategy_id を Live で REJECT するハードガードが必要（現状は WARN ログのみ）。",
+      "parity_impact": "BT vs Live 乖離: 高 period 戦略（>=384）の Live 初期 ~数千〜数万バーで残差 1e-10 超。signal 境界近傍で entry/exit が分岐し、PF/Sharpe/trade 数が ATLAS BT と乖離する。",
+      "regression_of": null
+    },
+    {
+      "id": "DE-302",
+      "severity": "medium",
+      "area": "feature_store",
+      "title": "MTF 遅延 allocation 時の主 TF 既存バー timestamp 列に NaT 充填され、それ以降の _align_aux_to_primary が undefined behavior になる",
+      "description": "`LiveFeatureStore._allocate_auxiliary_tf` (live_store.py:246-249) は、`register(timeframe=<未登録aux_tf>)` 呼び出しで MTF モードへ昇格する際、主 TF DataFrame に timestamp 列が存在しなければ `primary_df.insert(0, 'timestamp', pd.NaT)` で全行を NaT 埋めする。コメントは「実運用では register() が strategy.initialize() 内で呼ばれ update_bar() より前であるため primary_df は常に空, 以下の NaT 埋めは安全策」と記述しているが、ATLAS Strategy IF は `initialize()` 後に `register()` 追加呼出を禁じておらず、また FTS-DE-R9-001 の遅延 allocation 仕様は「`register(name, ind, timeframe='H4')` と書くだけで動作する」ことを目的としている。strategy が `generate_signal` 中（既に update_bar 完了後）に aux TF を遅延登録するシナリオで、`_align_aux_to_primary` の `primary_ts = pd.DatetimeIndex(primary_df['timestamp'])` が NaT を含み、`pd.merge_asof` で `RuntimeError: left keys must be sorted` または silent NaN 返却となる（pandas バージョン依存）。",
+      "evidence": [
+        "trading_platform/data/feature_store/live_store.py:216-255 (_allocate_auxiliary_tf)",
+        "trading_platform/data/feature_store/live_store.py:240-249 (NaT 充填パス)",
+        "trading_platform/data/feature_store/live_store.py:664-680 (_align_aux_to_primary が primary_ts を使う)"
+      ],
+      "reproduction": "fs = LiveFeatureStore() / fs.update_bar({open:1, high:2, low:0.5, close:1.5, volume:100}) を 100 本流す（単一 TF モード）/ fs.register('h4_ema_50', 'ema', period=50, timeframe='H4') → mtf_enabled=True に昇格、primary_df の timestamp 列は全行 NaT / fs.update_bar(...timestamp=t, timeframe='H4') / fs.update_bar({open..., timestamp=t}, timeframe='primary_tf') → _align_aux_to_primary が NaT 含む primary_ts で merge_asof 呼出。",
+      "suggested_fix": "(a) `_allocate_auxiliary_tf` で primary_df.empty でなければ ValueError を上げ「MTF aux TF は update_bar 前に register せよ」と明示する（fail-fast）、または (b) NaT 充填の代わりに bar_count から「これらの過去バーは MTF align 対象外」と明示マークし `_align_aux_to_primary` で NaT 行をスキップする実装。現状の silent NaT 充填は最も悪い defensive coding。",
+      "parity_impact": "Live で aux TF 遅延 register シナリオの parity が崩壊し得る。BT 側は MTFBundle 起点で aux が必ず存在するため発生しない非対称シナリオ。",
+      "regression_of": null
+    },
+    {
+      "id": "DE-303",
+      "severity": "high",
+      "area": "market_data",
+      "title": "SharedDataProvider.poll_latest が transient 例外を握りつぶし、メトリクスもアラートも上がらない（観測 dead path）",
+      "description": "`SharedDataProvider.poll_latest` (data_provider.py:154-162) は `_broker.get_candles(instrument, granularity, 3)` 失敗時に `logger.exception` のみで None 返却する。retry はなく、metrics への失敗カウンタ通知もない。production の唯一の確定バー発行系統である poll_latest が連続失敗してもメトリクスから検知不能。`UnifiedRunner.run_once` (runner.py:1518-1534) は `get_account_info` 失敗のみ `_consecutive_poll_errors` で追跡しているが、各 (instrument, granularity) ペアの poll_latest 失敗は集計対象外。さらに、`OANDABroker.get_candles` の HTTP セッションは `ORDER_TIMEOUT_SEC=10.0` （client.py:33, 187）の総合タイムアウトを order 系と共用しており、market data fetch でも 10 秒で諦める設計。週末や regional 障害で長時間 fetch が失敗しても観測できず、各戦略は silent に「最新バーなし」状態が続く（新規エントリー 0 件の幻 idle 状態）。",
+      "evidence": [
+        "trading_platform/core/unified_runner/data_provider.py:154-162 (例外握り潰し)",
+        "trading_platform/core/unified_runner/data_provider.py:134-191 (retry/metrics なし)",
+        "trading_platform/core/unified_runner/runner.py:1518-1534 (account_info のみカウント)",
+        "trading_platform/broker/oanda_adapter/client.py:33 (ORDER_TIMEOUT_SEC=10.0)",
+        "trading_platform/broker/oanda_adapter/client.py:181-188 (candle と order が同一セッション・同一タイムアウト)",
+        "trading_platform/broker/oanda_adapter/client.py:728-786 (get_candles に retry なし)"
+      ],
+      "reproduction": "OANDA practice API の URL を一時的に意図的に 503 を返すモックに切り替え（または network throttle で 11 秒遅延を注入）。`scripts/run_unified.py` 起動 → poll_latest が None を返し続けるが logger.exception 以外何も発生しない。Prometheus に該当 counter なし、structlog の `poll_latest_error` だけが蓄積。スロット数 N × instrument 数 M × poll 周期で N×M 件/分のログ氾濫だが、external monitoring からは「何もしていない」と判定不能。",
+      "suggested_fix": "(1) MetricsCollector に `inc_poll_latest_error(instrument, granularity, reason)` を追加し data_provider で記録。(2) 連続失敗回数に応じた exponential backoff（次 poll で再試行は OK だが、3 回連続失敗で RiskAlert WARN）。(3) market data 用に candle 専用セッション + 専用タイムアウト（30 秒程度）を OANDABroker に分離。(4) Prometheus alerting_rules.yml に `FxPollLatestErrorsHigh` ルール追加。",
+      "parity_impact": "直接的な数値 Parity ドリフトは生まないが、bar 欠損で LiveFeatureStore のバー列が ATLAS BT より N 本欠ける状態が長期化し、EWM 系の永続ドリフトを誘発する。DE-002 forced_publish は「品質 FAIL でも publish 継続」と同じ問題意識だが、poll_latest 例外で「そもそも publish に到達しない」経路は未対応。",
+      "regression_of": null
+    },
+    {
+      "id": "DE-304",
+      "severity": "medium",
+      "area": "market_data",
+      "title": "SharedDataProvider が gap 検出を行わず、poll 間で複数バー欠落しても 1 本のみ emit して残りを silent drop する",
+      "description": "`SharedDataProvider.poll_latest` (data_provider.py:155, 168) は `get_candles(..., count=3)` で直近 3 本取得し、その「最終バー」のみを返却する。連続する直近 3 本のうち中間の 2 本が `_last_bar_time` より新しくても捨てている。長時間プロセス起動や poll_interval > granularity_sec の構成（M1 戦略を 60 秒 poll はちょうど境界、M5 戦略を 60 秒 poll は安全側だが H1 戦略を 60 秒 poll で再起動直後の backfill 不全期間など）で **欠落バーが発生しても LiveFeatureStore に配送されず**、BT との bar 連続性が崩れる。CandleFetcher 側には `backfill_missing` 実装があるが、production の UnifiedRunner はそれを呼んでおらず（grep 結果: CandleFetcher は main.py 経路のみ使用、run_unified.py 経由では未配線）、SharedDataProvider 経路には gap 復元機構が存在しない。",
+      "evidence": [
+        "trading_platform/core/unified_runner/data_provider.py:155 (count=3 固定)",
+        "trading_platform/core/unified_runner/data_provider.py:168-184 (latest 1 本のみ抽出)",
+        "trading_platform/core/unified_runner/data_provider.py:282-298 (get_last_bar_time は存在するが gap 検出ロジック未実装)",
+        "trading_platform/core/unified_runner/runner.py:1572-1617 (poll_latest 直接利用、backfill 呼び出しなし)",
+        "trading_platform/data/market_data/candle_fetcher.py:416-450 (backfill_missing 実装は存在するが UnifiedRunner から未配線)"
+      ],
+      "reproduction": "FakeBroker 構成: count=3 のとき [t0, t0+1, t0+2] のバー 3 本を返す mock を仕込む。`_last_bar_time = t0-1` の状態で poll_latest を 1 回呼ぶと t0+2 のみ返却され、t0 と t0+1 は silent drop される。LiveFeatureStore のバー列に t0, t0+1 が存在しないため `df.iloc[-3]` 等の参照が ATLAS BT と乖離する。",
+      "suggested_fix": "(a) poll_latest を `prev_time` より新しい全 candle を時系列順に yield する API に変更（list を返す）し、UnifiedRunner 側で順に slot.on_bar() を呼ぶ。(b) または gap 検出時に `CandleFetcher.fetch_range(prev_time, now)` を呼び出すフォールバック実装を SharedDataProvider に追加。(c) count=3 を `count = max(3, ceil((now - prev_time)/tf_sec) + 3)` のような動的サイズに変更。",
+      "parity_impact": "BT (連続バー前提) vs Live (bar 欠落で次バーへスキップ) の系統ドリフト。長時間連続稼働で蓄積し、戦略の trade pattern が ATLAS BT と非可逆的に乖離する。EWM 系は欠落バーぶん時刻が圧縮されるため特に深刻。",
+      "regression_of": null
+    },
+    {
+      "id": "DE-305",
+      "severity": "medium",
+      "area": "parity",
+      "title": "_warmup_bars_for が 1 つの数値を主 TF/aux TF 双方に流用しており、aux TF（H4）の EWM 収束を満たさない可能性がある",
+      "description": "`UnifiedRunner._warmup_bars_for` (runner.py:1357-1384) は slot の `max_registered_period` から `count = min(max(required, 2000), 5000)` を計算するが、これは TF 単位ではなく **slot 全体の最大 period** で算出される。算出後、`_warmup_all` は (a) `_instrument_slots[(instr, primary_tf)]` で primary 用 count を取得し primary バーを fetch、(b) `_aux_instrument_slots[(instr, aux_tf)]` で aux 用 count を再計算して同 count 分の aux バーを fetch する（runner.py:1395, 1423）。slot 群が同じであれば max_period も同じになり、aux TF (例: H4) の収束に対して count バー数が（時間スパンとしては十分でも）**そのまま使われる**。例として primary M15 + aux H4 で max_period=400 の場合、両 TF とも 5000 本 fetch。H4 5000 本は約 5.7 年で fine、M15 5000 本は約 52 日。これは概ね問題ないが、**primary period のみ大で aux period 小**の場合（primary EMA period=400, aux period=20）でも aux に 5000 H4 バーを取得する無駄が発生し OANDA API 過大消費。逆に aux period 大・primary period 小では aux 用に十分な数値が確保されるが、その必要性に primary は引きずられる。設計として TF 別に required を分離した方がリソース効率と Parity 担保の両方を改善できる。",
+      "evidence": [
+        "trading_platform/core/unified_runner/runner.py:1357-1384 (_warmup_bars_for は slot 全体の max を取る)",
+        "trading_platform/core/unified_runner/runner.py:1395-1397 (primary に warmup_count を渡す)",
+        "trading_platform/core/unified_runner/runner.py:1423-1426 (aux に同 warmup_count を渡す)",
+        "trading_platform/data/feature_store/live_store.py:449-458 (_max_registered_period は全 TF 横断 max)"
+      ],
+      "reproduction": "戦略が primary=M15 period=20、aux=H4 period=200 を register。_warmup_bars_for は max=200 → 2600 を返す。aux H4 に対し 2600 本 fetch（約 433 日）。aux period=200 の EWM 残差は exp(-2 × 2600/201) ≈ 4.6e-12 で OK。これは現状動作する。逆ケース: primary=M15 period=200、aux=H4 period=20 では max=200 → 2600。aux H4 2600 本（433 日）は明らかに過剰、OANDA API の rate limit / quota 圧迫。M15 2600 本は約 27 日で period=200 (~50時間) の収束には十分。",
+      "suggested_fix": "_warmup_bars_for(slots) を _warmup_bars_for(slots, target_tf) に変更し、各 TF で `_registered_by_tf[target_tf]` の max_period のみを参照する。または `LiveFeatureStore.max_registered_period_by_tf(tf)` プロパティを新設し、runner はそれを参照する。",
+      "parity_impact": "数値 Parity 自体は損なわない（過剰 fetch のため）。ただし OANDA quota 圧迫、起動時間延長、API rate limit 違反リスクで実運用阻害。低リスクだが構造的に修正すべき設計欠陥。",
+      "regression_of": null
+    },
+    {
+      "id": "DE-306",
+      "severity": "medium",
+      "area": "quality",
+      "title": "DataQualityEngine が D1 専用の週末 gap override を提供しているが、月曜開場直後の H1/H4 にも同様の処理が必要で、現実装では FAIL 発生",
+      "description": "`DataQualityEngine._check_gap` (quality_engine.py:669-735) は M-DATA-2 で週末秒数を `_count_weekend_seconds` で差し引く改善が入っているが、月曜開場時刻の H1 / H4 バーで効果が限定的になる場合がある。FX 市場は UTC 金曜 22:00 〜 日曜 22:00（実態は Sydney 月曜開場 = UTC 月曜 04:00 前後だが OANDA は日曜 22:00 から提供）が閉鎖期間。`_count_weekend_seconds` は 00:00 UTC 起点で土日全日のみカウントする粗い実装で、金曜 22:00 以降 + 日曜 22:00 以前の 4 時間は『non-weekend』扱い。つまり金曜 23:00 UTC の最終 H1 バーと月曜 0:00 UTC の最初 H1 バー（実際は日曜 22:00 の H1 バー = OANDA は日曜分も配信）の間で raw_gap = 60h2(=216,000s)、weekend_seconds = 2 日 × 86400 - 4h（金曜 22-24 + 日曜 22-24）≈ 158,400s → effective_gap ≈ 57,600s = 16h。H1 max_gap = 3600 × 1.5 = 5400s。16h > 5400s → FAIL になる。docstring の意図とは異なる結果。`gap_seconds_override_by_tf` で {'H1': 60*60*72} 等の手動上書きでしか回避できない。",
+      "evidence": [
+        "trading_platform/data/quality/quality_engine.py:669-735 (_check_gap)",
+        "trading_platform/data/quality/quality_engine.py:737-761 (_count_weekend_seconds、00:00 UTC 起点で日単位カウント)"
+      ],
+      "reproduction": "DataQualityConfig() (override なし) で validate_bar に金曜 23:00 UTC バー → 月曜 0:00 UTC H1 バーを渡す。raw_gap_seconds=216000、weekend_seconds=172800 (土日丸 2 日)、effective_gap=43200(12h)、max_gap=5400 → FAIL。DE-002 設計により drop はされないが forced_publish カウンタが毎週月曜朝に増加。CRITICAL RiskAlert が毎週末誤発火する経路でもある。",
+      "suggested_fix": "(a) `_count_weekend_seconds` を OANDA 公式の市場閉鎖時刻（金曜 22:00 〜 日曜 22:00 UTC）に合わせて分単位で計算し直す。(b) または `_check_gap` で「金曜 21:00 以降の last_bar」かつ「月曜 0:00 までの bar」を special case として PASS にする。(c) 当面の運用回避策として default config に `gap_seconds_override_by_tf={'H1': 86400*3, 'H4': 86400*3, 'D1': 86400*4}` 等の安全側 default を入れる。",
+      "parity_impact": "Parity 直接影響なし（DE-002 で publish は継続）。ただし毎週末に CRITICAL RiskAlert が誤発火し alert fatigue を誘発し、真の異常見落としリスクが上がる二次的問題。",
+      "regression_of": null
+    },
+    {
+      "id": "DE-307",
+      "severity": "low",
+      "area": "feature_store",
+      "title": "_recalculate_effective_buffer_size docstring と実装の不整合（SAFETY_FACTOR=5 と記述するが実装は 50）",
+      "description": "`_recalculate_effective_buffer_size` (live_store.py:438-447) の docstring に `SAFETY_FACTOR=5 はこれを確保する経験値（fix_design_data001.md 参照）` と記述されているが、実装の `BUFFER_SAFETY_FACTOR = 50` (line 49) と不整合。同様に test_feature_store_parity_buffer_trim.py:340 のコメント `max(period) = 100, SAFETY_FACTOR=5 → 500 に拡張されるはず` も古い数値のまま。テストの assert は `>= 500` で 100*50=5000 も passes するため緑だが、コメントは誤誘導する。docstring は H-DATA-3 改訂（PR12, MAX_REGISTRABLE_PERIOD=1000 と MAX_BUFFER_SIZE=50000 への拡張）の際に追従されなかった drift。",
+      "evidence": [
+        "trading_platform/data/feature_store/live_store.py:38-49 (BUFFER_SAFETY_FACTOR=50)",
+        "trading_platform/data/feature_store/live_store.py:438-447 (docstring SAFETY_FACTOR=5)",
+        "tests/parity/test_feature_store_parity_buffer_trim.py:340-345 (古いコメント)"
+      ],
+      "reproduction": "code grep で `SAFETY_FACTOR=5` を検索 → 上記 3 箇所がヒット。実値 50 と不一致。",
+      "suggested_fix": "docstring を `BUFFER_SAFETY_FACTOR=50` に修正し、根拠（exp(-2k) の収束計算で k=50 ≈ 1e-44）を明記。test コメントも 5000 に更新。",
+      "parity_impact": "影響なし（docstring 不整合のみ）。",
+      "regression_of": null
+    },
+    {
+      "id": "DE-308",
+      "severity": "low",
+      "area": "quality",
+      "title": "DataQualityConfig.default_pip_size=0.0001 が未知 JPY ペア（例 SGD_JPY, TRY_JPY）で pip_based モード時に 100 倍誤った threshold を生む",
+      "description": "`DataQualityConfig.default_pip_size` (quality_engine.py:137-141) は 0.0001 で JPY 以外を想定。`_check_spread` の pip_based モード (line 542-545) は `pip_size_by_instrument.get(bar.instrument, self._config.default_pip_size)` で未知ペアに default_pip_size を当てる。`_DEFAULT_PIP_SIZE_BY_INSTRUMENT` (line 37-53) には主要 7 JPY ペア + 主要 8 非 JPY しか含まれない。SGD_JPY, TRY_JPY, ZAR_JPY 等は default_pip_size=0.0001 で計算される。本来 0.01 が正で、threshold が 1/100 になり高頻度 FAIL を生む。spread_check_mode 既定が `disabled` のため現状の本番影響は無いが、`pip_based` 切替時の地雷。",
+      "evidence": [
+        "trading_platform/data/quality/quality_engine.py:35-53 (_DEFAULT_PIP_SIZE_BY_INSTRUMENT)",
+        "trading_platform/data/quality/quality_engine.py:137-141 (default_pip_size=0.0001)",
+        "trading_platform/data/quality/quality_engine.py:541-549 (pip_based threshold 算出)"
+      ],
+      "reproduction": "config = DataQualityConfig(spread_check_mode='pip_based'); engine = DataQualityEngine(config); engine.validate_bar(BarEvent(instrument='SGD_JPY', high=100.5, low=100.4, ...)) → threshold = 2.0 * 0.0001 * 3.0 = 0.0006、spread = 0.1 → FAIL。本来 threshold = 2.0 * 0.01 * 3.0 = 0.06 で PASS すべき。",
+      "suggested_fix": "(a) ペアが JPY サフィックスで終わる場合は default_pip_size を 0.01 に自動切替する関数を導入。(b) または unknown pair で WARN + auto-fallback に PASS（fail-safe）。(c) または default_pip_size を None にして unknown pair で ValueError fail-fast。",
+      "parity_impact": "影響なし（spread_check_mode='disabled' が既定のため）。",
+      "regression_of": null
+    },
+    {
+      "id": "DE-309",
+      "severity": "low",
+      "area": "parity",
+      "title": "_aux_raw_cache が aux TF 戦略の動的 register/unregister に対する整合性保証を持たない（unregister API 不在のため現状未顕在）",
+      "description": "`LiveFeatureStore` には `register` のみで `unregister` API が存在しない。仕様上はこれで問題ないが、`_aux_raw_cache[name]` は once-set のままで decoupling されていない。将来的に動的 unregister や register 後の再 register（同名上書き）を導入した場合、旧 series が cache に残留し align で参照される潜在バグ。現状未顕在だが拡張時のフットガン。",
+      "evidence": [
+        "trading_platform/data/feature_store/live_store.py:196-204 (cache フィールド定義)",
+        "trading_platform/data/feature_store/live_store.py:258-329 (register に cache 削除なし)"
+      ],
+      "reproduction": "live_fs.register('x', 'ema', period=20, timeframe='H4') / aux データ流入で _aux_raw_cache['x'] 設定 / live_fs.register('x', 'sma', period=20, timeframe='H4') → 上書き登録すると _aux_raw_cache['x'] は EMA 結果を保持したまま、_registered_by_tf には新しい SMA 関数が入る。次の _realign_aux_features で cache_valid なら EMA 結果を返却し SMA が呼ばれない。",
+      "suggested_fix": "register() 冒頭で `self._aux_raw_cache.pop(name, None)` を実行し、同名再登録時のキャッシュリセットを保証する。",
+      "parity_impact": "現状の使用パターンでは影響なし。",
+      "regression_of": null
+    },
+    {
+      "id": "DE-310",
+      "severity": "low",
+      "area": "market_data",
+      "title": "OANDAStreamReceiver の _is_weekend_utc / HEARTBEAT_TIMEOUT は production run_unified.py 経路で未配線（dead path）",
+      "description": "`OANDAStreamReceiver` (stream_receiver.py) は `main.py` 経由でのみ使用され、production の `scripts/run_unified.py` → `UnifiedRunner` は OANDA candles polling (SharedDataProvider) のみで動作する。stream_receiver の週末タイムアウト緩和（HEARTBEAT_TIMEOUT_WEEKEND_SEC=300）、ハートビート監視、initial backfill 等の機構は production では使われない。これらに対する fault test (tests/fault/test_oanda_reconnect_backfill.py) も dead path をテストしている。アーキテクチャ責務不一致の混乱（DE-101 同様の二重実装パターン）。",
+      "evidence": [
+        "trading_platform/main.py:45-47 (BarBuilder/CandleFetcher/StreamReceiver の import)",
+        "scripts/run_unified.py:38 (UnifiedRunner のみ import)",
+        "trading_platform/core/unified_runner/runner.py:51 (SharedDataProvider のみ import、CandleFetcher/StreamReceiver の参照なし)",
+        "trading_platform/data/market_data/stream_receiver.py:46-51 (HEARTBEAT_TIMEOUT 定義)"
+      ],
+      "reproduction": "grep 結果: production の `run_unified.py` 経由では `OANDAStreamReceiver` / `CandleFetcher` / `BarBuilder` 一切初期化されない。`main.py` は FastAPI モード用で production deployment ではない。",
+      "suggested_fix": "(a) main.py 経路を廃止して run_unified.py 一本化、stream/bar builder/candle fetcher を削除（または production 経路へ統合）。(b) または UnifiedRunner にも stream_receiver オプションを統合し、polling と stream の両モードを切替可能にする（推奨）。現状の二重実装は audit に毎回コスト発生させる構造負債。",
+      "parity_impact": "影響なし（dead path）。",
+      "regression_of": null
+    },
+    {
+      "id": "DE-311",
+      "severity": "medium",
+      "area": "persistence",
+      "title": "StateStore.InMemoryBackend が production の唯一の backend で、プロセス再起動で全ポジション/orders/last_bar_time が消滅する",
+      "description": "`StateStore` (redis_store.py:18-22, 121-135) のコメントに『**本番用 Redis バックエンド（AioRedisBackend）は未実装**』と明記。production で稼働する唯一の backend は InMemoryBackend（テスト用）。`config/settings.py` で `state_backend='redis'` を選んでも配線されないため、redis_url を設定しても効果なし。FTS-DATA-009 で導入された `save_last_bar_time` / `load_last_bar_time` も InMemoryBackend に保存され、プロセス再起動と同時に消滅。stream_receiver の `_run_initial_backfill` が「履歴なし」と判定して warmup 本数（既定 300 本）のみ backfill し、再起動前の last_bar_time からの欠落バーが backfill されない。production 運用で 1 ヶ月 uptime SLO を満たすには深刻な未実装。",
+      "evidence": [
+        "trading_platform/data/state_store/redis_store.py:18-22 (本番 Redis 未実装の docstring)",
+        "trading_platform/data/state_store/redis_store.py:70-107 (InMemoryBackend 実装)",
+        "trading_platform/data/state_store/redis_store.py:134-135 (backend default = InMemoryBackend)",
+        "trading_platform/data/market_data/stream_receiver.py:506-538 (last_bar_time 不在 → warmup backfill)"
+      ],
+      "reproduction": "1 週間 production 稼働 / unified_runner プロセス停止 / 再起動 → load_all_positions / load_all_orders / load_account_risk_state がすべて空。手動建玉 trade の追跡が崩壊する。",
+      "suggested_fix": "AioRedisBackend の実装（aioredis または redis-py asyncio）。または、現状の InMemoryBackend に persistent fallback（JSONL append-only file）を内蔵させ、プロセス起動時に rehydrate する暫定実装。前者を Stage B として進捗管理に明示。",
+      "parity_impact": "Live のポジション復元失敗で幻 state 発生（INC-2026-0527-001 と同類）。Parity 自体は崩さないが Live 運用の信頼性に直接影響。",
+      "regression_of": null
+    }
+  ]
+}

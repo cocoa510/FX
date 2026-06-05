@@ -1,0 +1,196 @@
+{
+  "validator": "devil-advocate-A",
+  "scope": "ATLAS (CSR+QA)",
+  "audit_commit": "15d62e62",
+  "validation_date": "2026-05-30",
+  "validations": [
+    {
+      "finding_id": "CSR-401",
+      "verdict": "validated",
+      "original_severity": "medium",
+      "adjusted_severity": "medium",
+      "rationale": "runner.py:686 EFFECTIVE_WEIGHT_FLOOR: float = 0.90 ga local hensuu toshite sonzai suru koto wo Read de kakunin. defaults.py:205-216 ni taiou Final teisuu fuzai. CLAUDE.md magic-number kinshi kiyaku ihan wa jijitsu. dosa-jo no kekkan wa hassei shinai. medium iji ga datou.",
+      "evidence_check": "runner.py:686: EFFECTIVE_WEIGHT_FLOOR: float = 0.90 kakunin. defaults.py:205-216: GATE_TIER2_WEIGHT_* to GATE_TIER2_SOFT_SCORE_MIN Final teisuu kakunin. EFFECTIVE_WEIGHT_FLOOR taiou teisuu fuzai kakunin.",
+      "reproduction_check": "kano",
+      "duplicate_of": null,
+      "post_fix_defect_confirmed": true,
+      "additional_note": "defaults.py ni GATE_TIER2_EFFECTIVE_WEIGHT_FLOOR: Final[float] = 0.90 wo tsuika shi assert GATE_TIER2_EFFECTIVE_WEIGHT_FLOOR > GATE_TIER2_SOFT_SCORE_MIN wo kuwaeru to kiyaku junsoku to ronri kankei no meiji ga doji ni tassei. cost hikui."
+    },
+    {
+      "finding_id": "CSR-402",
+      "verdict": "downgraded",
+      "original_severity": "high",
+      "adjusted_severity": "medium",
+      "rationale": "CSR-402 severity=high no konkyo wa giyo Live konyuu daga quant-analyst no jissoku ga kore wo teisuuriteki ni hitei. QA-403: flip 8 ken subete state_backup_2026-05-07 fuzai (Live zaisen 0 ken). QA-404: sekkei hyoteki 4-None pattern ga genkou 1452 senryaku-chu 0 ken. high severity no konkyo ga kuzureta. jissai no risk wa schema 6.1.0/6.2.0 konzai ni yoru atlas-loop kaizen-ritsu gohan to flip 8 ken saihydka-ji unexpected FAIL ni gentei. medium ga datou. CLAUDE.md [change:spec] procedure 6 no ihan de ari zesei wa hitsuyou.",
+      "evidence_check": "spec_change_log.md:27: backfill deferred meiji kakunin. quant-analyst: flip 8 ken subete n_invalid=2 kakunin. live_propagation_check: state_backup_2026-05-07 ni flip 8 ken fuzai kakunin. QA-404: 4-None+high-basic+PASS pattern 0 ken kakunin.",
+      "reproduction_check": "kano",
+      "duplicate_of": "QA-401",
+      "post_fix_defect_confirmed": true,
+      "additional_note": "downgrade teisuuriteki konkyo: flip 8 ken x Live zaisen 0 ken x 4-None pattern 0 ken = giyo Live konyuu no jigai 0. backfill jisshi de flip 8 ken no atlas-loop shori to schema touitsu ga doji ni tassei."
+    },
+    {
+      "finding_id": "CSR-403",
+      "verdict": "validated",
+      "original_severity": "low",
+      "adjusted_severity": "low",
+      "rationale": "test_qa301_soft_score_floor.py:77 no method mei test_three_none_with_top3_valid_now_fails wo Read de kakunin. L82-86 no comment ga 3 shihyo None wa v6.2.0 demo PASS suru (kyoyo) to meiki shi L100-101 no assert wa result >= 0.70 de ari method mei to honbun no mujun wa jijitsu. docstring ga ito wo hosoku shite iru tame hosha gokai risk wa gentei-teki. low datou.",
+      "evidence_check": "test_qa301_soft_score_floor.py:77: def test_three_none_with_top3_valid_now_fails kakunin. L82-86: shin FLOOR=0.90 dewa soft_score=0.70/0.90=0.778 de PASS to meiki kakunin. L100-101: assert result >= 0.70 kakunin.",
+      "reproduction_check": "kano",
+      "duplicate_of": null,
+      "post_fix_defect_confirmed": true,
+      "additional_note": "test_three_none_with_top3_valid_still_passes eno rename ga tekisetsu."
+    },
+    {
+      "finding_id": "CSR-404",
+      "verdict": "validated",
+      "original_severity": "medium",
+      "adjusted_severity": "medium",
+      "rationale": "main.py:32 de validate_generation_id nomi import, validate_instrument/validate_timeframe wa fuzai wo kakunin. path_safety.py ni ryokansu wa teigi-zumi daga main.py nai de no yobikoumi wa 0 ken (grep kakunin). context command ga instrument wo build_generation_context ni chokusetsu watashi context_builder.py:542 de get_parquet_path ga yobareru. DATA_DIR = Path(data/market) wa CWD sotai de tanpunna path ketsugou ni yori traversal mojiretu wo watasu to data/market soto no path ga koochiku sareru. tadashi parquet_path.exists() check de file sonzai joho reeku dome. medium datou.",
+      "evidence_check": "main.py:32: validate_generation_id nomi import kakunin (validate_instrument fuzai). path_safety.py:56-81: validate_instrument teigi kakunin. grep validate_instrument atlas/main.py: 0 match kakunin. context_builder.py:540-543: get_parquet_path chokusetsu yobikoumi kakunin. data_loader.py:62: DATA_DIR CWD sotai kakunin. data_loader.py:96: tanpunna path ketsugou kakunin.",
+      "reproduction_check": "kano",
+      "duplicate_of": null,
+      "post_fix_defect_confirmed": true,
+      "additional_note": "5 command no uchi context ga saiko risk (get_parquet_path keiro de path koochiku). validate_generation_id pattern no tekiyou de shusuu kosuto hikui."
+    },
+    {
+      "finding_id": "CSR-405",
+      "verdict": "validated",
+      "original_severity": "low",
+      "adjusted_severity": "low",
+      "rationale": "runner.py:88-103 no _strategies_dir ga ATLAS_ROOT kijun no zettai path kaiketsu wo okonau koto wo kakunin. main.py no fukusuu kasho (L97, 114, 135, 195, 278, 342, 365) ga Path(strategies)/generation_id wo CWD sotai de koochiku shite iru koto wo kakunin. post_fix_defect=false (kizon mondai). ATLAS wa tsujou ATLAS root kara jikkou sareru tame jigai wa gentei-teki. low datou.",
+      "evidence_check": "runner.py:88: _ATLAS_ROOT = Path(__file__).resolve().parent.parent.parent kakunin. runner.py:99: anchored = _ATLAS_ROOT / strategies / generation_id kakunin. main.py:97, 114, 135 to: Path(strategies)/generation_id no CWD sotai koochiku kakunin.",
+      "reproduction_check": "kano",
+      "duplicate_of": null,
+      "post_fix_defect_confirmed": false,
+      "additional_note": "public strategies_dir kansu wo path_safety.py ni tsuika suru [refactor] toshite jisshi kano."
+    },
+    {
+      "finding_id": "CSR-406",
+      "verdict": "validated",
+      "original_severity": "low",
+      "adjusted_severity": "low",
+      "rationale": "path_safety.py:18 no _GENERATION_ID_RE ni okite 80 toiu suuchi ga defaults.py ni mo path_safety.py comment ni mo teigi sarete inai koto wo kakunin. CLAUDE.md magic-number kinshi kiyaku ihan wa jijitsu. security risk wa hassei shinai. low datou.",
+      "evidence_check": "path_safety.py:18: _GENERATION_ID_RE ni {1,80} no 80 wo kakunin. defaults.py zentai: GENERATION_ID_MAX_LENGTH ni sotou suru teisuu no fuzai kakunin.",
+      "reproduction_check": "kano",
+      "duplicate_of": null,
+      "post_fix_defect_confirmed": true,
+      "additional_note": "CSR-401 to dokushu no kiyaku ihan. defaults.py eno GENERATION_ID_MAX_LENGTH: Final[int] = 80 tsuika de kaishou kano."
+    },
+    {
+      "finding_id": "QA-401",
+      "verdict": "validated",
+      "original_severity": "medium",
+      "adjusted_severity": "medium",
+      "rationale": "comparator.py:79-159 no compare_two ni metrics_schema_version check ga fuzai suru koto wo grep de kakunin (0 match). convergence.py zentai ni metrics_schema_version ga fuzai (0 match). dedup.py:205 no legacy guard ga major<3 nomi de aru koto wo kakunin (6.x version sa wa mushi sareru). shinkyuu konzai kikan ni kaizen loop ga 6.1.0 senryaku to 6.2.0 senryaku wo doitsu scale de hikaku suru mondai wa jissai ni sonzai suru. medium datou.",
+      "evidence_check": "grep metrics_schema_version atlas/analyzer/comparator.py: 0 match kakunin. grep metrics_schema_version atlas/orchestrator/convergence.py: 0 match kakunin. dedup.py:205: major < 3 nomi check kakunin. defaults.py:70: METRICS_SCHEMA_VERSION = 6.2.0 kakunin. quant-analyst empirical_baseline: schema_distribution {6.1.0: 1452, 6.2.0: 0} kakunin.",
+      "reproduction_check": "kano",
+      "duplicate_of": null,
+      "post_fix_defect_confirmed": true,
+      "additional_note": "backfill jisshi (CSR-402 shuusei) ni yori konpon mondai wa kaishou sareru ga schema_version_warning jisshi wa bogoteki ni yuukou."
+    },
+    {
+      "finding_id": "QA-402",
+      "verdict": "validated",
+      "original_severity": "medium",
+      "adjusted_severity": "medium",
+      "rationale": "test_qa301_soft_score_floor.py (5 test subete) ga _compute_soft_score_redistributed wo chokusetsu yobikounde iru - check_backtest_gate wo keiyu shinai koto wo Read de kakunin. test_v5_5_0_metrics.py:380-388 ni test_check_backtest_gate_emits_6_2_0 ga sonzai shi check_backtest_gate wo E2E yobikoumi shite iru ga metrics_schema_version no kakunin nomi de FLOOR=0.90 ni yoru 4-None FAIL scenario wo kenshou shite inai. CLAUDE.md ga runner.py::check_backtest_gate wo hissu golden taishou to shite meiji shite iru ni mo kakawarazu QA-301 no core scenario ga E2E reberu de mikenshou. medium datou.",
+      "evidence_check": "grep check_backtest_gate tests/golden/test_qa301_soft_score_floor.py: 0 match kakunin. test_v5_5_0_metrics.py:380-388: check_backtest_gate yobikoumi kakunin (schema_version kakunin nomi). CLAUDE.md: runner.py::check_backtest_gate hissu golden taishou meiki kakunin.",
+      "reproduction_check": "kano (runner.py no PF norm bibo wo 0.5 kara 0.6 ni henko suru to test_qa301 zen PASS daga check_backtest_gate base no test ga areba FAIL)",
+      "duplicate_of": null,
+      "post_fix_defect_confirmed": true,
+      "additional_note": "WFA/Drift/OOS/Top3=None + PF/Sharpe/DD/Sensitivity=max de overall_passed=False ni naru E2E scenario no tsuika ga saijuuyou. test_v5_5_0_metrics.py no _make_layer2 helper wo saikiyou suru koto de jisshi cost hikui."
+    },
+    {
+      "finding_id": "QA-403",
+      "verdict": "upgraded",
+      "original_severity": "low",
+      "adjusted_severity": "medium",
+      "rationale": "spec_change_log.md:24 no 3 shihyo ijou ga None ni naru senryaku nomi eikyo wo ukeru toiu kijutsu ga suugakuteki ni ayamari de aru koto wo jisshou. FLOOR=0.90 no eikyo wa n_invalid=2 de mo hassei suru. suugakuteki kenshou: WFA(weight=0.10)+Drift(weight=0.08) ga None no baai valid_weight=0.82 < 0.90 de clamp hatsudo. OOS_IS(weight=0.12) tanden None de mo valid_weight=0.88 < 0.90 de clamp hatsudo. jissoku flip 8 ken subete ga n_invalid=2 de aru koto ga kore wo jisshou (flip_breakdown_by_indicator_none_count={2:8, 3:0, 4:0}). kono kijutsu ayamari ga shourai no [change:spec] handan ni chokusetsu eikyo suru tame medium eto upgrade.",
+      "evidence_check": "spec_change_log.md:24: 3 shihyo ijou None nomi eikyo toiu kijutsu kakunin. quant-analyst empirical_baseline: flip_breakdown_by_indicator_none_count={2:8, 3:0, 4:0} kakunin (zen 8 ken ga n_invalid=2). runner.py:695: effective_weight = max(actual_valid_weight, EFFECTIVE_WEIGHT_FLOOR) kakunin. suugakuteki kenshou: WFA(0.10)+Drift(0.08)=valid_weight 0.82 < 0.90. OOS_IS(0.12) tanden=valid_weight 0.88 < 0.90.",
+      "reproduction_check": "kano",
+      "duplicate_of": null,
+      "post_fix_defect_confirmed": true,
+      "additional_note": "FLOOR=0.90 ga eikyo suru seikakuna joken wa yuukou omomi no goukei ga 0.90 miman ni naru indicator None no kumiaase de ari saishou wa weight 0.11 ijou no 1 shihyo None de eikyo ga shoujiru. spec_change_log no teisei wa gijutsuteki seikakusei to shourai no seisaku handan no tameni yusendo takaku jisshi subeki."
+    },
+    {
+      "finding_id": "QA-404",
+      "verdict": "validated",
+      "original_severity": "low",
+      "adjusted_severity": "low",
+      "rationale": "jissoku 0 ken block (sekkei hyoteki no 4-None pattern) vs 8 ken collateral flip toiu teisuuteki konkyo wa quant-analyst empirical_baseline de kakunin-zumi. docs/spec_change_log.md ni RoI kiroku ga fuzai suru koto mo kakunin. document kiritsu no mondai de ari low datou. tadashi 0 ken block toiu jijitsu wa CSR-402 no downgrade konkyo toshite juuyou.",
+      "evidence_check": "quant-analyst empirical_baseline: 4-None+high-basic+PASS pattern 0 ken kakunin. FLIP 8 ken kakunin. spec_change_log.md:24-27: RoI kiroku fuzai kakunin.",
+      "reproduction_check": "kano",
+      "duplicate_of": null,
+      "post_fix_defect_confirmed": true,
+      "additional_note": "FLOOR=0.80 daian no kando bunseki wo spec_change_log ni kiroku suru koto ga datou."
+    },
+    {
+      "finding_id": "QA-405",
+      "verdict": "validated",
+      "original_severity": "medium",
+      "adjusted_severity": "medium",
+      "rationale": "result_parser.py:240-263 no _compute_oos_is_ratio ga is_profit_factor_walks=None no baai ni profit_factor ni fallback suru jisso wo kakunin. runner.py:665-682 no docstring ga QA-302 tono gyaku houkou bias kankei wo meiji. event_simulator.py:1589-1600 ga walks<min_walks de zen None wo kaesu jisso wo kakunin. QA-301 to QA-302 no hishousha-sei wa jissai ni sonzai shi H4 SHORT senryaku eno nijuu penalty wa rironteiki ni tadashii. post_fix_defect=false (QA-302 wa kizon deferred mondai). medium datou.",
+      "evidence_check": "result_parser.py:252-260: is_profit_factor_walks=None-ji no profit_factor fallback kakunin. runner.py:680-682: QA-302 gyaku houkou bias to saikalibre-tion hitsuyou no docstring kakunin. event_simulator.py:1589-1600: walks<min_walks zen None kakunin. defaults.py:315: WFA_MIN_WALKS=10 kakunin.",
+      "reproduction_check": "kano (tanki-kan H4 BT de no saigen tejun ga teiji sarete iru)",
+      "duplicate_of": null,
+      "post_fix_defect_confirmed": false,
+      "additional_note": "QA-301 to QA-302 wa opposite-direction bias toshite doji taisho ga nozomashii. FLOOR 0.85 eno kansoka-an wa trade-off toshite kento kachi ga aru."
+    },
+    {
+      "finding_id": "QA-406",
+      "verdict": "validated",
+      "original_severity": "low",
+      "adjusted_severity": "low",
+      "rationale": "defaults.py:315 de WFA_MIN_WALKS: Final[int] = 10 wo kakunin. event_simulator.py:1589-1600 de walks<min_walks-ji no zen None henkyaku wo kakunin. quant-analyst empirical_baseline: short_only_with_wfa_none=218/422=51.7% kakunin. post_fix_defect=false (kizon mondai). low datou.",
+      "evidence_check": "defaults.py:315: WFA_MIN_WALKS: Final[int] = 10 kakunin. event_simulator.py:1589-1600: walks<min_walks souki return zen None kakunin. quant-analyst empirical_baseline: short_only_with_wfa_none=218 kakunin.",
+      "reproduction_check": "kano",
+      "duplicate_of": null,
+      "post_fix_defect_confirmed": false,
+      "additional_note": "WFA_OOS_MONTHS=3 eno henko de walks-suu wo baizou saseru ga OOS kikan no daihyosei wo sokonau risk ga ari shincho na trade-off bunseki hitsuyou."
+    },
+    {
+      "finding_id": "QA-407",
+      "verdict": "validated",
+      "original_severity": "low",
+      "adjusted_severity": "low",
+      "rationale": "defaults.py:205-213 no Tier 2 omomi ga houkou hi-izon de aru koto wo kakunin. defaults.py no SHORT muke kanwa (Secondary PF=0.6, drift=0.35, WFA_MIN_VALID_IS_SHARPE=0.3) wo kakunin. Tier 2 omomi no hishousha-ka wa [change:spec] wo yousuru tame long-term kaizen teian toshite datou. low datou.",
+      "evidence_check": "defaults.py:205-213: GATE_TIER2_WEIGHT_* houkou hi-izon Final teisuu kakunin. defaults.py:191-193: GATE_TIER1_MIN_SECONDARY_PERIOD_PF_SHORT=0.6 kakunin. defaults.py:166-167: GATE_MAX_L1_L2_DRIFT_SHORT=0.35 kakunin. defaults.py:316: WFA_MIN_VALID_IS_SHARPE=0.3 kakunin.",
+      "reproduction_check": "kano",
+      "duplicate_of": null,
+      "post_fix_defect_confirmed": false,
+      "additional_note": "short-term toshite FLOOR no SHORT muke kanwa (QA-405 teian) ga senkou subeki. Tier 2 omomi SHORT bunki no dounyuu wa sekkei-jo no ooki na henko de ari shincho na kenshou ga hitsuyou."
+    },
+    {
+      "finding_id": "QA-408",
+      "verdict": "validated",
+      "original_severity": "low",
+      "adjusted_severity": "low",
+      "rationale": "scorer.py:118-128 no required_metrics (7 koumoku) ni oos_is_pf_ratio ga fuzai suru koto wo kakunin. runner.py:973-980 de Tier 2 OOS/IS Ratio ga weight 0.12 de shiyou sareru koto wo kakunin. result_parser.py no QA-302 fallback ni yori oos_is_pf_ratio ga None de naku kashihouka atai wo motsu case ga ooi tame jissai no evaluable=False keiro wa gentei-teki. Layer1 final_score to Tier 2 soft_score no fuseigou wa rironteiki ni tadashii ga jigai wa gentei-teki de low datou. post_fix_defect=false (kizon mondai).",
+      "evidence_check": "scorer.py:118-128: required_metrics no 7 koumoku kakunin, oos_is_pf_ratio fuzai kakunin. runner.py:973-980: Tier 2 OOS_IS Ratio weight=0.12 kakunin. result_parser.py:252-263: QA-302 fallback (non-None kashihouka atai) kakunin.",
+      "reproduction_check": "kano",
+      "duplicate_of": null,
+      "post_fix_defect_confirmed": false,
+      "additional_note": "oos_is_pf_ratio wo required_metrics ni tsuika shite mo QA-302 fallback ga non-None wo kaesu genjo de wa evaluable=False ni naru senryaku wa fuenai. QA-302 shuusei to rendo ga hitsuyou."
+    }
+  ],
+  "summary": {
+    "total": 14,
+    "validated": 11,
+    "downgraded": 1,
+    "upgraded": 1,
+    "refuted": 0,
+    "severity_post": {
+      "critical": 0,
+      "high": 0,
+      "medium": 7,
+      "low": 7
+    },
+    "key_findings": [
+      "CSR-402 downgraded high->medium: quant-analyst jissoku de flip 8 ken no Live zaisen 0 ken, sekkei hyoteki 4-None pattern 0 ken wo kakunin. giyo Live konyuu toiu high severity konkyo ga shosshitsu. backfill mijisshi to schema konzai wa medium soto toshite keizoku taiso wo yousuru.",
+      "QA-403 upgraded low->medium: spec_change_log no 3 shihyo ijou None nomi eikyo toiu kijutsu ga suugakuteki ni ayamari. flip 8 ken subete ga n_invalid=2 de FLOOR=0.90 wa n_invalid=1 de mo eikyo shiuru koto wo suushiki de jisshou (OOS_IS weight=0.12 tanden de mo valid_weight=0.88 < 0.90). shourai no [change:spec] seisaku handan wo yugameru risk ga aru tame medium ni upgrade.",
+      "QA-402 validated medium: test_qa301_soft_score_floor.py ni check_backtest_gate E2E fuzai wo kakunin. test_v5_5_0_metrics.py no ichibu E2E (schema version nomi) wa 4-None FAIL scenario wo kenshou shite inai. CLAUDE.md no hissu golden youken wo mitasanai.",
+      "CSR-404 validated medium: context command kara context_builder->get_parquet_path no keiro de barideeshon mijiteiyou wo kakunin. DATA_DIR ga CWD sotai no tame rironteiki path traversal ga kano (file sonzai joho reeku dome daga medium datou).",
+      "post_fix_defect goukei 8 ken (CSR: 5/6, QA: 4/8) ga 05ae8595/15d62e62 commit kiin matawa backfill mijisshi ni kanren suru shin mondai toshite kakunin."
+    ]
+  }
+}

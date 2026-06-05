@@ -1,0 +1,180 @@
+{
+  "agent": "quant-analyst",
+  "scope": "ATLAS evaluation (commit 9c83b9f5 backfill post-fix verification)",
+  "audit_id": "AUDIT-2026-0530-002",
+  "audit_target_commit": "9c83b9f5",
+  "post_fix_verification": {
+    "qa301_backfill_completion": "PARTIAL OK -- schema bump / soft_score recalc / overall_passed re-aggregation numerically correct, BUT (1) gate_check.passed / failed_conditions / layer2.passed not updated -> 11 S-10 invariant violations, (2) 846 skipped strategies left at 6.1.0 -> schema cohort split, (3) History DB stale for 1 strategy, (4) Phase 4.5 advisory unrecorded, (5) flip-cause attribution (3 dup-fix vs 12 FLOOR) not documented",
+    "schema_distribution": {
+      "v6_2_0": 607,
+      "v6_1_0": 846,
+      "total": 1453
+    },
+    "flip_count_verification": "15 OK (breakdown: 3 dup-fix-driven + 12 FLOOR-driven; of these 11 had old overall_passed=True -> 11 S-10 invariant violations after backfill)",
+    "math_recompute_spot_check": "ATLAS-2026-0508-037 measured: soft_score = 0.5747709999 / 0.90 = 0.6386344444 -> matches recorded value exactly. FLOOR=0.90 correctly applied by _compute_soft_score_redistributed",
+    "fts_live_impact": "0 confirmed (all 15 flipped absent from trading_platform/strategies/imported; result_parser.py:211-216 safe-side composes bool(overall_passed) AND bool(passed) so downstream BacktestGateResult.overall_passed correctly False)",
+    "skip_count_verification": "846 skip_no_tier2 are all pre-Phase-2 format with no gate_check.tier2 and no tier1; 0 cases of overall_passed=True among them, skip is legitimate. Absence of schema bump captured as QA-502"
+  },
+  "findings": [
+    {
+      "id": "QA-501",
+      "severity": "high",
+      "area": "ATLAS / backfill data-integrity",
+      "title": "QA-301 backfill violates S-10 invariant: 11 strategies left with gate_check.passed=True but gate_check.overall_passed=False",
+      "description": "scripts/backfill_v6_2_0_soft_score.py:188-195 updates only gate_check.overall_passed and does NOT update the legacy alias key gate_check.passed (which must always equal decision.overall_passed by the S-10 invariant). Of 15 flipped strategies, 11 now have gate_check.passed=True while gate_check.overall_passed=False -- a state impossible from runner.py. Additionally, the cluster_cap_exceeded label (runner.py:1513) and the Soft Score (less than 0.70) label (runner.py:1062) are not appended to failed_conditions which remains empty. tests/golden/test_gate.py:648-664 and tests/unit/test_runner_duplicate_gate.py:98-118 explicitly test this invariant. Downstream consumers reading gate_check.passed (list_clones.py / detect_clones.py / rejudge_gate scripts / human review / atlas-status) will report PASS incorrectly. 6.1.0 cohort had 0 S-10 violations; 6.2.0 cohort has 11/607 -- proves regression is backfill-induced.",
+      "evidence": [
+        "C:/data/works/FX/ATLAS/scripts/backfill_v6_2_0_soft_score.py:188-195",
+        "C:/data/works/FX/ATLAS/atlas/backtest/runner.py:1503-1515",
+        "C:/data/works/FX/ATLAS/atlas/backtest/runner.py:1060-1067",
+        "C:/data/works/FX/ATLAS/tests/golden/test_gate.py:648-664",
+        "C:/data/works/FX/ATLAS/tests/unit/test_runner_duplicate_gate.py:98-118",
+        "C:/data/works/FX/ATLAS/strategies/ATLAS-2026-0506-026/backtest/result.json",
+        "C:/data/works/FX/ATLAS/strategies/ATLAS-2026-0508-037/backtest/result.json",
+        "C:/data/works/FX/ATLAS/strategies/ATLAS-2026-0520-041/backtest/result.json"
+      ],
+      "reproduction": "For each of 15 flipped GIDs, assert gate_check.passed == gate_check.overall_passed: 11 fail. Aggregated: 6.2.0 cohort violations = 11, 6.1.0 cohort = 0.",
+      "suggested_fix": "Add to backfill_v6_2_0_soft_score.py:188-195: (a) gate_check[passed] = new_overall_passed (S-10 sync); (b) if tier2 flipped True->False, append Soft Score (less than 0.70) to failed_conditions; (c) if is_duplicate=True and overall_passed flipped to False, append cluster_cap_exceeded if not present; (d) if layer2 is not None and error is None, set layer2[passed]=new_overall_passed. Re-run on 11 affected strategies. Add parametrized test in tests/unit/test_runner_duplicate_gate.py covering all 11.",
+      "impact_scope": "Live impact 0 (all 15 flipped not imported to FTS; result_parser.py:211-216 safe-side composes so BacktestGateResult.overall_passed remains correct False). Risk is downstream tools reading gate_check.passed directly.",
+      "regression_of": "post-9c83b9f5 backfill side-effect",
+      "post_fix_defect": true
+    },
+    {
+      "id": "QA-502",
+      "severity": "medium",
+      "area": "ATLAS / schema versioning",
+      "title": "QA-301 backfill leaves 846 skipped strategies at 6.1.0; schema cohort split into 607/846",
+      "description": "backfill_v6_2_0_soft_score.py:135-145 skips strategies without gate_check.tier2 or .components and does NOT update metrics_schema_version. Result: 846/1453 (L1 FAIL / pre-Phase-2 format) remain at 6.1.0 while 607 are now at 6.2.0. CLAUDE.md Q4 (METRICS_SCHEMA_VERSION cross-generation warning) requires mismatched schemas produce a cannot directly compare warning. atlas-loop / comparator.py / convergence will now warn on 846 strategies. Even if Tier 2 logic is unchanged for skipped strategies (so schema bump may not be strictly required), the reach of QA-301 spec change becomes ambiguous.",
+      "evidence": [
+        "C:/data/works/FX/ATLAS/scripts/backfill_v6_2_0_soft_score.py:135-145",
+        "C:/data/works/FX/ATLAS/scripts/backfill_v6_2_0_soft_score.py:193",
+        "C:/data/works/FX/ATLAS/logs/backfill_v6_2_0_soft_score.json:6-8",
+        "C:/data/works/FX/CLAUDE.md (Q4 METRICS_SCHEMA_VERSION cross-generation warning)"
+      ],
+      "reproduction": "Schema distribution count: 6.2.0=607, 6.1.0=846 (measured).",
+      "suggested_fix": "Option A (recommended): also update result[metrics_schema_version]=TARGET_SCHEMA in the skip path; separate the Tier 2 computation flag from the schema marker (rename status to skip_no_tier2_schema_bumped). Option B: keep current behavior; document in docs/spec_change_log.md that this change does not apply to the 846 strategies without Tier 2, so schema bump is also not applied; add a flag to comparator.py warning logic to treat 6.1.0 vs 6.2.0 as equivalent for non-Tier-2 indicators.",
+      "impact_scope": "atlas-loop parent-vs-child improvement calc may misfire on 846 strategies, comparator.py / list_clones.py cross-generation display inconsistent. Live impact 0.",
+      "regression_of": null,
+      "post_fix_defect": true
+    },
+    {
+      "id": "QA-503",
+      "severity": "high",
+      "area": "ATLAS / data-integrity layer2",
+      "title": "QA-301 backfill creates fresh layer2.passed=True / overall_passed=False inconsistency (H-NEW-1 anti-pattern recurrence)",
+      "description": "result_parser.py:206-216 comment explicitly states the overall_passed=False vs layer2.passed=True state exists only in pre-S-10 result.json files and is preserved only for backwards compatibility. QA-301 backfill does not touch layer2 at all, so it creates the same inconsistency in 11 strategies. runner.py:1500-1502 explicitly sets layer2.passed=False on dup-cap revert, with tests/unit/test_runner_duplicate_gate.py:92-96 covering it. weakness_detector / fts_selection_methodology / atlas-status will misread Layer 2 PASS from these strategies.",
+      "evidence": [
+        "C:/data/works/FX/ATLAS/atlas/backtest/result_parser.py:202-216",
+        "C:/data/works/FX/ATLAS/atlas/backtest/runner.py:1500-1502",
+        "C:/data/works/FX/ATLAS/tests/unit/test_runner_duplicate_gate.py:92-96",
+        "C:/data/works/FX/ATLAS/strategies/ATLAS-2026-0506-026/backtest/result.json (layer2.passed=True, overall_passed=False)",
+        "C:/data/works/FX/ATLAS/strategies/ATLAS-2026-0508-037/backtest/result.json (same)"
+      ],
+      "reproduction": "All 11 flipped strategies measured to have layer2.passed=True while overall_passed=False.",
+      "suggested_fix": "Combine with QA-501 fix: when overall_passed flips to False in backfill, also set result[layer2][passed]=False if layer2 is present and error is None. Update result_parser.py H-NEW-1 comment to note 2026-05-30 QA-503 closed the backfill-side inconsistency.",
+      "impact_scope": "Live impact 0. Skill-layer weakness_detector / fts_selection_methodology / atlas-status may misread Layer 2 status, distorting improvement recommendations.",
+      "regression_of": "post-9c83b9f5 backfill side-effect",
+      "post_fix_defect": true
+    },
+    {
+      "id": "QA-504",
+      "severity": "low",
+      "area": "ATLAS / Tier2 component audit-trail",
+      "title": "tier2.components.contribution stays as pre-redistribution value: sum(contributions) != soft_score; gap shrunk to ~1.11x by QA-301 but not zero",
+      "description": "_tier2_component (runner.py:700-712) stores contribution = normalized times weight (pre-redistribution), but soft_score is the redistributed value. Example ATLAS-2026-0508-037: sum(contributions)=0.5748 vs soft_score=0.6386. Long-standing design property since v5.5.0 (not a backfill regression), but QA-301 FLOOR=0.90 shrinks the max gap from 1.43x to 1.11x while not eliminating it. Human reviewers / spec.md generators that sum contributions to verify soft_score will see mismatches without documented explanation.",
+      "evidence": [
+        "C:/data/works/FX/ATLAS/atlas/backtest/runner.py:700-712",
+        "C:/data/works/FX/ATLAS/atlas/backtest/runner.py:634-697",
+        "C:/data/works/FX/ATLAS/strategies/ATLAS-2026-0508-037/backtest/result.json"
+      ],
+      "reproduction": "Measured: sum(contributions)=0.5748, soft_score=0.6386, valid_weight=0.82, FLOOR=0.90, gap=0.6386/0.5748=1.111.",
+      "suggested_fix": "Option A: add redistributed_contributions field to tier2 storing (normalized*weight)/effective_weight so sum=soft_score is guaranteed. Option B (recommended, low cost): add comment above runner.py:711 contribution= line saying pre-redistribution raw value, effective soft_score recalculated by _compute_soft_score_redistributed.",
+      "impact_scope": "Human review and spec.md generation mismatch. Live impact 0.",
+      "regression_of": null,
+      "post_fix_defect": false
+    },
+    {
+      "id": "QA-505",
+      "severity": "medium",
+      "area": "ATLAS / history DB sync",
+      "title": "QA-301 backfill does not trigger atlas history sync; atlas_history.db gate_result cache stale (1 measured)",
+      "description": "backfill_v6_2_0_soft_score.py only updates result.json and never re-syncs data/atlas_history.db via atlas.history.sync. generations table gate_result.passed / overall_passed drift from file. Measured ATLAS-2026-0520-041 has DB.gate_result.overall_passed=True while file is False. context_builder / list_clones.py / atlas-history / atlas-compare reading from DB will get stale data. Full 6.2.0 cohort scan: only 1 strategy has DB=True / file=False but logically all 11 are candidates (the other 10 have stale-but-False DB values that coincidentally agree).",
+      "evidence": [
+        "C:/data/works/FX/ATLAS/atlas/history/sync.py:179-197",
+        "C:/data/works/FX/ATLAS/scripts/backfill_v6_2_0_soft_score.py (no sync call)",
+        "C:/data/works/FX/ATLAS/data/atlas_history.db (generations table, ATLAS-2026-0520-041)"
+      ],
+      "reproduction": "sqlite3 SELECT gate_result FROM generations WHERE strategy_id=ATLAS-2026-0520-041 -> overall_passed=True; file -> False.",
+      "suggested_fix": "(1) Invoke atlas history sync at the end of backfill_v6_2_0_soft_score.py main() (subprocess or direct import). (2) Immediate mitigation: instruct user to run ATLAS/.venv/Scripts/python.exe -m atlas.main history sync --all, document in spec_change_log. (3) Add sync_required flag to backfill script template to prevent recurrence.",
+      "impact_scope": "atlas-loop generation selection / clone detection / spec.md generation may use stale data. Currently 1 strategy affected but post-QA-501/503 fixes may increase. Live impact 0.",
+      "regression_of": "post-9c83b9f5 backfill side-effect",
+      "post_fix_defect": true
+    },
+    {
+      "id": "QA-506",
+      "severity": "low",
+      "area": "ATLAS / spec_change_log advisory",
+      "title": "Phase 4.5 advisory unrecorded: 3 of 15 flips are is_duplicate-driven NOT QA-301 FLOOR-driven",
+      "description": "logs/backfill_v6_2_0_soft_score.json shows 3 of 15 flipped (0506-026, 0507-010, 0507-013) have soft_score_delta=0.0. The old overall_passed=True -> new=False flip is driven by duplicate_check.is_duplicate=True (cluster overlap with 0506-024/036), NOT by FLOOR change. These flips are backfill incidentally repairing pre-QA-003 (9th audit) state. docs/spec_change_log.md attributes all 15 flips to QA-301 FLOOR change; user-provided advisory (Phase 4.5 advisory: 15 flip root cause is_duplicate recompute record in spec_change_log.md recommended) is not yet executed. Without this distinction, audit-loop will mistake QA-301 effect=15 flips when true FLOOR effect is 12 flips.",
+      "evidence": [
+        "C:/data/works/FX/ATLAS/logs/backfill_v6_2_0_soft_score.json:10-50",
+        "C:/data/works/FX/ATLAS/docs/spec_change_log.md:19-28 (QA-301 entry has no Phase 4.5 advisory)",
+        "User task description (Phase 4.5 advisory recommended)"
+      ],
+      "reproduction": "Read backfill log, filter flipped array for soft_score_delta==0 -> 3 entries.",
+      "suggested_fix": "Add to docs/spec_change_log.md QA-301 entry: Phase 4.5 advisory (2026-05-30 post-fix verification): 15 flips breakdown = 12 FLOOR=0.90-driven + 3 is_duplicate retrofit (0506-026/0507-010/0507-013, all cluster overlaps with ATLAS-2026-0506-024/036). The latter are a side-effect of backfill incidentally repairing pre-QA-003 (9th audit) state and should be distinguished from the QA-301 FLOOR change effect. Implement together with QA-501 fix that adds cluster_cap_exceeded to failed_conditions.",
+      "impact_scope": "atlas-loop recommendation engine misestimates QA-301 effect size, distorting future Tier 2 FLOOR tuning decisions (e.g. 0.90 -> 0.95 rejection). Live impact 0.",
+      "regression_of": null,
+      "post_fix_defect": false
+    },
+    {
+      "id": "QA-507",
+      "severity": "medium",
+      "area": "ATLAS / Tier2 QA-302 follow-up",
+      "title": "QA-302 (oos_is_pf_ratio full-period PF fallback) still deferred; combined with QA-301 enables soft_score double-penalize path",
+      "description": "result_parser.py:_compute_oos_is_ratio (240-263) falls back to full-period PF when is_pf is None, so strategies where IS PF cannot be computed in WFA walks get an artificial full_pf/full_pf=1.0 ratio reaching normalized=1.0 (positive bias). Meanwhile QA-301 FLOOR=0.90 penalizes strategies where WFA/Drift/Top3 are None through both this fallback and effective_weight floor. Same as AUDIT-2026-0530-001 QA-405 finding. Currently uncounted: how many of the 607 6.2.0 cohort use full-period fallback.",
+      "evidence": [
+        "C:/data/works/FX/ATLAS/atlas/backtest/result_parser.py:240-263",
+        "C:/data/works/FX/ATLAS/atlas/backtest/runner.py:680-682 (QA-302 noted as future work)",
+        "C:/data/works/FX/ATLAS/docs/spec_change_log.md:24",
+        "C:/data/works/FX/logs/audit/AUDIT-2026-0530-001/findings/quant-analyst.json QA-405"
+      ],
+      "reproduction": "Need to count: layer2.is_profit_factor_walks=None AND oos_profit_factor != None (not executed in this session).",
+      "suggested_fix": "(1) Promote QA-302 from deferred to active finding; modify _compute_oos_is_ratio so when is_profit_factor_walks is None it returns normalized=0.0 (None-equivalent). (2) Before applying, count fallback-using strategies in 607 6.2.0 cohort and record double-penalize case count in spec_change_log. (3) Bump METRICS_SCHEMA_VERSION 6.2.0 -> 6.3.0 and backfill (incorporating QA-501/503/505 fixes too).",
+      "impact_scope": "Tier 2 PASS bias affects 607 strategies. For FTS-imported strategies, may distort future improvement loop recommendations. Live impact limited to imported scope.",
+      "regression_of": "AUDIT-2026-0530-001 QA-405 (deferred continuation)",
+      "post_fix_defect": false
+    },
+    {
+      "id": "QA-508",
+      "severity": "low",
+      "area": "ATLAS / backfill defensive invariant",
+      "title": "Backfill script lacks defensive guard for overall_passed=True yet tier2 missing anomaly",
+      "description": "backfill_v6_2_0_soft_score.py:135-145 unconditionally skips when gate_check.tier2 is missing. Current count: 0 strategies have overall_passed=True among 846 skipped (safe today), but future Phase-2-pre format strategies with overall_passed=True would also be silently skipped. Not assert-guarded, so future same-shape backfills risk overlooking such cases.",
+      "evidence": [
+        "C:/data/works/FX/ATLAS/scripts/backfill_v6_2_0_soft_score.py:135-145",
+        "Session measurement: 0 strategies among 846 skipped with overall_passed=True"
+      ],
+      "reproduction": "Scan all 1453 strategies: tier2 missing AND overall_passed=True -> 0.",
+      "suggested_fix": "Add guard in backfill_v6_2_0_soft_score.py:135-145: if status==skip_no_tier2 but overall_passed=True, raise AssertionError for manual investigation. Currently 0 occurrences but invariant-check protects future same-shape backfills. Add tests/unit/test_backfill_skip_invariants.py.",
+      "impact_scope": "Currently no real impact. Defensive line for future Tier 2 schema-change backfills.",
+      "regression_of": null,
+      "post_fix_defect": false
+    },
+    {
+      "id": "QA-509",
+      "severity": "info",
+      "area": "ATLAS / DESIGN-C-001 cross-system review",
+      "title": "DESIGN-C-001 (RE-305 vs 12h throttle contradiction) has indirect impact only on ATLAS evaluation side",
+      "description": "DESIGN-C-001 is an FTS design decision and does not directly touch ATLAS backtest/scoring code paths. Strategies ATLAS generates may later be evaluated by FTS forward-test, where live_orders_silent alert throttling during outages might mask silent failures, but ATLAS scoring does not reflect this. Option A (dedicated kind separation) makes future cross-checks with ATLAS evaluation more robust. Logged as cross-cluster observation rather than a finding.",
+      "evidence": [
+        "C:/data/works/FX/logs/audit/summary_AUDIT-2026-0530-001.md:104-112",
+        "Grep live_orders_silent in C:/data/works/FX/ATLAS -> no hits"
+      ],
+      "reproduction": "Grep live_orders_silent in C:/data/works/FX/ATLAS -> no matches.",
+      "suggested_fix": "DESIGN-C-001 option selection belongs to FTS. If ATLAS-loop later incorporates FTS forward-test results into backtest scoring, Option A (dedicated kind separation + continuous notification) avoids missing FTS signals during throttling.",
+      "impact_scope": "No real impact on ATLAS standalone. Live impact 0.",
+      "regression_of": null,
+      "post_fix_defect": false
+    }
+  ]
+}

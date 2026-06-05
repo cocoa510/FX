@@ -1,0 +1,243 @@
+{
+  "agent": "risk-execution-engineer",
+  "audit_id": "AUDIT-2026-0530-001",
+  "phase": "3/4 (実装)",
+  "fix_type": "[fix:bug]",
+  "commit_policy": "do_not_commit (ユーザー一括承認後にメインループが処理)",
+  "summary": {
+    "findings_addressed": ["RE-401", "RE-402", "RE-411", "RE-MISSED-401"],
+    "files_modified": 8,
+    "tests_added": 4,
+    "new_test_files": 4,
+    "new_test_cases_total": 26,
+    "regression_test_runs": {
+      "new_tests": "26 passed (0 failed)",
+      "related_existing_tests": "64 passed in tests/unit/* and tests/fault/* (dm302/email/oanda 系)",
+      "broad_close_trade_oanda_sweep": "175 passed (-k 'close_trade or stale or get_trade or oanda')",
+      "broad_entry_rollback_sweep": "144 passed / 1 failed",
+      "unrelated_failure_note": "tests/integration/test_graceful_shutdown.py::TestStartRollback::test_rollback_stops_only_started_components の失敗は並行作業 platform-architect (PA-401: _eventbus_started_early 属性追加) に起因し本 RE タスクの範囲外。__init__ をバイパスする __new__ 経路のテストへの影響は PA-401 担当の対応案件。"
+    }
+  },
+  "fixes": [
+    {
+      "finding_id": "RE-401",
+      "severity": "high",
+      "title": "DM-302 計装が本番経路で完全 dead — OANDABroker(metrics=) 4 箇所未注入",
+      "root_cause": "OANDABroker._record_api_metric() は `if self._metrics is None: return` で no-op。全インスタンス化箇所で metrics= 引数を渡しておらず、本番 LIVE 経路で計装が完全 dead path 化していた。",
+      "fix_strategy": "OANDABroker を生成する全 4 箇所で metrics=self._metrics (またはスクリプトでは MetricsCollector()) を明示注入。AST 契約テストで再発を構造的に防止。",
+      "files_modified": [
+        {
+          "path": "trading_platform/core/unified_runner/runner.py",
+          "lines": "343-352 (本番経路)",
+          "change": "OANDABroker(...) 引数に metrics=self._metrics 追加 + RE-401 コメント"
+        },
+        {
+          "path": "trading_platform/main.py",
+          "lines": "335-343 (dev 経路)",
+          "change": "OANDABroker(...) 引数に metrics=self._metrics 追加 + RE-401 コメント"
+        },
+        {
+          "path": "trading_platform/forward_test.py",
+          "lines": "239-247 (forward test 経路)",
+          "change": "OANDABroker(...) 引数に metrics=self._metrics 追加 + RE-401 コメント"
+        },
+        {
+          "path": "scripts/live_preflight.py",
+          "lines": "17-44 (Meta 検証で発見された第 4 箇所)",
+          "change": "MetricsCollector import 追加 + OANDABroker(...) に metrics= 注入"
+        }
+      ],
+      "tests_added": [
+        {
+          "path": "tests/contract/test_oanda_broker_metrics_wired.py",
+          "test_count": 5,
+          "type": "AST 契約テスト",
+          "method": "REQUIRED_SITES 各ファイルを ast.parse し、OANDABroker(...) 呼び出しすべてに metrics= キーワード引数があること、かつ値が None リテラルでないことを assert。将来配線が外れた場合に CI で即座に検知。",
+          "test_cases": [
+            "test_oanda_broker_metrics_wired[runner.py]",
+            "test_oanda_broker_metrics_wired[main.py]",
+            "test_oanda_broker_metrics_wired[forward_test.py]",
+            "test_oanda_broker_metrics_wired[scripts/live_preflight.py]",
+            "test_required_sites_unique"
+          ]
+        }
+      ],
+      "result": "5 passed"
+    },
+    {
+      "finding_id": "RE-402",
+      "severity": "high",
+      "title": "entry_rollback が OANDA 側のオープン trade を残したまま FTS state のみクリア = phantom trade 能動生成",
+      "root_cause": "RE-301/RE-302 修正で _resolve_live_trade_id 失敗時 (BrokerUnavailableError / matching=[]) に state クリアのみで return する経路ができたが、submit_with_guard は既に成功 (約定済) しているため OANDA 上に管理外 trade が SL/TP なしで残存。INC-2026-0526 と同型の幻ポジションを逆方向 (FTS→OANDA) で能動的に生成する欠陥。",
+      "fix_strategy": "_handle_entry の rollback 経路に LIVE 限定の best-effort close を追加。get_open_trades 再試行 → comment マッチで close_trade → close 失敗時は CRITICAL RiskAlertEvent (entry_rollback_orphan) を発火。CLAUDE.md 「不整合は自動修正しない」原則と矛盾するように見えるが、本ケースは「FTS 自身がたった今 submit した trade」の cleanup で責任主体が FTS 内部のため自動 close は妥当。close 失敗時は原則どおり手動介入に倒す。",
+      "files_modified": [
+        {
+          "path": "trading_platform/core/unified_runner/strategy_slot.py",
+          "lines": "747-771 (rollback 分岐), 905-1078 (新メソッド _attempt_orphan_close_after_rollback / _emit_entry_rollback_orphan_alert)",
+          "change": "if not self.state.open_trade_id 分岐で is_live 時に _attempt_orphan_close_after_rollback を呼ぶ。新メソッドは get_open_trades 再試行 → matching=comment 一致で close_trade 発行。close 失敗時は _emit_entry_rollback_orphan_alert で entry_rollback_orphan アラートを発火"
+        },
+        {
+          "path": "trading_platform/core/monitoring/email_notifier.py",
+          "lines": "_RISK_ALERT_KINDS への entry_rollback_orphan 追加 / _EMAIL_THROTTLE_INTERVAL_SEC で 12h throttle / _on_risk_alert に builder 分岐追加",
+          "change": "entry_rollback_orphan kind の登録 (専用 kind、12h throttle、live_anomaly builder 共用)。初報は throttle されず即時配信 (_should_throttle 仕様)"
+        },
+        {
+          "path": "trading_platform/core/unified_runner/runner.py",
+          "lines": "_ALERT_LEVEL_BY_TYPE に entry_rollback_orphan: AlertLevel.CRITICAL 追加",
+          "change": "alert_type → AlertLevel マッピングに登録 (CRITICAL: 管理外ポジション残存は SL/TP 未設定で市場急変動時の損失リスクあり)"
+        }
+      ],
+      "tests_added": [
+        {
+          "path": "tests/fault/test_re402_entry_rollback_oanda_cleanup.py",
+          "test_count": 5,
+          "type": "fault injection",
+          "method": "BrokerGateway を MagicMock 化し get_open_trades の 1 回目 (=_resolve_live_trade_id) と 2 回目 (=_attempt_orphan_close) で別々の side_effect を返す。close_trade 結果も柔軟に切替可能なヘルパで以下を検証",
+          "test_cases": [
+            "test_broker_unavailable_path_invokes_orphan_close (BrokerUnavailableError → orphan close 試行)",
+            "test_no_matching_trade_path_invokes_orphan_close (matching=[] → orphan close 試行)",
+            "test_orphan_close_failure_emits_critical_risk_alert (close 失敗 → entry_rollback_orphan アラート)",
+            "test_orphan_close_success_does_not_emit_alert (close 成功 → アラートなし)",
+            "test_orphan_close_unable_to_query_emits_alert (2 回目も failure → アラート)"
+          ]
+        }
+      ],
+      "result": "5 passed"
+    },
+    {
+      "finding_id": "RE-MISSED-401",
+      "severity": "medium",
+      "title": "OANDABroker.get_trade が transient 5xx/timeout と permanent 404 を混同 → 誤 stale 判定",
+      "root_cause": "旧 get_trade は `resp.status != 200` で transient/permanent を区別せず None を返却。close_trade pre_check が transient 障害を「trade NOT_FOUND」と誤判定 → state.open_trade_id クリアで OPEN trade が孤児化 (RE-402 と同型の逆方向欠陥)",
+      "fix_strategy": "新例外 TradeNotFoundError を client.py に定義し、get_trade を以下に分岐:\n - HTTP 404 → TradeNotFoundError (permanent)\n - HTTP 5xx / 4xx (404 以外) / timeout / network → BrokerUnavailableError (transient)\n - HTTP 200 → TradeDetail (既存)\n\nclose_trade pre_check は TradeNotFoundError のみで stale=NOT_FOUND と判定し、BrokerUnavailableError は通常 PUT 経路に fall-through (A-2 事後ガードが拾う)。",
+      "files_modified": [
+        {
+          "path": "trading_platform/broker/oanda_adapter/client.py",
+          "lines": "96-115 (TradeNotFoundError 定義), 18-22 (BrokerUnavailableError import), 602-686 (get_trade 改修), 736-810 (close_trade pre_check 分岐改修)",
+          "change": "新例外 TradeNotFoundError 追加 / get_trade で 404 と 5xx/timeout/4xx を例外型で分離 / close_trade pre_check で TradeNotFoundError のみ stale=NOT_FOUND、BrokerUnavailableError は fall-through"
+        }
+      ],
+      "tests_added": [
+        {
+          "path": "tests/fault/test_re_missed_401_get_trade_exception_discipline.py",
+          "test_count": 8,
+          "type": "fault injection",
+          "method": "aiohttp ClientSession を MagicMock し HTTP status を 404/500/502/503/504/401/403/429/200 で切替、または TimeoutError を直接発生させて get_trade の例外型を assert。close_trade pre_check の挙動も transient と 404 で別途検証",
+          "test_cases": [
+            "test_get_trade_404_raises_trade_not_found_error",
+            "test_get_trade_5xx_raises_broker_unavailable_error[500/502/503/504]",
+            "test_get_trade_4xx_non_404_raises_broker_unavailable_error[401/403/429]",
+            "test_get_trade_timeout_raises_broker_unavailable_error",
+            "test_get_trade_200_returns_trade_detail",
+            "test_close_trade_pre_check_treats_404_as_stale_not_found",
+            "test_close_trade_pre_check_treats_transient_as_fall_through"
+          ]
+        }
+      ],
+      "result": "8 passed"
+    },
+    {
+      "finding_id": "RE-411",
+      "severity": "medium",
+      "title": "submit_order TimeoutError 計装漏れ",
+      "root_cause": "submit_order 外側 except で _record_api_metric が呼ばれず、TimeoutError / aiohttp.ClientError 等レスポンス取得前の例外が Prometheus 計装に一切記録されない。fx_oanda_api_status_total{endpoint='order', status_code='timeout'} が永久 0。",
+      "fix_strategy": "submit_order 外側 except で TimeoutError は status='timeout' (status_code=None)、その他例外は status='5xx' (status_code=500) として _record_api_metric を呼ぶ。計装失敗は fire-and-forget で本番フローを止めない。",
+      "files_modified": [
+        {
+          "path": "trading_platform/broker/oanda_adapter/client.py",
+          "lines": "210-247 (submit_order 外側 except)",
+          "change": "except Exception 内で TimeoutError 判定 → _record_api_metric(endpoint='order', status_code=None) (timeout) / 500 (5xx) で計装。Inner try で計装失敗は握りつぶし"
+        }
+      ],
+      "tests_added": [
+        {
+          "path": "tests/unit/test_re411_submit_order_timeout_metric.py",
+          "test_count": 4,
+          "type": "unit",
+          "method": "_submit_order_impl を side_effect で TimeoutError / ConnectionError で死亡させ、inc_oanda_api_status の引数を assert。計装側自体の例外でも元の例外伝播を確認。metrics=None の後方互換も検証",
+          "test_cases": [
+            "test_submit_order_timeout_records_metric_with_timeout_status",
+            "test_submit_order_connection_error_records_metric_with_5xx_status",
+            "test_submit_order_metric_failure_does_not_break_propagation",
+            "test_submit_order_no_metrics_no_op"
+          ]
+        }
+      ],
+      "result": "4 passed"
+    }
+  ],
+  "out_of_scope": [
+    {
+      "finding_id": "RE-403",
+      "reason": "verifier_severity=medium (将来 pyramiding 戦略投入時の must_fix)。現行 Live 22 戦略には pyramiding なしで Live 即時リスク低。本セッション 4 件予算外。"
+    },
+    {
+      "finding_id": "RE-404",
+      "reason": "RE-402 の発火頻度抑制対策 (retry loop)。本セッション 4 件予算外。RE-402 が close 成功で吸収するため Live 損失リスクは大幅低減済"
+    },
+    {
+      "finding_id": "RE-405",
+      "reason": "low (一貫性・将来拡張性問題のみ、動作上の不具合なし)"
+    },
+    {
+      "finding_id": "RE-406",
+      "reason": "medium (live_anomaly kind 集約による Email 通知縮退)。EmailNotifier 構造改修が必要で本セッション予算外。RE-MISSED-401 / RE-401 / RE-402 の構造改修との競合を避ける"
+    },
+    {
+      "finding_id": "RE-407",
+      "reason": "medium (RE-305 と _check_live_health_alerts の kind 衝突)。EmailNotifier 構造改修が必要で本セッション予算外"
+    },
+    {
+      "finding_id": "RE-408",
+      "reason": "low (RE-407 と一体修正対象)"
+    },
+    {
+      "finding_id": "RE-409",
+      "reason": "low (RE-407 と一体修正対象)"
+    },
+    {
+      "finding_id": "RE-410",
+      "reason": "medium (observe_feature_staleness label semantic mismatch)。data-engineer エージェント担当領域"
+    },
+    {
+      "finding_id": "RE-MISSED-402",
+      "reason": "low (RE-411 のスコープ拡張、本修正で submit_order 外側 except は status='5xx' / 'timeout' に分類されカバー済)"
+    },
+    {
+      "finding_id": "RE-MISSED-403",
+      "reason": "low-medium (security hardening、エラーレスポンス body 内部情報漏洩リスク)。本セッション予算外"
+    },
+    {
+      "finding_id": "RE-MISSED-404",
+      "reason": "low (RE-305 semantic mismatch、別 alert_type 化が必要)。RE-407/408/409 と一体修正対象"
+    },
+    {
+      "finding_id": "RE-MISSED-405",
+      "reason": "low (BrokerGateway.get_trade None 握りつぶし)。RE-MISSED-401 で OANDABroker 側の修正で transient と 404 が分離されたため close_trade 経路は構造的に修正済。BrokerGateway 側の更なる伝播は次回 audit-loop で検討。"
+    },
+    {
+      "finding_id": "RE-412",
+      "reason": "low (再評価結果、main.py 別配線で問題なし。修正不要)"
+    }
+  ],
+  "follow_up_recommendations": [
+    "RE-404 (backoff retry) を次セッションで実装し RE-402 発火頻度を更に抑制",
+    "RE-406/407/408/409 を一体で修正 (alert_type 分離 + first-of-type バイパス)",
+    "RE-410 を data-engineer エージェントへ引き継ぎ (label semantic 修正)",
+    "BrokerGateway.get_trade / get_open_trades の例外伝播ポリシー統一 (RE-405 / RE-MISSED-405)"
+  ],
+  "test_execution_log": {
+    "new_tests_only": {
+      "command": "pytest tests/contract/test_oanda_broker_metrics_wired.py tests/unit/test_re411_submit_order_timeout_metric.py tests/fault/test_re_missed_401_get_trade_exception_discipline.py tests/fault/test_re402_entry_rollback_oanda_cleanup.py",
+      "result": "26 passed in 0.25s"
+    },
+    "related_existing_tests": {
+      "command": "pytest tests/unit/test_dm302_metrics_instrumentation.py tests/unit/test_email_notifier*.py tests/unit/test_dm306_oanda_connection_lost_email.py tests/unit/test_unrealized_warning_email.py tests/unit/test_runner_live_gate_rejection.py tests/fault/test_re30{1,2}_*.py tests/fault/test_oanda_api_fault.py",
+      "result": "64 passed in 0.66s"
+    },
+    "broad_close_trade_oanda": {
+      "command": "pytest tests/ -k 'close_trade or stale or get_trade or oanda'",
+      "result": "175 passed, 2233 deselected in 3.44s"
+    }
+  }
+}

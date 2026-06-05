@@ -1,0 +1,124 @@
+{
+  "finding_id": "RE-102",
+  "title": "日次損失ハードリミットが realized-only、集計含み損(unrealized)に対する新規発注ブロックゲートが無い",
+  "reassessed_by": "risk-execution-engineer",
+  "reassessed_at": "2026-05-26",
+  "audit_round": "AUDIT-2026-0525-002",
+  "scope": "調査・提言のみ（コード変更・コミットなし）",
+
+  "evidence": {
+    "code": {
+      "build_risk_state_unrealized_zero": "trading_platform/core/unified_runner/risk_supervisor.py:623-639 — per-strategy daily_unrealized_pnl を意図的に 0 のまま PTRC に渡す（RE-002/REV-1 明文化済み）",
+      "can_open_position_realized_only": "trading_platform/core/unified_runner/risk_supervisor.py:407-433 — 口座/戦略の日次損失チェックは daily_realized_pnl_total / daily_realized_pnl のみ",
+      "ptrc_max_daily_loss_ignores_portfolio_unrealized": "trading_platform/core/risk_engine/ptrc.py:560-562 — existing_loss = risk_state.daily_realized_pnl + risk_state.daily_unrealized_pnl。portfolio.total_unrealized_pnl(=OANDA 実 unrealized) を受け取っているのに(line 536 引数)判定式で未使用",
+      "warn_layer_nonblocking": "trading_platform/core/unified_runner/risk_supervisor.py:858-947 — _evaluate_unrealized_warning は realized+unrealized 合算が閾値の95%で WARN/Email、80%で解除。発注ブロックは一切しない",
+      "warn_thresholds": "risk_supervisor.py:855-856 — _WARN_ACTIVATION_RATIO=0.95 / _WARN_DEACTIVATION_RATIO=0.80",
+      "ks_realized_only": "risk_supervisor.py:832-849 (_evaluate_kill_switch, max_total_daily_loss_jpy 比較) / 712-749 (check_kill_switch, 残高比 kill_switch_daily_loss)。両 KS とも realized のみ",
+      "ks_limit_fixed_jpy": "runner.py:689-696 (_build_risk_supervisor) は max_total_daily_loss_jpy を明示指定せず → デフォルト risk_supervisor.py:244 の -10000.0 JPY 固定（口座残高に非連動）",
+      "broker_sl_oanda": "trading_platform/broker/oanda_adapter/client.py:251-258 — order.stop_loss_pips>0 のとき stopLossOnFill(distance, GTC) を発注。OANDA 側 SL backstop は機能する",
+      "broker_sl_paper_absent": "trading_platform/broker/paper_broker/simulator.py 全191行 — SL ヒット判定・SL 登録が一切ない。get_account_info は unrealized_pnl=0.0 固定(line 177)。Paper では SL backstop も WARN レイヤーも実効しない",
+      "hard_limits": "trading_platform/core/models/risk.py:173-222 — ImmutableHardLimits(frozen=True): max_daily_loss=0.10, kill_switch_daily_loss=0.05(A フェーズ保守値), max_risk_per_trade=0.05"
+    },
+    "history": {
+      "6f5b4cb": "[docs] RE-002: realized-only REV-1 設計を明文化。round 3 medium。ユーザー判断『現状維持を明文化（低リスク）』。再発防止 pin test あり",
+      "0af0f82": "[change:spec] PR4 (A-1-2): KS は実現損益のみで発動、未実現は WARN レイヤーに分離。is_unrealized_warning_active は『発注ブロックなし』と明記"
+    },
+    "live_state": {
+      "source": "logs/unified_state/*.state.json (64 files, 2026-05-26 時点)",
+      "live_strategy_count": 22,
+      "paper_strategy_count": 42,
+      "live_instrument_distribution": {"EUR_JPY": 8, "USD_JPY": 6, "GBP_JPY": 6, "AUD_JPY": 1, "EUR_USD": 1},
+      "live_jpy_cross_concentration": "21/22 が JPY クロス、全て long_only/LONG 方向。非JPYは EUR_USD 1 件のみ",
+      "open_positions_live": "USD_JPY LONG 5 戦略 (0505-367/368/424, 0507-038/049) が全て entry=158.934 / units=40000 / open_trade_id=244 で一致。実質 OANDA 単一ネットポジションを 5 戦略が共有",
+      "sl_settings_live_open": "全 5 戦略に ATR ベース SL あり (atr_sl_mult 1.5〜2.0)。stop_loss_pips は generate_signal で出力されブローカーに渡る"
+    },
+    "thresholds_numerics": {
+      "account_balance_default_jpy": 1000000,
+      "ks_setting_limit_jpy": -10000,
+      "ks_setting_as_balance_ratio": "1% (100万円残高時)",
+      "ks_hard_limit_ratio": "5% (= -50000 JPY @100万)",
+      "ptrc_max_daily_loss_ratio": "10% (= -100000 JPY @100万)",
+      "warn_activation_jpy": -9500,
+      "warn_note": "WARN(合算-9500) は KS設定(-10000) の95%。指摘シナリオ『含み損が口座10%=-10万』の遥か手前(約0.95%)で必ず WARN/Email 発火済み"
+    }
+  },
+
+  "A_tail_risk_reality": {
+    "level": "中（Live USD_JPY 集中ポジションでは中〜やや高、構造的成立条件は揃っている）",
+    "scenario_conditions": [
+      "(1) 相関逆行で集計含み損が口座の閾値を超える",
+      "(2) 各 per-trade SL が未約定（ギャップ/急変で滑る、またはSL未設定）",
+      "(3) realized 日次損失が KS 閾値(-10000)未満（=ポジションを切っていない含み損のみ状態）"
+    ],
+    "feasibility_in_current_config": {
+      "correlation_concentration": "成立。Live 22 戦略の 21 が JPY クロス LONG（USD/EUR/GBP/AUD_JPY）。円全面高(リスクオフ/日銀引締め)で全 JPY クロスの含み損が同時膨張する。実際に USD_JPY LONG 5 戦略が同一ポジション(trade_id=244, 200000 units 相当)に集中オープン中",
+      "sl_未約定の現実性": "部分的。OANDA stopLossOnFill(GTC) は通常時 backstop として機能するが、(a)週末/指標ギャップで SL を飛び越える滑り、(b)複数 JPY クロス同時急変での連鎖、では『含み損ピーク → SL 約定』の間に realized 化前の含み損が一時的に閾値超過し得る。ただし SL 約定すれば realized 化し KS(-10000) が即座に効く",
+      "realized_未満の現実性": "成立しやすい。トレンドフォロー型(ATR SL 1.5-2.0x / TP 10-16x)は SL 幅が広く、含み損は膨らんでも確定は遅い。realized は決済まで 0 のまま（state 上も daily_realized=0, total_realized=0 が大半）",
+      "paper_経路": "Paper は SL backstop も unrealized も無い(simulator 0 固定)ため、この tail risk は『含み損が状態に現れない=そもそも検知不能』。ただし Paper は実損なしのため実害ゼロ。問題は Live のみ"
+    },
+    "backstop_assessment": {
+      "per_trade_sl_oanda": "最も効く backstop。1 トレード単位で最悪損失を atr_sl_mult×ATR に上限化。通常の相関逆行(緩やかな円高)では各 SL が順次約定し realized 化 → KS が効くため tail は限定的",
+      "per_trade_sl_limitations": "(1)ギャップ滑りで SL 約定価格が悪化、(2)SL距離合計が同時ヒットすると一括で大損、(3)Paper では完全に無効、(4)将来 stop_loss_pips を出さない戦略が混入すると SL 自体が付かない(client.py:251 の > 0 ガード)",
+      "warn_layer": "-9500 で必ず Email 発火 → 運用者が手動で kill/縮小できる窓はある。ただし深夜/不在時は人手介入が間に合わない非ブロッキング層"
+    }
+  },
+
+  "B_status_quo_judgment": {
+    "verdict": "条件付きで再考すべき（承認の前提が今回 Live 構成で一部崩れている）",
+    "approval_premise_at_6f5b4cb": "round 3 時点では『低リスク』判断。前提は (a)含み損保護は per-trade SL + WARN で足りる、(b)flapping 回避のため realized-only が望ましい、というもの",
+    "newly_revealed_facts_in_this_audit": [
+      "Live 21/22 戦略が JPY クロス LONG の一方向集中（相関≈1）。これは『個別 SL が独立に効く』前提を弱める。円全面高では全ポジションが同時逆行し、SL も同時ヒット方向で滑りリスクが相関する",
+      "USD_JPY LONG 5 戦略が同一ネットポジション(trade_id=244, 200000 units 相当)を共有。1 通貨ペアにエクスポージャー集中",
+      "MEMORY『ショート戦略不足問題（方向性集中リスク）』と整合 — 方向性集中は既知の構造課題で、含み損 tail とは独立に管理されていない",
+      "KS 設定閾値が -10000 JPY 固定で口座残高(100万)非連動 = 残高比 1%。realized では非常に早く止まるが、含み損には一切効かない非対称性が際立つ"
+    ],
+    "conclusion": "『ユーザー承認済みだから現状維持』は、承認時に評価されていなかった『Live JPY クロス一方向集中 + 単一ペア大口集中』という新事実を踏まえると、自動的には正当化できない。realized-only 設計の妥当性そのものは維持してよいが、含み損 tail に対する『非ブロッキング WARN のみ』という緩和層の十分性は再評価対象。少なくとも RE-102 は medium で再起票し、ユーザーに新事実を提示した上で再承認 or 対策判断を仰ぐのが適切"
+  },
+
+  "C_alternatives": {
+    "option_1_unrealized_soft_block": {
+      "design": "WARN と同じ合算閾値(95%)到達時に、can_open_position / PTRC で『新規エントリーのみ』を抑止する soft-block。既存ポジションには一切触れない(決済・SL は据え置き)。is_unrealized_warning_active が True の間だけ新規 OPEN を REJECT。価格戻りで WARN 解除(80%)とともに自動解除",
+      "where": "can_open_position (risk_supervisor.py:407 付近) に『WARN active かつ新規OPEN方向』なら reject を1段追加、もしくは PTRC _check_max_daily_loss に portfolio.total_unrealized_pnl を合算する soft 判定を追加。後者の方が監査ログ(PTRCResult)に残り筋が良い",
+      "change_spec_required": true,
+      "change_spec_reason": "実弾のエントリー拒否挙動を変える。6f5b4cb が pin した test_build_risk_state_unrealized_pnl_is_realized_only_rev1 が loud に失敗する設計のため、意図的な [change:spec] として扱うのが正しい",
+      "side_effects": [
+        "正当なナンピン/追加エントリー/ピラミッディング戦略が WARN 中に新規エントリーできなくなる。ただし現 Live 22 戦略は全て fixed_units 単発エントリー型で、ナンピン戦略は確認されず影響は限定的",
+        "BT/Live 乖離: ATLAS バックテストはこの soft-block を持たないため、WARN 頻発局面で Live が BT よりエントリーを見送る → Parity 数値ずれの可能性。soft-block は Live(execution層)のみのリスクゲートで戦略ロジックではないため Parity test の対象外と整理できるが、乖離の説明責任は残る",
+        "Paper では unrealized=0 のため soft-block は発火せず、Paper/Live で挙動が分かれる(Paper が楽観的)。Paper simulator に unrealized 計算が無い既知の制約と同根",
+        "WARN 閾値(-9500 固定 ≒ 残高1%)が非常に低いため、現行閾値のまま soft-block 化すると含み損 -9500 で新規が頻繁に止まる。soft-block を入れるなら『含み損 tail 用の別閾値(例: 残高比7-8%)』を設けて WARN(早期通知) とブロック(直前防壁) を分離する方が運用に合う"
+      ]
+    },
+    "option_2_ptrc_portfolio_unrealized_wiring": {
+      "design": "PTRC _check_max_daily_loss(ptrc.py:560) の existing_loss に portfolio.total_unrealized_pnl(=OANDA 口座合算 unrealized、既に引数で受領済み)を合算する。per-strategy への帰属(build_risk_state)は触らず、口座合算ベースで判定。worst_case に既存含み損も反映され、max_daily_loss(10%) ハードリミットが含み損込みで効く",
+      "change_spec_required": true,
+      "merit": "PTRC は既に portfolio.total_unrealized_pnl にアクセス可能(positions.py:86)なのに未使用。最小変更で『口座10%含み損で新規ブロック』が実現し、指摘の閾値(10%)と整合。Immutable Hard Limits(max_daily_loss=0.10) を含み損にも適用する自然な拡張",
+      "side_effects": [
+        "per-strategy ではなく口座合算で効くため、1 戦略の新規が他戦略の含み損で止まる(連帯責任)。相関集中時はむしろ望ましい挙動だが、無相関戦略には過剰",
+        "flapping: 含み損が閾値付近で振れると新規が通ったり止まったりする。REV-1 が realized-only にした元の動機(flapping 回避)が PTRC 経路で再燃。ヒステリシス or 別閾値が必要",
+        "BT/Live 乖離・Paper 非対称は option_1 と同じ"
+      ]
+    },
+    "option_3_status_quo_plus_ops": {
+      "design": "コード変更せず、(a)RE-102 を新事実付きでユーザーに再提示し再承認を取る、(b)JPY クロス一方向集中の上限(通貨グループ別エクスポージャー cap)を別途検討、(c)WARN Email の運用 SLA(深夜対応手順)を runbook 化",
+      "change_spec_required": false,
+      "merit": "BT/Live 乖離ゼロ。per-trade SL + WARN の既存緩和層は通常の緩やかな相関逆行には十分機能する。realized-only の flapping 回避メリットを保持",
+      "risk": "ギャップ・深夜の急速な円高 tail には人手介入頼みで残存リスク。方向性集中の根本(MEMORY 既知課題)は別管理が必要"
+    },
+    "immutable_hard_limits_relation": {
+      "note": "いずれの option も ImmutableHardLimits(frozen=True) の値は一切変更しない。soft-block/合算 wiring は『同じ max_daily_loss=0.10 を含み損にも適用する』適用範囲の拡張であり、上限値の緩和ではないため frozen 契約と矛盾しない。むしろ realized-only は『ハードリミットの適用範囲を狭めている』状態とも解釈でき、option_2 は frozen の趣旨(絶対損失上限の実効化)に整合的"
+    }
+  },
+
+  "final_recommendation": {
+    "primary": "RE-102 を medium で再起票し、ユーザーに『新事実(Live 21/22 JPY クロス LONG 集中 + USD_JPY 単一ネットポジ 200k 集中)』を提示の上で再承認 or 対策判断を仰ぐ(option_3 の (a) を必須アクションとする)。承認前提が今回崩れているため『承認済み=現状維持』の自動適用は不可",
+    "if_action_chosen": "対策する場合は option_2(PTRC への portfolio.total_unrealized_pnl 合算)を推奨。理由: (1)PTRC は既に値を保持し最小変更、(2)Immutable Hard Limits(max_daily_loss=0.10) の適用範囲拡張として frozen 趣旨に整合、(3)監査ログ(PTRCResult)に残る。ただし [change:spec] とし、flapping 回避のヒステリシス(WARN と別の高め閾値, 例 残高比7-8%)+ 6f5b4cb の pin test 改訂をセットで行う。新規エントリーのみ抑止し既存ポジションは触らない(指摘要件通り)",
+    "must_not": "Paper simulator は unrealized=0 固定のため、soft-block を入れても Paper では無効。Paper/Live 非対称を是正したいなら simulator に unrealized 計算を足す別タスクが前提(本件スコープ外)。また既存ポジションの自動決済・自動修正は禁止(CLAUDE.md 規約)、soft-block は新規抑止に限定すること",
+    "do_now_zero_cost": "コード変更前でも、方向性集中(JPY クロス一方向)の可視化と WARN Email の深夜対応 runbook 整備は即時実施価値あり(option_3 (b)(c))"
+  },
+
+  "constraints_honored": {
+    "no_code_change": true,
+    "no_commit": true,
+    "evidence_based": "全主張に file:line / git commit / 実 state 集計の根拠を付与"
+  }
+}

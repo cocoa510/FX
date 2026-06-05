@@ -1,0 +1,40 @@
+{
+  "verifier": "data-engineer",
+  "summary": "DE-201/202/203 の引用 file:line は全て現 HEAD(dd2dd82) に実在し、計算式(k=2.5, exp(-5)≈6.7e-3 / k=1, exp(-2)≈0.135 等)も正確。コード機序(WARMUP_BARS=2000 固定が _effective_buffer_size と非連動 / poll_latest が count=3 で最新1本のみ返し中間バー silent skip / forward_test WARMUP_BARS=200)も全て確認できた。ただし DE-201 の中核的 severity 根拠『現に Live 配信中の戦略 ATLAS-2026-0508-069(ema_800)』は事実誤認: runner_config.json と state.json の双方が execution_mode=\"paper\" で、しかも 2026-05-20 に Tier A+B 非選定で demote 済み。実際に live の 22 戦略の最大 EWM period は 100(ATLAS-2026-0504-098, k=20→exp(-40)≈4e-18)で、period=200 の唯一例(0511-059)は EWM ではなく SMA(rolling, warmup=2000 で厳密一致)。すなわち warmup=2000 が trading-affecting なドリフトを生む高period EMA 戦略は live 経路に存在しない。parity テストが warmup 切り詰め非対称を検出できないという指摘は正しい(buffer_trim テストも全バーを index0 から feed し ring buffer を trim するだけで、warmup 先頭欠落シナリオは未網羅)。warmup/buffer 連動機構の未実装という構造課題は実在し medium 級の技術的負債だが、live 実害の即時性は無いため DE-201 は high→medium に下方修正が妥当。DE-202(medium)は機序・コード正確で latent gap として妥当、DE-203(low)は正確で妥当。",
+  "verifications": [
+    {
+      "id": "DE-201",
+      "claim_accuracy": "コード/計算は正確だが live 稼働主張は誤り。runner.py:74 WARMUP_BARS=2000 実在。_warmup_all(runner.py:1218-1246) が get_warmup_bars(..., WARMUP_BARS) を呼び 2000 本固定取得(data_provider.py:93-132 で count をそのまま broker.get_candles へ渡し受領分を全返却、buffer_size との混同なし)。live_store._recalculate_effective_buffer_size(435-458) は max(period)×50=BUFFER_SAFETY_FACTOR を別途算出し warmup 本数とは完全に非連動 → ema_800 の理論要件 40000(MAX_BUFFER_SIZE=50000 内)に対し warmup は 2000 のみ。k=2000/800=2.5, 残差 ((799/801))^2000=exp(-4.994)≈6.76e-3 は正確。config.json:9 ema_slow_period=800 / strategy.py:81-82 ema(span=800) / strategy.py:172-173,176/190 の uptrend=ema_fast>ema_slow 分岐も実在。MAX_REGISTRABLE_PERIOD を 400→1000 へ引き上げた経緯(live_store.py:53-89)も実在。",
+      "severity_verdict": "high は過大。medium へ下方修正が妥当。",
+      "current_code_quote": "runner.py:74 `WARMUP_BARS: int = 2000  # OANDA API上限5000以内で十分なEWMウォームアップを確保` / runner.py:1226 `bars = await self._data_provider.get_warmup_bars(instrument, granularity_str, WARMUP_BARS,)` / live_store.py:454-458 `required = max_period * BUFFER_SAFETY_FACTOR; effective = max(required, self._user_buffer_size); effective = min(effective, MAX_BUFFER_SIZE)`",
+      "reproduced": "warmup計算: get_warmup_bars(count=2000) → broker.get_candles(...,2000) を全返却(data_provider.py:116-132)。_effective_buffer_size(ema_800)=800*50=40000≤50000。両者は別ロジックで、warmup は確かに 2000 本のみ投入される(buffer_size=max(WARMUP_BARS*2,5000) のような式は存在せず、混同なし)。k=2.5/exp(-5)≈6.7e-3 は再現一致。live状態: runner_config.json は execution_mode=\"paper\" + _demoted_at=2026-05-20T22:00:00Z(理由: Tier A+B 非選定)。state.json も execution_mode=\"paper\"。よって本戦略は live ではなく paper かつ降格済。live の 22 戦略(runner_config grep)の最大 period は ATLAS-2026-0504-098 の 100(EWM, k=20→exp(-40)≈4e-18 で完全収束)、period=200 の唯一例 ATLAS-2026-0511-059 は sma_slow_period=200(rolling SMA, warmup=2000 で厳密一致, EWM 非該当)。→ warmup=2000 で trading-affecting なドリフトを生む高period EMA は live 経路に皆無。round_9/validation.json:94 も『現行戦略 max period ~50』と同旨を記録。",
+      "verdict": "adjusted",
+      "notes": "事実誤認の核心は『live 配信中』。証跡の logs/unified_state パスは親リポではなく fx_trading_system/logs/unified_state に実在(行ズレでなくパスプレフィックスのズレ)。修正提案(warmup を _effective_buffer_size から動的導出/OANDA上限5000で頭打ち/高period 運用ガード or parquet完全リプレイ/非対称 parity テスト追加)は技術的に妥当で価値があるが、現時点の live 影響度はゼロのため severity は medium が適正。bars_processed=272(state.json)から本 paper 戦略は実際に EMA(800) を 2000 warmup で稼働中であり parity ドリフト機序自体は実在する(paper 数値の信頼性低下=DE-203 と同種の運用判断リスク)。MAX_REGISTRABLE_PERIOD を 1000 へ拡張しながら warmup を 2000 据え置いた『片肺』整合性欠如という構造指摘は確かに未解消。"
+    },
+    {
+      "id": "DE-202",
+      "claim_accuracy": "正確。data_provider.py:155 raw_candles=get_candles(...,3)、:168 latest=raw_candles[-1] のみ採用、:177 _last_bar_time[key]=latest_time で最新へ前進し中間バーは返さない。runner.py:73 POLL_INTERVAL_SEC=60 実在。runner.py:1398 poll_latest 単発呼出 + :1399-1400 `if bar is None: continue` で単一バー処理。runner.py 内 backfill/CandleFetcher/fetch_range/last_bar_time の参照は Grep でゼロ件を確認。candle_fetcher.py:416 backfill_missing が last_bar_time から fetch_range で全欠落バーを順次 emit する設計も実在(bt<=last スキップ:438)。",
+      "severity_verdict": "medium 妥当。",
+      "current_code_quote": "data_provider.py:155 `raw_candles = await self._broker.get_candles(instrument, granularity, 3)` / :168 `latest = OandaCandle.model_validate(raw_candles[-1])` / :172-177 `if latest_time == prev_time: return None ... self._last_bar_time[key] = latest_time` / runner.py:1398-1400 `bar = await self._data_provider.poll_latest(...); if bar is None: continue`",
+      "reproduced": "poll_latest は count=3 取得・最新1本のみ返却・_last_bar_time を最新へ前進、を確認。1 poll で 2 本以上の確定バーが進行した場合(poll サイクル遅延)中間バーは返らず恒久欠落 → LiveFeatureStore のバー列が ATLAS BT より短くなり EWM(adjust=False) が以後ドリフト。UnifiedRunner は backfill 系を一切結線しておらず、CandleFetcher.backfill_missing は別経路(main.py/EventBus)専用。実 live 戦略は H1/H4/M15(poll 60s≪period)のため 1 サイクルが period 超過遅延する稀ケースのみで顕在化 = latent。finding 自身がこの限定を明記しており過大評価なし。",
+      "verdict": "confirmed",
+      "notes": "細部補正: 『直近3本のみ取得し最新1本のみ返す』ため、2本欠落時は中間2本とも skip(1本だけ復旧する形ですらない)。修正提案(prev_time 超の全確定バーを時系列順に返し _poll_cycle で順次 on_bar / or last_bar_time 永続化+起動時 backfill 結線)は妥当。回帰テスト追加提案も適切。"
+    },
+    {
+      "id": "DE-203",
+      "claim_accuracy": "正確。forward_test.py:246 `WARMUP_BARS = 200`、:266 `count=WARMUP_BARS` 実在。live_store.py:435 _recalculate_effective_buffer_size の max(period)×50 ロジックも実在。period=200(ema_slow) で k=200/200=1, exp(-2)≈0.135 / period=50 で k=4, exp(-8)≈3.4e-4 の数値正確。例示戦略 ATLAS-2026-0511-006/009/092/093 は config.json で ema_slow_period=200 を実確認。",
+      "severity_verdict": "low 妥当。",
+      "current_code_quote": "forward_test.py:246 `WARMUP_BARS = 200` / forward_test.py:263-267 `candles = await broker.get_candles(instrument=worker.instrument, granularity=worker.timeframe, count=WARMUP_BARS,)`",
+      "reproduced": "forward_test の warmup=200 と FeatureStore 必要長(period×50)の乖離を確認。ただし forward_test は paper/forward 検証用で実発注 live 経路ではない(broker.get_candles で取得し worker へ feed する検証ハーネス)。よって直接の取引実害はなく、forward 数値を live 投入判断に流用する運用リスクに限定 = low 妥当。DE-201 と同根(warmup 固定値 vs EWM 収束要件の乖離)。",
+      "verdict": "confirmed",
+      "notes": "例示の 0511-006 等は ema_slow_period=200(EWM)であり warmup=200 では k=1 と桁違い不足は事実。3箇所(UnifiedRunner=2000 / forward_test=200 / stream_receiver DEFAULT_INITIAL_WARMUP_BARS=300)を共通ヘルパで _effective_buffer_size から min(必要長,5000) 動的決定する統一提案は妥当。"
+    }
+  ],
+  "tally": {
+    "total": 3,
+    "confirmed": 2,
+    "adjusted": 1,
+    "refuted": 0,
+    "errors_found": "DE-201 の核心主張『ATLAS-2026-0508-069 が現に Live 配信中』は事実誤認(runner_config.json/state.json 双方 execution_mode=paper、かつ 2026-05-20 demote 済)。実 live 22 戦略の最大 EWM period は 100 で warmup=2000(k=20)で完全収束、period=200 の唯一例は SMA で EWM 非該当 → warmup=2000 が trading-affecting drift を生む高period EMA は live に存在せず。severity を high→medium に下方修正。コード/計算/parity テスト未検出性の主張は全て正確。"
+  }
+}

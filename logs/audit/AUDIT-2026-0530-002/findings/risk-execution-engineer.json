@@ -1,0 +1,190 @@
+{
+  "agent": "risk-execution-engineer",
+  "scope": "FTS PTRC/Execution/KS (commit eccab9a 事後検証 + 新規)",
+  "fts_commit_reviewed": "eccab9a (workdir 9f605e0 = hourly log snapshot; code identical)",
+  "post_fix_verification": {
+    "RE-401_metrics_injection": "OK with concerns: 4 箇所 (runner.py:343-351 / main.py:417-427 / forward_test.py:236-245 / scripts/live_preflight.py:34-44) すべてに `metrics=self._metrics` が注入され、AST 契約テスト (tests/contract/test_oanda_broker_metrics_wired.py) も成立。`OANDABroker.__init__` の signature は `metrics` が keyword-only (* 区切り) のため、positional 渡し抜けは構造的に発生しない。**concerns**: (1) AST テストは `ast.Name(id='OANDABroker')` と `ast.Attribute(attr='OANDABroker')` のみ検出するため、`broker_cls = OANDABroker; broker_cls(...)` のような変数経由 (factory) 呼出は素通りする。(2) `metrics=None` は禁止しているが、`metrics=getattr(self, '_metrics', None)` のような構文は ast.Call 値が Name でないため誤検知せず通る (PASS) が、実値が None になる場合は dead path のまま。(3) `_metrics` 初期化順序は main.py:103 / runner.py:207 / forward_test.py:97 で OANDABroker 生成より前にあり初期化済み確認。",
+    "RE-402_orphan_close": "OK with concerns: `_attempt_orphan_close_after_rollback` は LIVE 限定で実行され、(1) get_open_trades リトライ → (2) comment マッチ → (3) close_trade → (4) 失敗時 CRITICAL alert の正規フロー実装済。**concerns**: (a) `claimed_trade_ids` 共有 set を使わないため、同一 strategy_id を複数プロセス/コンテナから同時稼働する障害シナリオで重複 close を発行する可能性 (strategy_slot.py:880 のコメントで「次回 audit-loop で検討」と明記、未対応)。 (b) 直前の正常 close 失敗 (BrokerGateway.close_trade 例外握りつぶし) で残存する古い orphan trade T1 と新規 orphan T2 が両方 comment 一致した場合、`max(open_time)` で T2 のみ close し T1 は永続化する (累積 orphan 問題)。 (c) 第2回目の `get_open_trades` も BrokerUnavailableError なら CRITICAL alert は飛ぶが OANDA 障害中は 22 LIVE 戦略 × 同型エラーで一斉発火しうる (12h throttle は初報のみ通すため初回は 22 通)。 (d) 自動 close 実装は CLAUDE.md 「不整合は自動修正しない」原則と一見矛盾するが、本件は『FTS 自身がたった今 submit した trade の cleanup』のため正当 (docstring に明記)。",
+    "RE-MISSED-401_exception_discipline": "INCOMPLETE - 構造的欠陥あり: OANDABroker.get_trade は 404→TradeNotFoundError / 5xx・timeout→BrokerUnavailableError / 200→TradeDetail に正しく分離 (client.py:602-671)、close_trade pre_check も TradeNotFoundError のみ stale=NOT_FOUND と判定し BrokerUnavailableError は通常 PUT へ fall-through (client.py:747-786)。テストも該当パスを直接検証済。**致命的 concern**: BrokerGateway.get_trade (broker_gateway.py:469-477) が `except Exception → return None` で TradeNotFoundError と BrokerUnavailableError を **両方** None に握りつぶす。strategy_slot.py:1214 (close_trade_zero_price フォールバック) と strategy_slot.py:1913 (_recover_stale_trade_pnl) は両者とも `self.gateway.get_trade` を呼ぶため、新例外型の恩恵を一切受けない。前回 verify_re.json で RE-MISSED-405 として『low』分類されていたが、RE-MISSED-401 の修正が本ラウンドで入った後は影響が拡大: transient 障害でも _recover_stale_trade_pnl 経路で `closed_trade is None` → `recovered=False` → `clear_exposure` が呼ばれ、まだ OPEN の trade に対する exposure が消去されて二重建玉に至る経路が残存。",
+    "RE-411_timeout_metric": "OK with concerns: submit_order outer except (client.py:229-260) で TimeoutError → status='timeout'、その他例外 → status='5xx' の計装が追加され、内側 try/except で fire-and-forget 化されており本番フローを阻害しない。**concerns**: (a) 同型 dead-path が他 5 メソッドに残存: cancel_order の Exception 分岐 (client.py:567-574) は TimeoutError のみ計装、aiohttp.ClientError 等は metric 未記録。account_info (client.py:583-588) / get_open_trades (client.py:680-685) / get_candles (client.py:906-911) / get_open_positions (client.py:855-858) は try/except すらなく、レスポンス取得前の例外 (timeout/network) で metric 完全 dead。 (b) `aiohttp.ClientResponseError` (例: ヘッダ受領後の payload エラー) は 201/200 を受信済みでも outer except に到達するが status='5xx' でカウントされる → 「fill 済みなのに 5xx カウント」の semantic 不一致。 (c) get_trade の TimeoutError は計装あり (line 649) だが、aiohttp.ClientError/OSError パス (line 653-657) は metric 呼出なし → 同じ欠陥。"
+  },
+  "findings": [
+    {
+      "id": "RE-501",
+      "severity": "high",
+      "area": "execution",
+      "title": "BrokerGateway.get_trade が TradeNotFoundError と BrokerUnavailableError を両方 None で握りつぶし、RE-MISSED-401 修正の効果を gateway 経由パスで完全に無効化する",
+      "description": "OANDABroker.get_trade は本コミットで HTTP 404 → TradeNotFoundError / HTTP 5xx・timeout・network → BrokerUnavailableError に分離されたが、BrokerGateway.get_trade (broker_gateway.py:469-477) は両例外を `except Exception → return None` で握りつぶす。これにより RE-MISSED-401 修正が直接効くのは `OANDABroker.close_trade` の pre_check (`self.get_trade` を直接呼ぶ) のみで、`gateway.get_trade` を呼ぶ二つの本番経路 (strategy_slot.py:1214 close_trade_zero_price フォールバック / strategy_slot.py:1913 _recover_stale_trade_pnl) では transient 障害と permanent 404 が再び区別不能。前回 RE-MISSED-405 として『low』分類されていたが、本ラウンドの RE-MISSED-401 修正が入った後は影響が拡大している。特に _recover_stale_trade_pnl では `closed_trade is None` → `recovered=False` → `risk_supervisor.clear_exposure()` が呼ばれて exposure がクリアされる経路 (strategy_slot.py:1974-1986) があり、OANDA 一時障害 (503/504/timeout) で **まだ OPEN な trade の exposure が誤って消去** される。次バーで戦略が再エントリーすると PTRC は『exposure ゼロ』と認識し新規建玉を許可し、結果として OANDA 上に二重建玉が発生 (INC-2026-0526 と同型の幻ポジション、exit 側経路)。",
+      "evidence": [
+        "trading_platform/core/execution_engine/broker_gateway.py:469-477 (`except Exception: ... return None` で新例外をすべて吸収)",
+        "trading_platform/core/unified_runner/strategy_slot.py:1214 (`trade_detail = await self.gateway.get_trade(str(trade_id))` — close_trade_zero_price フォールバック経路)",
+        "trading_platform/core/unified_runner/strategy_slot.py:1913 (`closed_trade = await self.gateway.get_trade(str(trade_id))` — _recover_stale_trade_pnl 経路)",
+        "trading_platform/core/unified_runner/strategy_slot.py:1955-1986 (None 戻りで recovered=False → clear_exposure 呼出)",
+        "tests/fault/test_re_missed_401_get_trade_exception_discipline.py (テストは OANDABroker.get_trade を直接モックし、gateway 層は通っていない)"
+      ],
+      "reproduction": "OANDA を 503 で 1 回応答するモックに置き換え、戦略を LIVE で再起動 → restore_positions が stale trade を検知して `_recover_stale_trade_pnl(source='restore_positions')` 呼出 → gateway.get_trade が BrokerUnavailableError → None で握りつぶし → `closed_trade is None` → `clear_exposure(strategy_id, reason='stale_recovery_failed:restore_positions')` が呼ばれ exposure が 0 化。次バーで戦略が同方向の新規シグナル発火 → PTRC は exposure 0 で approve → 同戦略の 2 つ目の建玉が OANDA に発生。",
+      "suggested_fix": "broker_gateway.py:469-477 を以下に変更: (1) `except TradeNotFoundError: raise` で permanent はそのまま伝播。(2) `except BrokerUnavailableError: raise` で transient もそのまま伝播。(3) `except Exception` は最後の防衛線として残し BrokerUnavailableError ラップ。呼出側 (strategy_slot.py:1214 / 1913) はそれぞれ TradeNotFoundError と BrokerUnavailableError を別ハンドリングする (transient なら exposure クリアせず次回リトライ、permanent なら従来通り stale 処理)。最小コストは gateway 層は `raise` 透過 + 呼出側 try/except 追加。",
+      "live_impact": "OANDA の 5xx/timeout バーストが発生した瞬間に、stale recovery 経路を持つ全 LIVE 戦略 (現在 22 件) で exposure が誤クリアされ、次バーで二重建玉のリスク。INC-2026-0526 (5/20 損失 -887 JPY) と同型の幻エクスポージャー問題が exit 側経路で再発する可能性。RE-MISSED-401 の修正完了報告は誤解を招く (entry 側だけ救済、exit 側は未救済)。",
+      "regression_of": "RE-MISSED-401 (本ラウンド修正) の効果が gateway 層で打ち消されている。前回 RE-MISSED-405 として既知。",
+      "post_fix_defect": true
+    },
+    {
+      "id": "RE-502",
+      "severity": "medium",
+      "area": "execution",
+      "title": "EmailNotifier の entry_rollback_orphan / platform_escape_hatch_active 用 _LIVE_ANOMALY_LABELS 登録漏れ — 件名が `[WARN/CRITICAL] Live 異常` の汎用表示になり orphan 文脈が伝わらない",
+      "description": "PA-412 修正で `_RISK_ALERT_KINDS` に `platform_escape_hatch_active → escape_hatch` 登録、RE-402 修正で `entry_rollback_orphan → entry_rollback_orphan` 登録、`_handle_risk_alert` (実コードでは `_on_risk_alert`) に分岐追加、共に `_build_live_anomaly_message` を共有 builder として呼ぶ実装になっている。しかし `_LIVE_ANOMALY_LABELS` (email_notifier.py:814-819) には新規 alert_type が登録されておらず、`label = self._LIVE_ANOMALY_LABELS.get(event.alert_type, 'Live 異常')` のフォールバック (line 844) が走り件名 prefix は `[WARN/CRITICAL] Live 異常` という汎用文字列になる。CRITICAL レベル alert なのに subject に `WARN/` プレフィックス (line 847 ハードコード `'WARN/'`) も付くため、運用者の Email クライアントでフィルタを掛けても orphan / escape hatch を分離できない。本文も live_anomaly テンプレ流用で「幻エクスポージャー・上限張り付き・Live 沈黙のいずれかが疑われます」というミスリーディングな文言が表示され、実際の orphan trade / escape hatch 文脈に対応した対応手順が欠落 (OANDA Web UI で orphan trade を手動 close せよ、等の本来必要な指示が出ない)。コミット内コメント (email_notifier.py:450 `subject のみ専用化` line 450) と実装が乖離している。",
+      "evidence": [
+        "trading_platform/core/monitoring/email_notifier.py:814-819 (_LIVE_ANOMALY_LABELS に entry_rollback_orphan / platform_escape_hatch_active 未登録)",
+        "trading_platform/core/monitoring/email_notifier.py:840-847 (label フォールバック → 'Live 異常' / subject prefix ハードコード 'WARN/')",
+        "trading_platform/core/monitoring/email_notifier.py:447-458 (新 kind 分岐は _build_live_anomaly_message を共用呼出)",
+        "trading_platform/core/monitoring/email_notifier.py:866-872 (本文の固定『幻エクスポージャー・上限張り付き・Live 沈黙』『OANDA Web 管理画面で実建玉と内部 heartbeat exposure の乖離を確認』テンプレ — orphan/escape hatch に対する指示として不適)",
+        "コミット message (eccab9a): 「subject のみ専用化」記載と実装の不整合"
+      ],
+      "reproduction": "InMemoryEventBus で RiskAlertEvent(alert_type='entry_rollback_orphan', level=CRITICAL) を発火 → EmailNotifier._on_risk_alert が _build_live_anomaly_message に分岐 → label='Live 異常' / subject='[WARN/CRITICAL] Live 異常' / 本文に幻エクスポージャー対応手順が表示される。期待: 'OANDA Web UI で orphan trade {trade_id} を手動 close せよ' のような専用指示。",
+      "suggested_fix": "_LIVE_ANOMALY_LABELS に 'entry_rollback_orphan': 'Entry Rollback 後の OANDA Orphan Trade Close 失敗', 'platform_escape_hatch_active': 'PLATFORM_ALLOW_MAIN_PRODUCTION_LIVE Escape Hatch 有効化' を追加。さらに subject の 'WARN/' プレフィックスを level.value に応じて動的化 (CRITICAL なら 'CRIT/' 等)。理想的には _build_entry_rollback_orphan_message / _build_escape_hatch_message 専用 builder を追加し、orphan trade ID / OANDA Web UI へのリンク / 手動 close 手順を明示。",
+      "live_impact": "CRITICAL 通知が運用者の Email トリアージで他 Live 異常と混在し、手動介入の即時性が低下。orphan trade ID が本文に表示されるが、対応手順が誤った汎用テンプレで表示されるため運用判断ミス (Web UI 確認しても何を探すか分からない) を誘発。",
+      "regression_of": null,
+      "post_fix_defect": true
+    },
+    {
+      "id": "RE-503",
+      "severity": "medium",
+      "area": "execution",
+      "title": "OANDABroker の cancel_order / account_info / get_open_trades / get_candles / get_open_positions / get_trade(network) で _record_api_metric dead path 残存 — RE-411 修正は submit_order のみ",
+      "description": "RE-411 修正で submit_order の outer except に `_record_api_metric` 呼出が追加された (client.py:240-247) が、同型の dead-path パターンが他のメソッドに 5+1 件残存している: (1) `cancel_order` の Exception 分岐 (client.py:567-574) は TimeoutError のみ計装、aiohttp.ClientError / OSError 等は metric 未記録 (line 558-565 は TimeoutError only); (2) `account_info` (client.py:581-588) は try/except 無し、_record_api_metric は resp.status 取得後にしか呼ばれない; (3) `get_open_trades` (client.py:678-685) も同上; (4) `get_candles` (client.py:904-911) も同上; (5) `get_open_positions` (client.py:854-858) も同上 + _record_api_metric 呼出すら無い (DM-302 対象外); (6) `get_trade` の aiohttp.ClientError / OSError パス (client.py:653-657) は BrokerUnavailableError raise のみで _record_api_metric 呼出無し。これらの経路で OANDA 接続が transient に失敗した場合、`fx_oanda_api_status_total{status_code='timeout'}` および同 `'5xx'` が永久 0 に張り付き、`FxOandaApiLatencyHigh` / 接続失敗の SRE アラートが本番で発火不能なまま。",
+      "evidence": [
+        "trading_platform/broker/oanda_adapter/client.py:558-574 (cancel_order の except TimeoutError のみ計装、`except Exception as e` は metric 無し)",
+        "trading_platform/broker/oanda_adapter/client.py:581-588 (account_info: try/except 無し)",
+        "trading_platform/broker/oanda_adapter/client.py:678-685 (get_open_trades: 同上)",
+        "trading_platform/broker/oanda_adapter/client.py:854-858 (get_open_positions: 同上 + _record_api_metric 呼出すら無い)",
+        "trading_platform/broker/oanda_adapter/client.py:904-911 (get_candles: 同上)",
+        "trading_platform/broker/oanda_adapter/client.py:653-657 (get_trade の network error 経路: BrokerUnavailableError raise のみ、_record_api_metric 無し)"
+      ],
+      "reproduction": "MockedOANDA に aiohttp.ClientConnectorError を raise させる → cancel_order / get_open_trades 等を呼出 → 内側で `_record_api_metric` が走らず、Prometheus `fx_oanda_api_status_total{endpoint='cancel_order',status_code='5xx'}` が 0 のまま。SRE アラート FxOandaApiLatencyHigh が永遠に発火しない。",
+      "suggested_fix": "RE-411 と同型の outer try/except + _record_api_metric を全 OANDA REST メソッドに展開する。共通化: `@_with_api_metric('endpoint_name')` デコレータを定義し、各メソッドに付与すれば DRY。get_open_positions は元から _record_api_metric 呼出が無い (DM-302 対象外) ため別途追加要。",
+      "live_impact": "OANDA REST 系のレイテンシ・エラー率を継続監視できず、INC-2026-0526 のような sliver failure (一部 API のみ degradation) の早期検知が不可能。トレードフロー自体は無影響だが、運用観測の dead path。",
+      "regression_of": "RE-411 修正のスコープが submit_order に限定されたことの副作用 (post_fix_defect ではないが RE-411 と同じセッション内で全 endpoint を fix すべきだった)。",
+      "post_fix_defect": false
+    },
+    {
+      "id": "RE-504",
+      "severity": "medium",
+      "area": "execution",
+      "title": "_attempt_orphan_close_after_rollback に claim 排他制御なし — 累積 orphan / cross-process 競合の取りこぼし",
+      "description": "RE-402 修正で導入された `_attempt_orphan_close_after_rollback` は (1) get_open_trades → (2) comment マッチ最新 1 件 close → (3) 失敗時 CRITICAL alert の単純フロー。しかし以下のシナリオで欠陥が顕在化する: (a) **累積 orphan 取りこぼし**: 過去の正常 exit で close_trade が transient 失敗 (BrokerGateway.close_trade の except Exception → raise だが呼出側で握りつぶし) して残った古い orphan T1 が OANDA に残存している状態で、同戦略が新規 entry を試み rollback → orphan T2 発生。`max(matching, key=open_time)` で T2 のみ close、T1 は永続化。alert も発火しない (T2 close 成功 = orphan 解消とみなす)。(b) **cross-process 競合**: 同一 strategy_id をフェイルオーバ目的で複数プロセスから同時稼働した場合、各プロセスの orphan close が同じ trade_id を競合 close (1 つ目成功・2 つ目 404=stale 扱いで成功) するが、claim 機構がないため重複試行を抑止できない。strategy_slot.py:880 のコメント `排他制御 (claimed_trade_ids 相当のランナー横断 set) は次回 audit-loop で検討` の通り未対応。",
+      "evidence": [
+        "trading_platform/core/unified_runner/strategy_slot.py:960-981 (matching フィルタ + max(open_time) で 1 件のみ採用、累積 orphan 検出ロジック無し)",
+        "trading_platform/core/unified_runner/strategy_slot.py:880 (claim 機構未実装の自認コメント)",
+        "trading_platform/core/unified_runner/runner.py:677-684 (restore_positions では claimed_trade_ids set を使うが、ランタイムには未適用)",
+        "trading_platform/core/execution_engine/broker_gateway.py:430-438 (close_trade 例外は raise されるが、上位の `_handle_exit` / `shutdown` で握りつぶされる経路があり、過去 orphan が累積しうる)"
+      ],
+      "reproduction": "(a) 累積: テストで _handle_exit に gateway.close_trade を `raise BrokerUnavailableError` させ、state.open_trade_id だけ残す→次バーで再 entry rollback → orphan close は新規 trade のみ閉じ、過去 trade T1 は OANDA 永続化。get_open_trades はその後 T1 を返し続ける。(b) cross-process: 同 strategy_id を別 PID で並行起動 (本番 fail-over 想定) し OANDA 障害で両方 rollback。両方が同 trade_id を close 試行。",
+      "suggested_fix": "(a) 累積対策: comment マッチした **全** trade に対して close_trade を発行 (ループ化) し、各々の結果を alert に集約。(b) cross-process 対策: 中央 claim store (Redis SET) を導入し、close_trade 発行前に SETNX で trade_id を claim、close 成功後に DEL。前回 INC-2026-0526 の restore_positions claim と同じ思想をランタイムにも展開。",
+      "live_impact": "OANDA transient 障害が複数回連鎖した場合、各回で新 orphan が発生し古い orphan が累積。 alert 抑制も働くため運用者は気付かず、SL/TP 未設定の管理外建玉が蓄積する潜在リスク。22 LIVE 戦略 × 同時障害で claim 競合は理論上発生しうるが現状は単一プロセス運用のため (a) 累積の方が現実リスク高。",
+      "regression_of": null,
+      "post_fix_defect": false
+    },
+    {
+      "id": "RE-505",
+      "severity": "medium",
+      "area": "ptrc",
+      "title": "PA-401 早期起動 EmailNotifier が start() の rollback_stop に登録されず、initialize 中の起動失敗で subscriber リーク",
+      "description": "PA-401 修正の `_ensure_eventbus_and_notifier_started` (main.py:213-279) は initialize() 中で EventBus.start / EmailNotifier.start を先行実行する。しかし起動成功した EmailNotifier は `self._email_notifier_started = True` をフラグ立てするのみで、後続の `start()` ライフサイクルの `_rollback_stop(started)` 対象には登録されない。`start()` の line 1144-1180 で `_recover_state_fail_closed()` 等が raise した場合、`started` リストは event_bus の stop_fn のみで EmailNotifier は含まれず、rollback 時に EmailNotifier.stop が呼ばれない。結果として: (1) EventBus が stop されても EmailNotifier は subscribe を保持し続けメモリリーク。(2) その後別経路で publish が走ると `_handle_risk_alert` がアクティブのまま動き Email が誤送信されうる。(3) プロセス終了時の cleanup が aiohttp/SMTP セッションを正しく閉じない可能性。Risk Engine 観点では: 起動失敗時の rollback が partial になり、システム全体の停止状態が一貫しない (CLAUDE.md「Fail-Safe」原則違反)。",
+      "evidence": [
+        "trading_platform/main.py:266-278 (_ensure_eventbus_and_notifier_started で EmailNotifier.start 後 flag セットのみ、started リスト未追加)",
+        "trading_platform/main.py:1144-1180 (start() 内で _recover_state_fail_closed が raise した場合、event_bus 以外は rollback されない)",
+        "trading_platform/main.py:1245-1264 (EmailNotifier の正規 start_step は line 1245 以降のため、initialize 中失敗時には到達せず stop_fn 登録なし)"
+      ],
+      "reproduction": "main.py 経路で `PLATFORM_ALLOW_MAIN_PRODUCTION_LIVE=1` を設定し initialize 中で escape hatch alert を publish (EmailNotifier 起動済) → 続いて `_recover_state_fail_closed` を意図的に raise する mock → start() で event_bus は rollback されるが EmailNotifier は started リストに無いため stop されない。EmailNotifier._on_risk_alert は subscribe したまま残る。",
+      "suggested_fix": "_ensure_eventbus_and_notifier_started 内で EventBus.start / EmailNotifier.start 成功時に `self._early_started_components: list[tuple[str, Any]] = []` 等の専用リストに stop_fn を積み、start() 冒頭で `started.extend(self._early_started_components)` してから _start_step ループに入る。あるいは _start_step を `_ensure_eventbus_and_notifier_started` 内でも使い、started リストを共有する設計に変更。",
+      "live_impact": "main.py 経路 (escape hatch 経由 LIVE) で起動失敗した場合に EmailNotifier がゾンビ化。本番 LIVE 移行ガード経路でのみ顕在化し、現状 main.py が UnifiedRunner に移行中であるため緊急度は中。",
+      "regression_of": null,
+      "post_fix_defect": true
+    },
+    {
+      "id": "RE-506",
+      "severity": "low",
+      "area": "execution",
+      "title": "AST 契約テスト test_oanda_broker_metrics_wired.py が factory/変数経由の OANDABroker 生成を検出不能",
+      "description": "tests/contract/test_oanda_broker_metrics_wired.py は `ast.Name(id='OANDABroker')` と `ast.Attribute(attr='OANDABroker')` のみを検出対象とする。以下のパターンは検出されない: (1) `broker_cls = OANDABroker; broker_cls(...)` (変数経由); (2) `_BROKERS = {'oanda': OANDABroker}; _BROKERS[key](...)` (dict lookup); (3) `getattr(module, 'OANDABroker')(...)` (動的属性); (4) factory 関数で内部 wrap した場合。また `metrics=None` リテラルは禁止しているが、`metrics=getattr(self, '_metrics', None)` のような構文は値ノードが `Constant(None)` ではなく `Call` のため誤検知せず通る。リテラル None だけでなく実行時に None 評価される構文も検出すべき。さらに将来 `OANDABroker` を `OANDABrokerV2` にリネームした場合、テストは黙って空配列を返し PASS する (REQUIRED_SITES の `assert calls` で検出するが、新ファイル追加忘れは検出不能)。",
+      "evidence": [
+        "tests/contract/test_oanda_broker_metrics_wired.py:42-57 (_collect_oanda_broker_calls の AST 検出パターン)",
+        "tests/contract/test_oanda_broker_metrics_wired.py:60-70 (_is_none_literal は Constant(value=None) のみ判定)"
+      ],
+      "reproduction": "リファクタリングで `cls = OANDABroker; cls(api_key=..., account_id=..., base_url=...)` のように書き換えると AST テストは PASS するが metrics 注入が落ちる。RE-401 が再発しても CI は緑のまま。",
+      "suggested_fix": "(a) `assert calls` 失敗時のエラーメッセージ強化で気付きを促す。(b) 補助的に grep ベースの `'OANDABroker(' in source.replace('\\\\n', '')` チェックを追加し、AST で拾えなかった場合に「直接 OANDABroker(...) 形式以外で生成されています、契約テスト要更新」を CI で警告。(c) `metrics=` の値が `self._metrics` または `MetricsCollector(...)` のような ast.Attribute / ast.Call であることを ホワイトリスト型でチェック。",
+      "live_impact": "現状の REQUIRED_SITES 4 ファイルでは検出パターン外の生成は存在しないため即時影響なし。将来のリファクタリングで dead path 再発を許す構造的ギャップ。",
+      "regression_of": null,
+      "post_fix_defect": true
+    },
+    {
+      "id": "RE-507",
+      "severity": "low",
+      "area": "execution",
+      "title": "RE-411 timeout/5xx 二値分類が aiohttp.ClientResponseError 等の post-201 例外を 5xx として誤計上する semantic 不一致",
+      "description": "submit_order outer except (client.py:240-247) は `isinstance(e, TimeoutError)` 以外を一律 status='5xx' として計上する。しかし以下のシナリオで意味的に不正確な計上が発生する: (1) OANDA が 201 Created を返した後の payload decode 中に `aiohttp.ClientPayloadError` / `aiohttp.ContentTypeError` で raise → 注文は実際には OANDA で約定済 (orderFillTransaction が DB に書き込まれた状態) だが、metric は `'5xx'` でカウントされ、ダッシュボードでは「サーバエラー」として可視化される。(2) DNS resolution failure / TLS handshake error (例: aiohttp.ClientConnectorCertificateError) もすべて '5xx' に集約。(3) asyncio.CancelledError (タスクキャンセル) も TimeoutError ではないため '5xx' に紛れる。これらを 1 つの '5xx' バケットに集約すると、後続の SRE 観測で原因切り分けができない。",
+      "evidence": [
+        "trading_platform/broker/oanda_adapter/client.py:240-247 (TimeoutError と else の二値分類)",
+        "OANDA v20 API: POST /orders は同期約定で 201 Created + body に orderFillTransaction を返す仕様 (payload decode 失敗時の意味論は約定済 vs 未約定で曖昧)",
+        "trading_platform/broker/oanda_adapter/client.py:408-411 (内側で submit POST 後 resp.json() を await し例外可能)"
+      ],
+      "reproduction": "aiohttp の resp.json() で `ContentTypeError` を raise させる mock を作り submit_order を呼出 → outer except に到達 → `_record_api_metric('order', 500, None)` がカウント。Prometheus では `fx_oanda_api_status_total{endpoint='order',status_code='5xx'}` が +1 されるが OANDA 側では 201 で約定済の可能性。",
+      "suggested_fix": "例外型別分類: TimeoutError → 'timeout', aiohttp.ClientConnectorError → 'connection_error', aiohttp.ClientPayloadError / ContentTypeError → 'parse_error', asyncio.CancelledError → 'cancelled', その他 → '5xx'。あるいは少なくとも 'transport_error' を別 status_code として追加し 5xx と分離。",
+      "live_impact": "メトリクスの semantic 精度低下のみで取引フローは無影響。INC 調査時の原因切り分けが鈍る程度。",
+      "regression_of": null,
+      "post_fix_defect": true
+    },
+    {
+      "id": "RE-508",
+      "severity": "medium",
+      "area": "execution",
+      "title": "DESIGN-C-001: RE-305 (live_orders_silent) と 12h throttle の意味論不整合 — 30 回ごと escalation が 12h に 1 回しか配信されない",
+      "description": "RE-305 (runner.py:1611-1640) は `_consecutive_poll_errors >= 30 and % 30 == 0` の条件で `live_orders_silent` alert_type を escalation 発火する設計で、コメントに『30 の倍数で繰り返し発火し、復旧まで運用者に通知し続ける』と明記。一方 email_notifier.py:362 で `live_orders_silent` kind は **12h throttle (43200.0s)**。`_consecutive_poll_errors` がインクリメントされる周期 (`poll_interval` 数十秒〜分) で 30/60/90/... と escalation 発火しても、EmailNotifier は初報の後 12h 内すべて throttle で drop。設計意図 (継続通知) と実挙動 (1 通) が完全に乖離。前ラウンド verify_re.json で RE-407/408/409 として既知だが対象外として deferred。Risk 観点では: OANDA account_info 完全失敗 (取引可能だがリスク監視不能) という致命状態を運用者に escalation できず、12h 経過後の初回再通知まで沈黙する。RE 視点での影響評価: PTRC 自体は `_consecutive_poll_errors` を見ないため発注は継続するが、`risk_supervisor.check_kill_switch` も account_info 取得失敗で skip される可能性があり、Kill Switch 判定能力の degradation も同時発生しうる。設計判断として『RE-305 を専用 alert_type に分離 + 短 throttle (5-15min)』が妥当。",
+      "evidence": [
+        "trading_platform/core/unified_runner/runner.py:1611-1640 (RE-305 escalation の意図と実装)",
+        "trading_platform/core/monitoring/email_notifier.py:357-362 (live_orders_silent throttle = 43200.0s)",
+        "logs/audit/AUDIT-2026-0530-001/verification/verify_re.json (RE-407/408/409 で既知、対象外 deferred)",
+        "コミット message (eccab9a): 「DESIGN-C-001 RE-305 復旧通知 vs live_orders_silent 12h throttle 矛盾 (ユーザー判断)」"
+      ],
+      "reproduction": "MockedOANDA を account_info で永続 500 にする → _consecutive_poll_errors が 30, 60, 90... と escalation 発火するが、EmailNotifier は最初の 1 通のみ送信し以降 12h 沈黙。Prometheus / structlog には記録される。",
+      "suggested_fix": "RE-305 用に専用 alert_type `live_account_info_polling_failed` を新設し、_RISK_ALERT_KINDS / _EMAIL_THROTTLE_INTERVAL_SEC / _ALERT_LEVEL_BY_TYPE / _LIVE_ANOMALY_LABELS に登録 (level=CRITICAL, throttle=300s 程度)。RE-305 の `_emit_risk_alert('live_orders_silent', ...)` を `_emit_risk_alert('live_account_info_polling_failed', ...)` に変更。`_check_live_health_alerts` の本来の live_orders_silent (戦略沈黙) とは別途扱う。",
+      "live_impact": "OANDA account_info 完全失敗中の運用者 escalation が初報のみ。本番再発時に 12h 経過まで気付かない可能性。RE-305 の設計コメントを信じた運用者が誤った安心感を持つ Operator Trust の問題も含む。",
+      "regression_of": "前回 (AUDIT-2026-0529-001) で RE-407/408/409 として既知。本ラウンドでは対象外として deferred されたが、Risk Engineer 視点で改めて影響評価。",
+      "post_fix_defect": false
+    },
+    {
+      "id": "RE-509",
+      "severity": "low",
+      "area": "execution",
+      "title": "_attempt_orphan_close_after_rollback が close 失敗で発火する CRITICAL alert に correlation_id 含まれるが SignalEvent → Order → Fill → Orphan chain の追跡が乏しい",
+      "description": "RE-402 修正で `_emit_entry_rollback_orphan_alert` の details に `correlation_id`, `trade_id`, `broker_order_id`, `fill_price`, `fill_quantity`, `direction`, `instrument`, `reason`, `error` が含まれる (strategy_slot.py:1040-1056)。しかし `order_id` (FTS Client Order ID = `{strategy}-{signal}-{ts}-{seq}` 形式) が含まれない。Audit Log で SignalEvent → Order → Fill → Rollback → Orphan を追跡するには broker_order_id (OANDA 側 ID) と order_id (FTS 側 ID) の両方が必要だが、後者の欠落で trade_context_snapshot や PTRC 判定の audit ログとの紐付けが手動 grep に頼ることになる。",
+      "evidence": [
+        "trading_platform/core/unified_runner/strategy_slot.py:1040-1056 (details に order_id が無い)",
+        "trading_platform/core/unified_runner/strategy_slot.py:687-705 (entry submit 時に order.order_id がある)"
+      ],
+      "reproduction": "RE-402 テストで orphan alert を発火させ details を確認 → order_id が無い。同 SignalEvent から派生した PTRC audit (`audit_log/{date}.jsonl`) との結合は correlation_id でできるが、Order レベルの追跡には order_id が必要。",
+      "suggested_fix": "_handle_entry の rollback パスで `order.order_id` を `_attempt_orphan_close_after_rollback` 経由で `_emit_entry_rollback_orphan_alert` に渡し details に追加。",
+      "live_impact": "監査・運用調査時の追跡コスト増のみ。",
+      "regression_of": null,
+      "post_fix_defect": true
+    },
+    {
+      "id": "RE-510",
+      "severity": "low",
+      "area": "kill_switch",
+      "title": "main.py 経路 (escape hatch 経由) は StrategySlot を使わないため RE-402 orphan close 保護が一切効かない",
+      "description": "RE-402 修正は `StrategySlot._handle_entry` → `_attempt_orphan_close_after_rollback` 経路に実装されているが、main.py は StrategySlot ではなく StrategyWorker / Coordinator アーキテクチャを使う (main.py に StrategySlot 参照なし、line 323 / 735 で risk_alert_emitter set のみ)。`PLATFORM_ALLOW_MAIN_PRODUCTION_LIVE=1` で main.py 経路の本番 LIVE が許可された場合 (PA-412 で CRITICAL alert は発火されるが)、その後のエントリー失敗時の orphan close 保護は一切働かない。PA-412 escape hatch の deprecation 警告と合わせて『main.py 経路 LIVE は RE-402 orphan 保護外』を明示すべき。",
+      "evidence": [
+        "trading_platform/main.py: StrategySlot 参照なし (grep)",
+        "trading_platform/main.py:476-510 (PA-412 escape hatch ロジック、deprecation 警告に orphan 保護欠如の言及なし)",
+        "trading_platform/core/unified_runner/runner.py:727 (StrategySlot に risk_alert_emitter 注入)"
+      ],
+      "reproduction": "PLATFORM_ALLOW_MAIN_PRODUCTION_LIVE=1 で main.py を起動 → StrategyWorker 経由で entry 発注 → OANDA 一時障害で trade_id 解決失敗。main.py 経路は entry_rollback_orphan alert を発火する経路を持たないため、OANDA 上に orphan trade が SL/TP 無しで残存する。",
+      "suggested_fix": "(a) PA-412 escape hatch 警告 (main.py:486 risks list) に「RE-402 orphan trade 保護も無効」を追加。(b) main.py StrategyWorker 経路にも _attempt_orphan_close_after_rollback 相当のフローを移植。(c) 長期: PA-407 ADR で main.py の本番 LIVE 経路を正式廃止し UnifiedRunner に統合。",
+      "live_impact": "現状 escape hatch 利用は明示 opt-in のため通常運用では発生しない。escape hatch 利用時のリスク説明として明示すべき範囲。",
+      "regression_of": null,
+      "post_fix_defect": false
+    }
+  ]
+}

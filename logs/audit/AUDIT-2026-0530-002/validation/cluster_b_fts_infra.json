@@ -1,0 +1,524 @@
+{
+  "cluster": "B",
+  "label": "FTS インフラ",
+  "devil_advocate": "devil-advocate",
+  "audit_id": "AUDIT-2026-0530-002",
+  "fts_commit_verified": "eccab9a (workdir 9f605e0)",
+  "verification_date": "2026-05-30",
+  "total_findings_reviewed": 17,
+  "files_referenced": 14,
+  "overall_assessment": "PA-501/RE-501 high 2件は実コードで再現経路を確認済み。事実性・severity 共に妥当。PA-506 と RE-502 は同一現象の重複 finding (統合推奨)。RE-505 は主張は事実だが顕在化条件が start() 内 _recover_state_fail_closed raise に限定 (severity=medium は妥当)。PA-502 は現在 race 不可の将来リスクで severity=low を推奨。RE-506 の post_fix_defect 宣言は RE-401 設計意図外の拡大解釈で informational が妥当。",
+  "findings": [
+    {
+      "id": "PA-501",
+      "original_severity": "high",
+      "original_post_fix_defect": true,
+      "verdict": "confirmed",
+      "adoption_level": "must_fix",
+      "fact_check": {
+        "result": "PASS: 完全一致",
+        "verified_lines": [
+          "email_notifier.py:126-128: strategies_metadata or {} を実コードで確認。空 dict は falsy => 右オペランドの新規 {} が生成され呼出元 dict と id() が異なる別インスタンスになる",
+          "main.py:259: strategies_metadata=self._strategies_metadata を渡しているがこの時点で空 dict",
+          "main.py:691: self._strategies_metadata[loaded.strategy_id] = dict(loaded.metadata) で後段 populate => EmailNotifier の保持する別 dict には反映されない",
+          "email_notifier.py:477: meta = self._strategies_metadata.get(event.strategy_id, {}) => 常に空 dict を返す"
+        ],
+        "reproduction_verified": "id(en._strategies_metadata) != id(passed_dict) を pytest で検証可能。空 dict を渡すと or {} 右辺が新規オブジェクトを生成するため参照切断が成立する"
+      },
+      "severity_assessment": {
+        "agreed": true,
+        "rationale": "escape_hatch / Gate 拒否経路を踏んだセッションで display_name / direction_bias / hypothesis が全て '-' になる。本番 LIVE 運用者のメールトリアージに直接影響する情報欠落であり high が妥当"
+      },
+      "counter_arguments": [],
+      "risk_warnings": [
+        {
+          "scenario": "suggested_fix の is not None 変更を実施せず test 追加のみとした場合、root cause が残存し同型の派生パスで再発する",
+          "probability": "高",
+          "impact": "fix 完了報告が誤解を招き次回 audit まで残存"
+        }
+      ],
+      "da_notes": "docstring (main.py:251-252) の参照渡し設計意図と実装の乖離が根本問題。fix は is not None 変更が必須。テスト追加のみでは insufficient。"
+    },
+    {
+      "id": "PA-502",
+      "original_severity": "medium",
+      "original_post_fix_defect": false,
+      "verdict": "confirmed_with_caveat",
+      "adoption_level": "should_consider",
+      "fact_check": {
+        "result": "PASS: 将来リスクとして事実",
+        "verified_lines": [
+          "main.py:235: フラグ check-then-set の間に await suspend point あり",
+          "email_notifier.py:222-223: subscribe 2 回目で handlers が 2 重登録される (append only)",
+          "memory_adapter.py: handlers は list.append のみで idempotency なし"
+        ],
+        "reproduction_verified": "現状の逐次 initialize では race 不可。asyncio.gather 並列化でのみ顕在化"
+      },
+      "severity_assessment": {
+        "agreed": false,
+        "rationale": "現状の initialize() コードパスは完全に逐次実行であり race 不可。medium は将来リスクとして過大評価。low が適切"
+      },
+      "counter_arguments": [
+        {
+          "type": "過大評価",
+          "location": "reproduction 欄",
+          "criticism": "現在のコードでは asyncio.gather は存在せず再現不可。medium severity を正当化する現実シナリオが示されていない",
+          "evidence": "_ensure_eventbus_and_notifier_started の呼出点 (line 538, 549, 559) はすべて逐次",
+          "counter_proposal": "severity を medium から low に格下げ推奨"
+        }
+      ],
+      "risk_warnings": [],
+      "da_notes": "severity を medium=>low に格下げ推奨。asyncio.Lock 追加自体は低コストで should_consider として維持。"
+    },
+    {
+      "id": "PA-503",
+      "original_severity": "medium",
+      "original_post_fix_defect": true,
+      "verdict": "confirmed",
+      "adoption_level": "should_consider",
+      "fact_check": {
+        "result": "PASS: 実コードで確認",
+        "verified_lines": [
+          "main.py:1341-1346: _rollback_stop は reversed(started) の stop_fn を呼ぶのみ。フラグリセット処理は一切なし",
+          "main.py:1150: _eventbus_started_early が True のまま残ると no-op ラッパを選択",
+          "main.py:204-205: フラグは __init__ で False 初期化されるが rollback_stop では False に戻らない"
+        ],
+        "reproduction_verified": "再現手順 (1)-(4) は論理的に正確。ただし start() 失敗時は通常プロセス終了であり再試行プロセスマネージャとの組み合わせでのみ顕在化"
+      },
+      "severity_assessment": {
+        "agreed": true,
+        "rationale": "post_fix_defect として正確。再試行前提でのみ成立するため medium が妥当"
+      },
+      "counter_arguments": [],
+      "risk_warnings": [
+        {
+          "scenario": "ダブルチェック案 (フラグ AND _running 状態) を採用した場合、InMemoryEventBus が stop 後も _running=False を正しく返す保証を確認する必要がある",
+          "probability": "低",
+          "impact": "ダブルチェックが常に False を返し early-start 経路が毎回 re-start を試みる"
+        }
+      ],
+      "da_notes": "root cause 修正 (_rollback_stop 内のフラグリセット) を推奨。ダブルチェック案は memory_adapter の _running 保証に依存するため root cause 修正の方が明確。"
+    },
+    {
+      "id": "PA-504",
+      "original_severity": "low",
+      "original_post_fix_defect": false,
+      "verdict": "confirmed",
+      "adoption_level": "informational",
+      "fact_check": {
+        "result": "PASS",
+        "verified_lines": [
+          "main.py:1149-1150: getattr デフォルト False のコメントに test バイパス用と明記",
+          "tests/integration/test_graceful_shutdown.py:31: TradingPlatform.__new__(TradingPlatform) で __init__ バイパスを確認"
+        ],
+        "reproduction_verified": "概念的な smell のみ。動作上の不具合なし。"
+      },
+      "severity_assessment": {
+        "agreed": true,
+        "rationale": "low が適切。動作上の実害なし"
+      },
+      "counter_arguments": [],
+      "risk_warnings": [],
+      "da_notes": "test factory classmethod 案が将来の __init__ 追加時の自動追従性が高い。informational として記録のみ。"
+    },
+    {
+      "id": "PA-505",
+      "original_severity": "low",
+      "original_post_fix_defect": false,
+      "verdict": "confirmed",
+      "adoption_level": "informational",
+      "fact_check": {
+        "result": "PASS",
+        "verified_lines": [
+          "main.py:446: _assert_not_unsupported_production_live メソッド名確認",
+          "main.py:484: self._escape_hatch_active = True 副作用確認",
+          "main.py:537: if self._escape_hatch_active: -- 唯一の read 箇所確認"
+        ],
+        "reproduction_verified": "コードレビュー観点のみ。動作上の不具合なし。"
+      },
+      "severity_assessment": {
+        "agreed": true,
+        "rationale": "low が適切。命名規約 smell のみ"
+      },
+      "counter_arguments": [],
+      "risk_warnings": [],
+      "da_notes": "set-once read-once を local variable 化する案は PA-503 のフラグ管理複雑性とも相互に解消するため統合修正として効果的。informational。"
+    },
+    {
+      "id": "PA-506",
+      "original_severity": "medium",
+      "original_post_fix_defect": true,
+      "verdict": "confirmed_as_duplicate_of_RE-502",
+      "adoption_level": "must_fix",
+      "fact_check": {
+        "result": "PASS: RE-502 と同一現象の重複 finding",
+        "verified_lines": [
+          "email_notifier.py:814-819: _LIVE_ANOMALY_LABELS に platform_escape_hatch_active / entry_rollback_orphan 未登録を実コードで確認",
+          "email_notifier.py:844: self._LIVE_ANOMALY_LABELS.get(event.alert_type, 'Live 異常') フォールバック確認",
+          "email_notifier.py:447-458: dispatcher で both kind が _build_live_anomaly_message を呼ぶことを確認",
+          "email_notifier.py:866-872: 幻エクスポージャー固定文言確認",
+          "email_notifier.py:450: コメント subject のみ専用化 と実装の乖離確認 (実際には subject も専用化されていない)"
+        ],
+        "reproduction_verified": "dispatcher コードを追跡すると entry_rollback_orphan => kind=entry_rollback_orphan => line 447 分岐 => _build_live_anomaly_message => line 844 フォールバック => subject に Live 異常 が入ることを静的解析で確認"
+      },
+      "severity_assessment": {
+        "agreed": true,
+        "rationale": "medium が妥当。RE-502 と統合して 1 件として修正すべき"
+      },
+      "counter_arguments": [
+        {
+          "type": "重複 finding",
+          "location": "PA-506 / RE-502 両方",
+          "criticism": "PA-506 と RE-502 は同一ファイルの同一行 (email_notifier.py:814-819, 844, 866-872) を evidence として参照し同一の修正を提案している",
+          "evidence": "PA-506 evidence と RE-502 evidence の重複率は約 90%",
+          "counter_proposal": "RE-502 を正 finding として _LIVE_ANOMALY_LABELS 登録漏れを修正。PA-506 は RE-502 のコメントとして記録し finding として閉じる"
+        }
+      ],
+      "risk_warnings": [],
+      "da_notes": "2 finding の統合を推奨。修正は _LIVE_ANOMALY_LABELS への 2 エントリ追加 + subject prefix 動的化 + 専用 builder 追加。統合後に must_fix として 1 件で管理すること。"
+    },
+    {
+      "id": "PA-507",
+      "original_severity": "low",
+      "original_post_fix_defect": false,
+      "verdict": "confirmed",
+      "adoption_level": "informational",
+      "fact_check": {
+        "result": "PASS",
+        "verified_lines": [
+          "email_notifier.py:222-223: subscribe を 2 回逐次 await",
+          "memory_adapter.py: handlers は list.append のみで idempotency なし",
+          "main.py:266-278: RISK_ALERT subscribe で raise した場合にフラグ False のまま返ることを確認"
+        ],
+        "reproduction_verified": "EmailNotifier.start を monkeypatch して RISK_ALERT subscribe で raise させる => 例外ログ + フラグ False => main start() が再 subscribe => FILL handler が 2 つ登録される"
+      },
+      "severity_assessment": {
+        "agreed": true,
+        "rationale": "low が適切。SMTP 一時障害という限定的トリガーのみで発生する境界ケース"
+      },
+      "counter_arguments": [],
+      "risk_warnings": [],
+      "da_notes": "EmailNotifier.start() を原子化する修正は低コスト。informational として記録。"
+    },
+    {
+      "id": "RE-501",
+      "original_severity": "high",
+      "original_post_fix_defect": true,
+      "verdict": "confirmed",
+      "adoption_level": "must_fix",
+      "fact_check": {
+        "result": "PASS: 完全一致",
+        "verified_lines": [
+          "broker_gateway.py:469-477: except Exception as e: logger.error(...); return None -- TradeNotFoundError/BrokerUnavailableError 両方を None で握りつぶし。TradeNotFoundError の import 自体が broker_gateway.py に存在しない",
+          "strategy_slot.py:1913: closed_trade = await self.gateway.get_trade(str(trade_id)) -- gateway 経由で呼ぶため新例外型の恩恵がゼロ",
+          "strategy_slot.py:1974-1979: if not recovered and risk_supervisor is not None: risk_supervisor.clear_exposure(...) -- transient 障害でも OPEN trade の exposure が消去される因果チェーンを確認",
+          "strategy_slot.py:1214: trade_detail = await self.gateway.get_trade(str(trade_id)) -- close_trade_zero_price フォールバック経路も同様に影響",
+          "tests/fault/test_re_missed_401_get_trade_exception_discipline.py: テストは OANDABroker.get_trade を直接モックし gateway 層は通っていない (finding の指摘通り)"
+        ],
+        "reproduction_verified": "OANDA 503 応答 => BrokerUnavailableError => gateway:474 で except Exception => None 化 => strategy_slot:1913 で closed_trade is None => recovered=False => clear_exposure => 次バー二重建玉の因果チェーンをコードで確認"
+      },
+      "severity_assessment": {
+        "agreed": true,
+        "rationale": "INC-2026-0526 同型 (幻ポジション exit 側経路) が OANDA transient 障害で 22 LIVE 戦略全体に同時発生しうる。RE-MISSED-401 の修正完了報告が entry 側のみ救済で exit 側未救済である点も high を支持する"
+      },
+      "counter_arguments": [],
+      "risk_warnings": [
+        {
+          "scenario": "suggested_fix 実装時に呼出側 (strategy_slot.py:1214, 1913) で BrokerUnavailableError の retry 間隔設計が不十分だと同一バーで無限リトライループに入る",
+          "probability": "中",
+          "impact": "OANDA 障害中に strategy_slot がポーリングに支配されパフォーマンス劣化"
+        },
+        {
+          "scenario": "テスト (test_re_missed_401_get_trade_exception_discipline.py) が gateway 層を通っていないため、gateway 修正後の回帰テストが不足したまま merge されるリスク",
+          "probability": "高 (テスト追加を忘ると確実に regression 検知不能)",
+          "impact": "将来の gateway 修正で再び例外握りつぶしが入っても CI が緑のまま"
+        }
+      ],
+      "da_notes": "最小コスト修正 (gateway 層は raise 透過 + 呼出側 try/except 追加) を推奨。gateway 層の修正検証用テストを別途追加すること (現行テストは OANDABroker.get_trade を直接モックしており gateway を通過しない)。"
+    },
+    {
+      "id": "RE-502",
+      "original_severity": "medium",
+      "original_post_fix_defect": true,
+      "verdict": "confirmed_as_duplicate_of_PA-506",
+      "adoption_level": "must_fix",
+      "fact_check": {
+        "result": "PASS: PA-506 と完全重複",
+        "verified_lines": [
+          "email_notifier.py:814-819: _LIVE_ANOMALY_LABELS 未登録 (PA-506 と同一)",
+          "email_notifier.py:840-847: ラベルフォールバックと subject prefix ハードコード確認",
+          "email_notifier.py:866-872: INC-2026-0526-001 固定本文確認"
+        ],
+        "reproduction_verified": "dispatcher コードを追跡すると entry_rollback_orphan => kind=entry_rollback_orphan => line 447 分岐 => _build_live_anomaly_message => line 844 フォールバック => subject に Live 異常 が入ることを静的解析で確認 (PA-506 と同一経路)"
+      },
+      "severity_assessment": {
+        "agreed": true,
+        "rationale": "medium が妥当 (PA-506 と統合すること)"
+      },
+      "counter_arguments": [
+        {
+          "type": "重複 finding",
+          "location": "PA-506 / RE-502",
+          "criticism": "PA-506 と同一現象。RE-502 を正 finding として存続し PA-506 を閉じること",
+          "evidence": "evidence リストの重複率約 90%",
+          "counter_proposal": "RE-502 を正 finding として存続、PA-506 を RE-502 のコメントとして閉じる"
+        }
+      ],
+      "risk_warnings": [],
+      "da_notes": "RE-502 を正 finding として _LIVE_ANOMALY_LABELS 修正 + 専用 builder 追加を実施。PA-506 を重複として閉じる。"
+    },
+    {
+      "id": "RE-503",
+      "original_severity": "medium",
+      "original_post_fix_defect": false,
+      "verdict": "confirmed",
+      "adoption_level": "should_consider",
+      "fact_check": {
+        "result": "PASS",
+        "verified_lines": [
+          "client.py:567-574: cancel_order の except Exception に _record_api_metric なし",
+          "client.py:581-588: get_account_info に try/except なし。TimeoutError/aiohttp.ClientError でメトリクス dead path",
+          "client.py:678-685: get_open_trades に try/except なし",
+          "client.py:854-858: get_open_positions に try/except も _record_api_metric もなし",
+          "client.py:904-911: get_candles に try/except なし",
+          "client.py:653-657: get_trade の network error 経路に _record_api_metric なし"
+        ],
+        "reproduction_verified": "MockedOANDA に aiohttp.ClientConnectorError を raise させる => cancel_order / get_open_trades 等を呼出 => _record_api_metric が走らず Prometheus カウンタが 0 のまま"
+      },
+      "severity_assessment": {
+        "agreed": true,
+        "rationale": "RE-411 の修正スコープが submit_order に限定された副作用。取引フロー無影響だが SRE アラートの dead path として medium が妥当"
+      },
+      "counter_arguments": [],
+      "risk_warnings": [],
+      "da_notes": "@_with_api_metric デコレータ案が DRY で効果的。get_open_positions だけが _record_api_metric 呼出自体なかった点 (DM-302 対象外) に注意。"
+    },
+    {
+      "id": "RE-504",
+      "original_severity": "medium",
+      "original_post_fix_defect": false,
+      "verdict": "confirmed",
+      "adoption_level": "should_consider",
+      "fact_check": {
+        "result": "PASS",
+        "verified_lines": [
+          "strategy_slot.py:960-981: max(matching, key=open_time) で 1 件のみ採用。累積 orphan 検出ロジックなし",
+          "strategy_slot.py:880: 排他制御 (claimed_trade_ids 相当) は次回 audit-loop 検討と自認コメント",
+          "runner.py:677-684: restore_positions では claimed_trade_ids を使うがランタイム未適用"
+        ],
+        "reproduction_verified": "テストで _handle_exit に gateway.close_trade を raise BrokerUnavailableError させ、state.open_trade_id だけ残す => 次バーで再 entry rollback => orphan close は新規 trade のみ閉じ、過去 trade T1 は OANDA 永続化"
+      },
+      "severity_assessment": {
+        "agreed": true,
+        "rationale": "累積 orphan 問題 (シナリオ a) は OANDA transient 障害連鎖で現実的に発生しうる。medium が妥当"
+      },
+      "counter_arguments": [],
+      "risk_warnings": [],
+      "da_notes": "シナリオ a (累積 orphan) は comment マッチした全 trade をループ close する修正で対処可能。シナリオ b (cross-process) は Redis SETNX claim と別設計が必要。優先度は a > b。"
+    },
+    {
+      "id": "RE-505",
+      "original_severity": "medium",
+      "original_post_fix_defect": true,
+      "verdict": "confirmed_with_caveat",
+      "adoption_level": "should_consider",
+      "fact_check": {
+        "result": "PARTIAL: 主張は事実だが顕在化条件は finding より狭い",
+        "verified_lines": [
+          "main.py:266-278: _ensure_eventbus_and_notifier_started は EmailNotifier.start() 後にフラグ True をセットするのみ。started リストへの追加は行わない",
+          "main.py:1174: _recover_state_fail_closed が raise すると started リストには event_bus.stop のみ (EmailNotifier なし)",
+          "main.py:1245-1264: start() が 1245 行に到達した場合は _email_notifier_already_started step で en.stop が rollback list に積まれる (finding の主張と逆)"
+        ],
+        "reproduction_verified": "_recover_state_fail_closed が raise する場合 (Redis 障害等) のみ顕在化。coordinator 未生成 (戦略 0 件) では 1304 行で即 return するため再現しない"
+      },
+      "severity_assessment": {
+        "agreed": true,
+        "rationale": "顕在化条件は限定的だが Redis 障害等で十分に現実的。EmailNotifier ゾンビ化は medium が妥当"
+      },
+      "counter_arguments": [
+        {
+          "type": "範囲の過大評価",
+          "location": "finding description",
+          "criticism": "start() が 1245 行に到達した場合は en.stop が rollback list に正しく積まれる。問題は start() 内の 1174 行 (_recover_state_fail_closed) より前の stage の失敗時のみ",
+          "evidence": "main.py:1245-1264: _email_notifier_already_started step が en.stop を rollback list に積む実装を確認",
+          "counter_proposal": "finding を start() 内の _recover_state_fail_closed が raise した場合に限り EmailNotifier が rollback list から漏れる と限定化すると正確"
+        }
+      ],
+      "risk_warnings": [],
+      "da_notes": "suggested_fix (early_started_components リストへの追加 + start() 冒頭で started.extend) は確実な修正。シンプルかつ保守性が高い。"
+    },
+    {
+      "id": "RE-506",
+      "original_severity": "low",
+      "original_post_fix_defect": true,
+      "verdict": "confirmed_with_reclassification",
+      "adoption_level": "informational",
+      "fact_check": {
+        "result": "PASS",
+        "verified_lines": [
+          "tests/contract/test_oanda_broker_metrics_wired.py:42-57: AST 検出パターンが ast.Name(id=OANDABroker) と ast.Attribute(attr=OANDABroker) のみを確認",
+          "tests/contract/test_oanda_broker_metrics_wired.py:60-70: _is_none_literal が Constant(value=None) のみ判定"
+        ],
+        "reproduction_verified": "リファクタリングで cls = OANDABroker; cls(...) のように書き換えると AST テストは PASS するが metrics 注入が落ちる。RE-401 が再発しても CI は緑のまま"
+      },
+      "severity_assessment": {
+        "agreed": true,
+        "rationale": "low が適切"
+      },
+      "counter_arguments": [
+        {
+          "type": "post_fix_defect 宣言の意味論的拡大",
+          "location": "RE-506 の post_fix_defect=true",
+          "criticism": "RE-401 の修正は factory/変数経由の生成パターンを禁止する意図はなかった。AST テストが factory パターンを検出しないのは RE-401 修正の設計範囲外",
+          "evidence": "RE-401 の suggested_fix は broker_gateway.py:343-351 等 4 箇所への直接 metrics 注入のみを対象としており factory パターンへの対応は設計意図に含まれていない",
+          "counter_proposal": "post_fix_defect=false として再分類。severity=low と修正優先度は変わらず informational"
+        }
+      ],
+      "risk_warnings": [],
+      "da_notes": "post_fix_defect 宣言は severity を高く見せる効果があるが RE-401 修正の設計意図と整合しない。将来のリファクタリング時に対処すれば十分。"
+    },
+    {
+      "id": "RE-507",
+      "original_severity": "low",
+      "original_post_fix_defect": true,
+      "verdict": "confirmed",
+      "adoption_level": "informational",
+      "fact_check": {
+        "result": "PASS",
+        "verified_lines": [
+          "client.py:240-247: TimeoutError / それ以外の 2 値分類を確認",
+          "client.py:408-411: _submit_order_impl 内で resp.json() await => ClientPayloadError 等の例外が outer except に到達しうる"
+        ],
+        "reproduction_verified": "aiohttp の resp.json() で ContentTypeError を raise させる mock を作り submit_order を呼出 => outer except に到達 => _record_api_metric(order, 500, None) がカウント"
+      },
+      "severity_assessment": {
+        "agreed": true,
+        "rationale": "low が適切。メトリクス semantic 精度問題のみで取引フロー無影響"
+      },
+      "counter_arguments": [],
+      "risk_warnings": [],
+      "da_notes": "201 受信後の payload decode 失敗が 5xx カウントされるシナリオは OANDA CDN 障害時に実際に発生しうる。INC 調査時の原因切り分け上の問題だが緊急度は低い。informational として記録。"
+    },
+    {
+      "id": "RE-508",
+      "original_severity": "medium",
+      "original_post_fix_defect": false,
+      "verdict": "confirmed",
+      "adoption_level": "should_consider",
+      "fact_check": {
+        "result": "PASS",
+        "verified_lines": [
+          "runner.py:1617-1640: RE-305 が _consecutive_poll_errors >= 30 and % 30 == 0 で live_orders_silent を emit することを確認",
+          "runner.py:1635: コメントに 30 の倍数で繰り返し発火し復旧まで運用者に通知し続ける と明記",
+          "email_notifier.py:362: live_orders_silent: 43200.0 (12h throttle) を確認",
+          "RE-305 のコメント意図 (継続通知) と EmailNotifier throttle (初報のみ) の矛盾を実コードで確認"
+        ],
+        "reproduction_verified": "MockedOANDA を account_info で永続 500 にする => _consecutive_poll_errors が 30, 60, 90 と escalation 発火するが EmailNotifier は最初の 1 通のみ送信し以降 12h 沈黙"
+      },
+      "severity_assessment": {
+        "agreed": true,
+        "rationale": "OANDA account_info 完全失敗 (Kill Switch 判定能力も degradation) という致命状態で escalation が沈黙する設計矛盾。medium が妥当"
+      },
+      "counter_arguments": [],
+      "risk_warnings": [
+        {
+          "scenario": "RE-305 を専用 alert_type live_account_info_polling_failed に分離した場合、live_orders_silent の 30 倍数 emit が残存すると同種アラートが 2 つの経路で並走する",
+          "probability": "高 (分離後に RE-305 の元 emit を削除しないと確実に発生)",
+          "impact": "live_orders_silent と live_account_info_polling_failed が異なるタイミングで届き運用者が混乱"
+        }
+      ],
+      "da_notes": "分離修正時は RE-305 の emit を live_account_info_polling_failed に完全移行し live_orders_silent の 30 倍数 emit は削除すること。live_orders_silent は _check_live_health_alerts の戦略沈黙アラート専用に戻すべき。"
+    },
+    {
+      "id": "RE-509",
+      "original_severity": "low",
+      "original_post_fix_defect": true,
+      "verdict": "confirmed",
+      "adoption_level": "informational",
+      "fact_check": {
+        "result": "PASS",
+        "verified_lines": [
+          "strategy_slot.py:1040-1056: details に correlation_id / trade_id / broker_order_id / fill_price / fill_quantity / direction / instrument / reason / error を確認",
+          "details に order_id (FTS Client Order ID) が含まれていないことを確認",
+          "strategy_slot.py:687-705: entry submit 時に order.order_id が存在することを確認"
+        ],
+        "reproduction_verified": "RE-402 テストで orphan alert を発火させ details を確認 => order_id が無い"
+      },
+      "severity_assessment": {
+        "agreed": true,
+        "rationale": "low が適切。監査追跡コスト増のみ"
+      },
+      "counter_arguments": [],
+      "risk_warnings": [],
+      "da_notes": "order_id を details に追加するのは 1 行修正で低コスト。次回 audit-loop で合わせて修正するのが効率的。"
+    },
+    {
+      "id": "RE-510",
+      "original_severity": "low",
+      "original_post_fix_defect": false,
+      "verdict": "confirmed",
+      "adoption_level": "informational",
+      "fact_check": {
+        "result": "PASS",
+        "verified_lines": [
+          "main.py: StrategySlot 参照なし (grep 確認)",
+          "main.py:476-510: PA-412 escape hatch の risks リストに orphan 保護欠如の言及なし",
+          "RE-402 の実装は strategy_slot.py にあり main.py 経路 (StrategyWorker/Coordinator) には不存在"
+        ],
+        "reproduction_verified": "PLATFORM_ALLOW_MAIN_PRODUCTION_LIVE=1 で main.py を起動 => StrategyWorker 経由で entry 発注 => OANDA 一時障害で trade_id 解決失敗。main.py 経路は entry_rollback_orphan alert を発火する経路を持たない"
+      },
+      "severity_assessment": {
+        "agreed": true,
+        "rationale": "escape hatch は明示 opt-in のため通常運用では発生しない。low が適切"
+      },
+      "counter_arguments": [],
+      "risk_warnings": [],
+      "da_notes": "escape hatch の risks リスト (main.py:495-500) への 1 行追記で認知コストを解消できる。長期解決は PA-407 ADR の main.py 廃止。informational。"
+    }
+  ],
+  "duplicate_finding_summary": {
+    "PA-506_and_RE-502": {
+      "description": "同一現象 (_LIVE_ANOMALY_LABELS 未登録 + _build_live_anomaly_message 共用の件名誤誘導) の重複",
+      "recommendation": "RE-502 を正 finding として存続、PA-506 を RE-502 コメントとして閉じる",
+      "combined_adoption_level": "must_fix"
+    }
+  },
+  "must_fix_summary": [
+    {
+      "id": "PA-501",
+      "action": "EmailNotifier.__init__ の strategies_metadata or {} を strategies_metadata if strategies_metadata is not None else {} に変更し空 dict も参照保持する"
+    },
+    {
+      "id": "RE-501",
+      "action": "broker_gateway.py:469-477 の except Exception => return None を TradeNotFoundError/BrokerUnavailableError 透過 raise に変更。呼出側 (strategy_slot.py:1214, 1913) に例外別ハンドリングを追加。gateway 層修正用テストを別途追加する"
+    },
+    {
+      "id": "RE-502_PA-506_統合",
+      "action": "_LIVE_ANOMALY_LABELS に platform_escape_hatch_active / entry_rollback_orphan を追加。専用 builder または subject prefix を動的化。PA-506 は RE-502 コメントとして閉じる"
+    }
+  ],
+  "should_consider_summary": [
+    "PA-502: asyncio.Lock による idempotent 保証 (将来リスク対策、severity low に格下げ推奨)",
+    "PA-503: _rollback_stop 内でフラグリセット (または start() フロー改善)",
+    "RE-503: 全 OANDA REST メソッドへの _record_api_metric dead path 解消",
+    "RE-504: _attempt_orphan_close_after_rollback の累積 orphan 対策 (全件 close ループ化)",
+    "RE-505: early_started_components リストを管理し start() 冒頭で started.extend",
+    "RE-508: RE-305 専用 alert_type live_account_info_polling_failed への分離 (throttle 300s 程度) と live_orders_silent emit の削除"
+  ],
+  "severity_reclassifications": [
+    {
+      "id": "PA-502",
+      "original": "medium",
+      "recommended": "low",
+      "rationale": "現状の initialize() は完全逐次実行であり race 不可。将来リスクのみで medium は過大評価"
+    },
+    {
+      "id": "RE-506",
+      "field": "post_fix_defect",
+      "original": true,
+      "recommended": false,
+      "rationale": "RE-401 の設計意図 (factory パターン検出) が含まれておらず、post_fix_defect より新規 finding として分類が正確"
+    }
+  ],
+  "confidence": 0.91
+}

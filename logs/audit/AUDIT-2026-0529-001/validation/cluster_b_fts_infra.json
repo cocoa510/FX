@@ -1,0 +1,298 @@
+{
+  "validator": "devil-advocate-B",
+  "scope": "FTS インフラ (PA+RE)",
+  "validations": [
+    {
+      "finding_id": "PA-301",
+      "verdict": "validated",
+      "original_severity": "high",
+      "adjusted_severity": "medium",
+      "rationale": "PA-301: order_submission_guard モジュールが main.py/runner.py の注入ループから除外されていることを実コードで確認。_metrics is None でも fail-closed REJECT は正常動作するため実損失への直接経路なし。Prometheus observability のみの欠落。DM-204 と同型だが制御経路への影響なし。adoption_level=should_consider。medium に格下げ。",
+      "evidence_check": "osg:39-46の_metrics定義と:100-107のinc_snapshot_persistence_failure呼出確認。main.py:111-121とrunner.py:387-397の注入ループにosgなし確認。",
+      "reproduction_check": "SnapshotPersistenceError発生条件でもPrometheusカウンタは加算されない。failure_countは実行される。",
+      "duplicate_of": null,
+      "additional_note": "for ループに1行追加で修正可能。次回実装機会での対処推奨。"
+    },
+    {
+      "finding_id": "PA-302",
+      "verdict": "validated",
+      "original_severity": "medium",
+      "adjusted_severity": "low",
+      "rationale": "PA-302: run_unified.py:185-193のsignal.signal登録後にrunner.py:1452-1456のloop.add_signal_handlerがLinux限定で上書きすることを確認。両ハンドラとも runner._request_shutdown()を呼ぶため実効動作は同一。adoption_level=informational。low に格下げ。",
+      "evidence_check": "run_unified.py:181-193のsignal.signal登録確認。runner.py:1452-1456のadd_signal_handler上書き確認。main.py:1284-1300のM-PLAT-5コメント確認。",
+      "reproduction_check": "Linuxホストでの確認が必要。Windows環境ではif sys.platform != win32ガードにより上書きは発生せず。",
+      "duplicate_of": null,
+      "additional_note": "runner.pyのadd_signal_handlerブロック削除は次回リファクタリング機会での対処で十分。"
+    },
+    {
+      "finding_id": "PA-303",
+      "verdict": "validated",
+      "original_severity": "medium",
+      "adjusted_severity": "medium",
+      "rationale": "PA-303: runner.py:533-578のLIVE Gate拒否専用ハンドリングがmain.py:428のload_all_strategies経路には存在しないことを確認。main.py:472-477はwarningログのみ。PA-103 fail-closedによりENV=productionでのmain.py LIVE起動はブロックされるが、エスケープハッチ使用時に顕在化。adoption_level=should_consider。",
+      "evidence_check": "main.py:428確認。:472-477のwarningログのみ確認。runner.py:528-578のLIVE専用ハンドリング確認。main.py:340-409のエスケープハッチ定義確認。",
+      "reproduction_check": "PLATFORM_ALLOW_MAIN_PRODUCTION_LIVE=1設定時のみ再現可能。",
+      "duplicate_of": null,
+      "additional_note": "次の二重実装整理時に対処推奨。"
+    },
+    {
+      "finding_id": "PA-304",
+      "verdict": "validated",
+      "original_severity": "medium",
+      "adjusted_severity": "low",
+      "rationale": "PA-304: HeartbeatEvent はevents.py:335-339に定義されredis_adapter.py:51にEVENT_CLASS_MAP登録されているが本番コードでの publish/subscribe がゼロであることをgrepで確認（test_event_bus_dedup.py:244,247のみ）。現状の死活監視はstructlog+Prometheusで機能しており HeartbeatEvent不発による実際の監視死角は発生していない。adoption_level=informational。low に格下げ。",
+      "evidence_check": "events.py:335-339定義確認。redis_adapter.py:45-52 EVENT_CLASS_MAP確認。grepで本番publishゼロ確認。runner.py:1481-1488のheartbeatログがEventBusを通らないことを確認。",
+      "reproduction_check": "grepによる確認で再現可能。",
+      "duplicate_of": null,
+      "additional_note": "削除またはPrometheus gauge統一という修正方針は明確。次回クリーンアップ機会で対処推奨。"
+    },
+    {
+      "finding_id": "PA-305",
+      "verdict": "validated",
+      "original_severity": "medium",
+      "adjusted_severity": "low",
+      "rationale": "PA-305: _kill_switch_was_activeフィールドがrunner.py:195で定義、:1548で代入のみで本番コードでの読み取り参照ゼロをgrepで確認。テストコードでも読み取りなし。AUDIT-2026-0529-003 H-01でKS発動時のshutdown_requested=True設定が追加されたためKS発動後のプロセス停止は正しく動作する。adoption_level=informational。low に格下げ。",
+      "evidence_check": "runner.py:195定義確認。:1548代入確認。grep _kill_switch_was_active: runner.pyの3箇所（定義+コメント+代入）のみ。テストでも読み取りなし。",
+      "reproduction_check": "grepによる確認で再現可能。",
+      "duplicate_of": null,
+      "additional_note": "H-01修正でKS発動のshutdown動作は正常。dead stateの除去は次回リファクタリング機会で対処可能。"
+    },
+    {
+      "finding_id": "PA-306",
+      "verdict": "validated",
+      "original_severity": "medium",
+      "adjusted_severity": "medium",
+      "rationale": "PA-306: main.py:600-620でStateStore()がbackend引数なしで生成されredis_store.py:131-135のデフォルトInMemoryBackendになることを確認。PA-306のevidenceで言及されていない緩和策を発見: main.py:602-611にlogger.critical(StateStore backend選択)というCRITICALログが既に存在する（完全なサイレントではない）。しかしdev/stagingでのInMemoryBackend運用でのfalse-green問題は依然として存在する。adoption_level=should_consider。",
+      "evidence_check": "main.py:600-620確認。redis_store.py:131-135確認。settings.py:179-201,305-315確認。main.py:602-611のCRITICALログ出力（PA-306未言及の緩和策）を確認。",
+      "reproduction_check": "staging環境で再現可能。",
+      "duplicate_of": null,
+      "additional_note": "PA-306のevidenceにCRITICALログ緩和策の記述漏れあり。HealthCheckerへのstate_store_prober登録は有効な改善提案。"
+    },
+    {
+      "finding_id": "PA-307",
+      "verdict": "validated",
+      "original_severity": "medium",
+      "adjusted_severity": "medium",
+      "rationale": "PA-307: main.pyがStrategyWorker+ExecutionCoordinatorを使用しrunner.pyがStrategySlotを直接使用する二重実装が存在することを確認。ただしPA-307の記述に部分的な不正確さを発見: StrategySlotのgenerate_signal timeout保護について要さらなる確認と記述しているが、strategy_slot.py:74-75にGENERATE_SIGNAL_TIMEOUT_SEC: float = 0.1が定義されており:433-440にasyncio.wait_forが実装されている。両経路とも0.1sタイムアウト保護が存在しこの点での乖離はない。二重実装の本質的な問題（PA-303のような片方のみ修正される事象の再発）は依然として有効な指摘。adoption_level=should_consider。",
+      "evidence_check": "strategy_slot.py:74-75のGENERATE_SIGNAL_TIMEOUT_SEC=0.1確認。:433-440のasyncio.wait_for実装確認。worker.py:336-346のasyncio.wait_for確認。両経路とも同一保護が存在する。",
+      "reproduction_check": "二重実装の存在は実コードで確認済み。generate_signal timeoutの乖離という具体例は不正確。",
+      "duplicate_of": null,
+      "additional_note": "PA-307のgenerate_signal timeout乖離例示は誤り（実際は両経路とも同一保護）。二重実装自体の問題とADR方針決定の必要性は正確に指摘されている。"
+    },
+    {
+      "finding_id": "PA-308",
+      "verdict": "validated",
+      "original_severity": "low",
+      "adjusted_severity": "low",
+      "rationale": "PA-308: main.py:454-470を確認。set_allocationがline 457で呼ばれexcept Exceptionでself._strategies_rejectedに追加されるのがline 470であることを確認。PA-308の描写通りset_allocation呼出後にinitialize_strategy例外が発生するとportfolio_managerにdangling ratioが残る。ただしload_result.loadedはloaded onlyのため配分合計が1.0を超える事象は起きない。影響は実稼働workerの合計ratio < 1.0のみ。実損失への直接経路なし。",
+      "evidence_check": "main.py:454-470確認。set_allocationがline 457（initialize_strategy呼出前）にあることを確認。exceptがline 464-470にあることを確認。",
+      "reproduction_check": "5件中1件がinitialize_strategyで例外を起こすシナリオで再現可能。",
+      "duplicate_of": null,
+      "additional_note": "adoption_level=informational。set_allocationをtry block末尾に移動する修正は低コストで推奨できるが緊急性なし。"
+    },
+    {
+      "finding_id": "PA-309",
+      "verdict": "validated",
+      "original_severity": "low",
+      "adjusted_severity": "low",
+      "rationale": "PA-309: main.py:192-193のself._coordinator._account_balance = balance（private属性直接代入）を確認。asyncioシングルスレッドの性質上コンテキストスイッチはawait境界でのみ発生するため同期コードブロック内でのPTRC._account_balance参照との実際のrace conditionは発生しにくい。ただし理論的なレースは存在する。low は適切。",
+      "evidence_check": "main.py:184-204の_refresh_balance_from_broker確認。:192-193のprivate属性直接代入確認。:968-975の_balance_refresh_taskバックグラウンド起動確認。",
+      "reproduction_check": "asyncioのraceを実際に観測するのは困難（タイミング依存）。理論的な再現シナリオは正確。",
+      "duplicate_of": null,
+      "additional_note": "adoption_level=informational。Coordinatorにset_account_balance() setterを追加する修正は設計上好ましく次回実装機会での対処推奨。"
+    },
+    {
+      "finding_id": "PA-310",
+      "verdict": "validated",
+      "original_severity": "low",
+      "adjusted_severity": "low",
+      "rationale": "PA-310: settings.py:179-189のskip_state_recoveryがvalidation_alias=PLATFORM_SKIP_STATE_RECOVERYを必須化し他フィールドはcase_insensitive自動解決を確認。main.py:344のPLATFORM_ALLOW_MAIN_PRODUCTION_LIVEとrun_unified.py:177のFTS_METRICS_PORTがos.environ直読みであることを確認。定量的影響: 現状で環境変数の誤設定による不具合は報告されていない。観測可能な障害事象ではなく予防的指摘。adoption_level=informational。",
+      "evidence_check": "settings.py:179-189のvalidation_alias確認。settings.py:311-315のcase_sensitive=False確認。main.py:344,375のos.environ.get直読み確認。run_unified.py:177のos.environ.get確認。",
+      "reproduction_check": "コード解析のみ。実際の誤設定事象は記録されていない。",
+      "duplicate_of": null,
+      "additional_note": "ADR化とPlatformSettingsへの集約は設計品質向上のため推奨できるが現時点では運用上の問題は発生していない。"
+    },
+    {
+      "finding_id": "PA-311",
+      "verdict": "validated",
+      "original_severity": "low",
+      "adjusted_severity": "low",
+      "rationale": "PA-311: state_manager.py:233-256のappend_jsonlがf.write(line)のみでf.flush() / os.fsync()なしであることを確認。runner.py:1751-1756のshutdown reason記録が同経路を通ることを確認。severity を low に維持: OSのwrite buffer flushは通常with ブロック終了時のclose()で行われるためSIGKILL以外では問題が顕在化しない。shutdown reasonの消失は調査時の不便であり実損失経路ではない。adoption_level=informational。",
+      "evidence_check": "state_manager.py:233-256確認。append_jsonlの実装にf.flush() / os.fsync()なし確認。runner.py:1751-1756のappend_jsonl呼出確認。",
+      "reproduction_check": "SIGKILLタイミングへの依存があり再現は不安定。",
+      "duplicate_of": null,
+      "additional_note": "f.flush(); os.fsync(f.fileno())の追加は1行の修正。shutdown reasonという落ちる直前のデータという性質上fsync追加は品質向上のため推奨できる。緊急性は低い。"
+    },
+    {
+      "finding_id": "PA-312",
+      "verdict": "validated",
+      "original_severity": "low",
+      "adjusted_severity": "low",
+      "rationale": "PA-312: memory_adapter.py:94-96のif not self._running: logger.warning(...); returnを確認。停止後publishがwarningログ1行でeventを完全破棄することを確認。redis_adapter.pyの_dispatch_localフォールバックとの非対称も確認。InMemoryEventBusのstop後publishは正常なshutdownシーケンスでは発生しない（runner shutdown()はEventBus stop前に全タスクをdrainする）。adoption_level=informational。",
+      "evidence_check": "memory_adapter.py:88-96確認。停止中publishのsilent drop確認。redis_adapter.pyのlocal dispatchフォールバックとの非対称確認。",
+      "reproduction_check": "bus.stop()後bus.publish()で再現可能。",
+      "duplicate_of": null,
+      "additional_note": "stop後publishのERRORログへの格上げはobservability向上のため推奨できる。FillEventの強制_event_log記録（提案C）はshutdownシーケンスとの競合に注意。"
+    },
+    {
+      "finding_id": "RE-301",
+      "verdict": "validated",
+      "original_severity": "high",
+      "adjusted_severity": "high",
+      "rationale": "RE-301: strategy_slot.py:805-823の_resolve_live_trade_idにinstrument+directionフォールバック（commentマッチ失敗時にcommentなしの全オープントレードから再マッチ）が残存することを確認。restore_positions（:1310-1322）ではフォールバック廃止+claimed_trade_ids排他制御が実装されているがランタイム経路の_resolve_live_trade_idには未適用であることを確認。同一instrument・同一directionの複数LIVE戦略が稼働する環境（INC-2026-0526-001で実際に発生したUSD_JPY 6戦略/EUR_JPY 8戦略の構成）ではcomment反映遅延race条件で別戦略のtrade_idを誤採用する可能性が実在する。close_tradeで別戦略のtradeを閉じる実損失経路。severity=highは適切。adoption_level=must_fix。",
+      "evidence_check": "strategy_slot.py:805-823のfallbackコードを確認（instrument+units_predicateのみでの再マッチが残存）。:1310-1322のrestore_positionsでのフォールバック廃止を確認（対比として）。RE-301のevidenceは正確。",
+      "reproduction_check": "同一instrument・directionの2戦略を同時稼働させcomment反映が遅延するスタブで再現可能。INC-2026-0526-001と同型の構成で実際に発火しうる。",
+      "duplicate_of": null,
+      "additional_note": "INC-2026-0526-001の修正（restore_positionsでのフォールバック廃止）が同型のruntime経路に未適用という既知失敗パターン完全一致。修正方針: matching=[]時はentry_rollback（line 749-759）に合流させる。claimed_trade_ids相当のランタイム排他制御も中期的に必要。"
+    },
+    {
+      "finding_id": "RE-302",
+      "verdict": "validated",
+      "original_severity": "high",
+      "adjusted_severity": "high",
+      "rationale": "RE-302: strategy_slot.py:792-799でtrades = await self.gateway.get_open_trades()が空リストを返す場合にstate.open_trade_id = fill.broker_order_idを代入することを確認。broker_gateway.py:420-428がexceptで[]を返すためOANDA例外（ネットワーク障害・タイムアウト）でも空リストが返ることを確認。client.py:394でbroker_order_id = fill_tx.get(orderID)がOANDAのOrder ID（Trade IDではない）であることを確認。OANDAのclose_trade(order_id)は404(TRADE_DOESNT_EXIST)を返す設計であり幻ポジション化という実損失経路が成立する。定量的発生頻度: OANDAAPIタイムアウト/502は数日に1回程度（INC-2026-0526-001の実績から）。adoption_level=must_fix。",
+      "evidence_check": "strategy_slot.py:792-799の空リスト時フォールバックを確認。broker_gateway.py:420-428のexcept握りつぶしを確認。client.py:383-410の_parse_fill_responseでbroker_order_id = orderID（Trade IDではない）を確認。RE-302のevidenceは全て正確。",
+      "reproduction_check": "OANDAAPIをaiohttp.ClientErrorでスタブ化 -> get_open_tradesが[] -> line 793トリガー -> state.open_trade_idにOrder IDが格納される。次回close_tradeでOANDA 404を確認可能。再現可能。",
+      "duplicate_of": null,
+      "additional_note": "OANDAネットワーク障害という恒常的イベントで幻ポジションが生成される実損失経路。修正: line 793をif not self.is_live and not trades:に変更（is_live追加）。根本修正はbroker_gateway.get_open_tradesのexceptを例外伝播に変えること。RE-201と同型の問題ベクタ。"
+    },
+    {
+      "finding_id": "RE-303",
+      "verdict": "validated",
+      "original_severity": "medium",
+      "adjusted_severity": "low",
+      "rationale": "RE-303: AUDIT-2026-0529-003 H-01のKS無限ループ修正がrunner.py:1549-1566のみに適用されcircuit_breaker.py:386-539のKillSwitch._activate（main.py FastAPI経路）にはshutdown要求発火がないことを確認。severity を low に格下げ: (1) circuit_breaker.py:184-188のコメントが明示する通り本クラスはmain.py(FastAPI)経路で使用され本番稼働中のUnifiedRunner経路（run_unified.py）ではGlobalRiskSupervisorが使用される。(2) 現在の本番経路はrun_unified.pyのみでありmain.py FastAPI経路での本番LIVEはPA-103 fail-closedで拒否される。adoption_level=informational。",
+      "evidence_check": "runner.py:1549-1566の_shutdown_requested=True設定を確認。circuit_breaker.py:177-189のKillSwitchクラスとコメントを確認。:386-539の_activateにshutdown発火なしを確認。RE-303のevidenceは正確。",
+      "reproduction_check": "main.py FastAPI経路での起動（uvicorn）が必要。本番（run_unified.py経由）では再現しない。",
+      "duplicate_of": null,
+      "additional_note": "run_unified.pyが正式本番経路であることとmain.pyのproduction起動がPA-103 fail-closedでブロックされていることでRE-303の本番影響はほぼゼロ。main.py廃止方針の決定（PA-307の根本対処）と連動して解消される。"
+    },
+    {
+      "finding_id": "RE-304",
+      "verdict": "validated",
+      "original_severity": "medium",
+      "adjusted_severity": "low",
+      "rationale": "RE-304: runner.py:1309-1322のfor slot in self._slots: slot.gateway.halt()がis_liveフラグなしで全スロット（paper/live含む）をハルトすることを確認。severity を low に格下げ: (1) KSは口座全体の安全停止が本来の目的でありpaper スロットも含む全停止はdefense-in-depthの観点では設計通りとも解釈できる。(2) strategy_slot.py:351-357のeffective_supervisor = risk_supervisor if self.is_live else Noneによりpaperは PTRC/KSの影響を受けない設計だがBrokerGateway.halt()は発注レベルの別レイヤ遮断。(3) paperトレードの歯抜けは運用上の不便であり実損失（資金）への経路なし。[change:spec]判断が必要。adoption_level=should_consider。",
+      "evidence_check": "runner.py:1303-1322の_cancel_all_open_ordersを確認。for slot in self._slots: slot.gateway.halt()はis_liveガードなし。strategy_slot.py:351-357のeffective_supervisor分岐（is_live条件）も確認。RE-304のevidenceは正確。",
+      "reproduction_check": "live 1戦略+paper 5戦略の構成でKS発動 -> paper全5戦略のエントリーsubmitが拒否される。再現可能。",
+      "duplicate_of": null,
+      "additional_note": "if slot.is_live: slot.gateway.halt()への修正は1行追加で可能。ただしKS=全停止 vs KS=liveのみ停止 は[change:spec]レベルの設計判断。実装変更には運用方針の明文化が先決。"
+    },
+    {
+      "finding_id": "RE-305",
+      "verdict": "validated",
+      "original_severity": "medium",
+      "adjusted_severity": "medium",
+      "rationale": "RE-305: runner.py:1518-1534を確認。_consecutive_poll_errors >= 5でoanda_connection_degraded WARNINGログのみが出力されshutdown/KSトリガーがないことを確認。緩和策を確認: (1) live_orders_silentアラート（6時間閾値）はstructlog/Prometheus経由で発火しうる。(2) 連続エラーはlogger.exceptionで記録されており監視システムがログを見ていれば検知可能。(3) 障害中は新規注文が発生しないため直接的な実損失は発生しない。severity=mediumは適切。adoption_level=should_consider。",
+      "evidence_check": "runner.py:1518-1534を確認。consecutive_errors >= 5でwarningのみshutdown/KS発火なし。RE-305のevidenceは正確。",
+      "reproduction_check": "OANDAAPIを30分間502で返すスタブで再現可能。",
+      "duplicate_of": null,
+      "additional_note": "_consecutive_poll_errors >= N（例: 30回=30分）でのRiskAlert発出を最低限実装すべき。INC-2026-0526-001のLive沈黙検知思想と整合している。"
+    },
+    {
+      "finding_id": "RE-306",
+      "verdict": "validated",
+      "original_severity": "medium",
+      "adjusted_severity": "medium",
+      "rationale": "RE-306: _maybe_reconcile_live_positionsが実行の成否に関わらずself._last_position_reconcile_at = nowを設定してからreconcileを呼ぶことを確認（runner.py:977が:978より前）。_reconcile_live_positions:1014-1022でget_open_trades取得失敗時はlogger.warningとreturnのみで_last_position_reconcile_atは既に更新済みのため次のPOSITION_RECONCILE_INTERVAL_SEC間は照合スキップされる。OANDAの一時的ネットワーク障害（数秒）で大きなペナルティが課される設計的問題を確認。severity=mediumは適切。adoption_level=should_consider。",
+      "evidence_check": "runner.py:964-978を確認。:977の_last_position_reconcile_at更新が:978のreconcile呼出より前であることを確認。:1012-1022のexception時returnを確認。RE-306のevidenceは正確。",
+      "reproduction_check": "get_open_tradesに30秒スリープを注入してタイムアウト -> 次回POSITION_RECONCILE_INTERVAL_SECは照合スキップ。再現可能。",
+      "duplicate_of": null,
+      "additional_note": "失敗時のみ_last_position_reconcile_atを更新しない + 連続失敗回数追跡 + 閾値超過時のみ間隔延長という提案は理にかなっている。実装コストも低い。"
+    },
+    {
+      "finding_id": "RE-307",
+      "verdict": "validated",
+      "original_severity": "low",
+      "adjusted_severity": "low",
+      "rationale": "RE-307: ptrc.py:128-164の_fire_ptrc_auditがasyncio.get_running_loop() RuntimeError時にlogger.debugでスキップすることを確認。risk_supervisor.py:204-226の_spawn_audit_taskがdone callbackでエラーをlogger.errorで記録するのに対しptrcの_fire_ptrc_auditはtask.add_done_callback(_pending_tasks.discard)のみ（エラーログなし）であることを確認（:162-164）。本番経路では常にevent loopが存在するためexcept RuntimeErrorパスは実際には通らない。severity=lowは適切。adoption_level=informational。",
+      "evidence_check": "ptrc.py:128-164を確認。done callbackが_pending_tasks.discardのみ（エラーログなし）を確認。risk_supervisor.py:204-226の_on_done callbackがexceptionをログに記録することを確認。非対称を確認。RE-307のevidenceは正確。",
+      "reproduction_check": "AuditLogger.recordが例外を投げるモックで再現可能だが本番ではevent loopが常に存在するため発火しない。",
+      "duplicate_of": null,
+      "additional_note": "ptrc._fire_ptrc_auditにdone callbackのエラーログを追加することはrisk_supervisorとの一貫性のために推奨。1行の修正で対処可能。"
+    },
+    {
+      "finding_id": "RE-308",
+      "verdict": "validated",
+      "original_severity": "low",
+      "adjusted_severity": "low",
+      "rationale": "RE-308: email_notifier.py:296-324でlive_strategy_rejected_by_gateがlive_gate_rejection kindに分離され_EMAIL_THROTTLE_INTERVAL_SECに登録されていないことを確認。_send_email_asyncが_SMTP_MAX_ATTEMPTS=3回のリトライを行うことを確認。量産投入時のSMTP rate-limit連鎖リスクは実在するが1649戦略同時投入シナリオ自体がGate未通過戦略の投入という運用上の問題であり通常は発生しない。直接的な取引損失なし。SMTP rate-limit連鎖でkill_switch_activated等のクリティカル通知が失敗するリスクは実在する。adoption_level=should_consider。",
+      "evidence_check": "email_notifier.py:296-324を確認。live_gate_rejectionが_EMAIL_THROTTLE_INTERVAL_SECに登録されていないことを確認。:939-995の_send_email_asyncリトライ機構を確認。RE-308のevidenceは正確。",
+      "reproduction_check": "60戦略全拒否シナリオで再現可能だが運用上このシナリオ自体が通常は発生しない。",
+      "duplicate_of": null,
+      "additional_note": "live_gate_rejectionのバースト緩和（集約メール / daily summary降格）は量産投入シナリオへの備えとして合理的。SMTP failure_countをPrometheus alertに晒すことで根本的な可視化改善が図れる。"
+    },
+    {
+      "finding_id": "RE-309",
+      "verdict": "validated",
+      "original_severity": "low",
+      "adjusted_severity": "low",
+      "rationale": "RE-309: ptrc.py:532-590の_check_max_daily_lossがdaily_realized_pnl + daily_unrealized_pnlを合算する実装を確認。risk_supervisor.py:817-833のコメント（RE-002: 本番ではper-strategy daily_unrealized_pnlは意図的に0）を確認。ptrc.py:546-558にRE-002設計判断の詳細コメントが既に記載されていることを確認。RE-309が指摘するコード/コメントの不整合はptrc.py側にも既にRE-002の詳細コメントが存在しており両ファイルにコメントがある。severity=lowは適切。実動作への影響なし。adoption_level=informational。",
+      "evidence_check": "ptrc.py:532-590を確認。:546-558にRE-002設計判断コメントが存在することを確認。risk_supervisor.py:817-833のコメントも確認。RE-309のevidenceは正確だがptrc.pyに既存の詳細コメントがあるという点でseverityの根拠が既に部分的に緩和されている。",
+      "reproduction_check": "コード解析のみ。",
+      "duplicate_of": null,
+      "additional_note": "ptrc.py側には既にRE-002コメントが存在する。将来のper-strategy unrealized反映を[change:spec]として明示するドキュメントは有益。"
+    }
+  ],
+  "summary": {
+    "total": 21,
+    "validated": 21,
+    "downgraded": 10,
+    "upgraded": 0,
+    "refuted": 0,
+    "severity_post": {
+      "critical": 0,
+      "high": 2,
+      "medium": 6,
+      "low": 13
+    },
+    "key_findings": {
+      "must_fix": [
+        "RE-301",
+        "RE-302"
+      ],
+      "should_consider": [
+        "PA-301",
+        "PA-303",
+        "PA-306",
+        "PA-307",
+        "RE-304",
+        "RE-305",
+        "RE-306",
+        "RE-308"
+      ],
+      "informational": [
+        "PA-302",
+        "PA-304",
+        "PA-305",
+        "PA-308",
+        "PA-309",
+        "PA-310",
+        "PA-311",
+        "PA-312",
+        "RE-303",
+        "RE-307",
+        "RE-309"
+      ]
+    },
+    "downgrade_rationale": {
+      "PA-301_high_to_medium": "fail-closed 発注 REJECT は正常動作。Prometheus observability のみの欠落。DM-204 と同型だが制御経路への影響なし。",
+      "PA-302_medium_to_low": "両ハンドラが同一の runner._request_shutdown() を呼ぶため実効動作同一。Linux のスレッディングセマンティクス差異のみのリスク。",
+      "PA-304_medium_to_low": "現在の死活監視は structlog+Prometheus で機能しており HeartbeatEvent 不発による実際の監視死角なし。",
+      "PA-305_medium_to_low": "H-01 修正で KS 発動の shutdown 動作は正常。dead state の影響は将来の誤実装防止コメントの喪失リスクのみ。",
+      "RE-303_medium_to_low": "main.py が dev 経路であり PA-103 fail-closed で production LIVE が拒否される。本番経路（run_unified.py）への影響なし。",
+      "RE-304_medium_to_low": "paper トレードのデータ欠損は運用上の不便。実損失（資金）への経路なし。[change:spec] 判断が必要。"
+    },
+    "evidence_inaccuracy_detected": {
+      "PA-307_generate_signal_timeout": "PA-307 は StrategySlot の generate_signal timeout 保護を要確認としたが strategy_slot.py:74-75 および :433-440 に asyncio.wait_for(GENERATE_SIGNAL_TIMEOUT_SEC=0.1) が存在する。両経路とも同一保護あり。finding の信頼性に軽微な影響。"
+    },
+    "mitigation_found_not_in_findings": {
+      "PA-306_critical_log": "main.py:602-611 に logger.critical(StateStore backend 選択) という CRITICAL ログが存在しており PA-306 の evidence では未言及。完全なサイレントではない。"
+    },
+    "audit_0529_003_fix_verification": {
+      "h_01_ks_infinite_loop": "runner.py:1549-1566 の修正を確認。_shutdown_requested=True が設定され shutdown フローに乗ることを確認。runner 経路では正常。circuit_breaker.py KillSwitch（main.py 経路）への未適用は RE-303 として低 severity で指摘済み。",
+      "c_02_live_gate_rejection_throttle": "email_notifier.py:296-324 で live_gate_rejection を専用 kind に分離し throttle 不可化を確認。量産投入時の SMTP rate-limit 二次被害は RE-308 として低 severity で指摘済み。",
+      "additional_defects_in_fix": "PA-307 の generate_signal timeout 乖離例示が不正確（strategy_slot.py に既に同等保護あり）。fixing agent の証拠確認が不十分だったと推定。main.py の PA-303 対応漏れは AUDIT-2026-0529-001 Task C が runner.py のみ修正した result であり新規指摘。"
+    }
+  }
+}

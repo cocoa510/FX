@@ -1,0 +1,352 @@
+{
+  "meta": {
+    "verifier": "platform-architect-team2",
+    "role": "devil-advocate verification of platform-architect findings PA-401..PA-413",
+    "audit_id": "AUDIT-2026-0530-001",
+    "fts_commit_reviewed": "9998a7a",
+    "fts_repo_state": "d1e73b1",
+    "files_read": 12,
+    "generated_at": "2026-05-30",
+    "scope": "independent re-reproduction of findings; no fix is performed"
+  },
+  "verifications": [
+    {
+      "id": "PA-401",
+      "claimed_severity": "high",
+      "validated_severity": "high",
+      "verdict": "CONFIRMED",
+      "post_fix_defect_confirmed": true,
+      "fact_check": {
+        "status": "EXACT_MATCH",
+        "details": "main.py:422 initialize() 開始。main.py:455-528 で discover_strategies + load_strategy ループに入り、live_mode 時の StrategyLoadError ハンドリングで main.py:478 self._audit_logger.record 後、main.py:492 await self._event_bus.publish(RiskAlertEvent(...)) を呼ぶ。同じ TradingPlatform の start() メソッドは main.py:971-1120 に定義され、start() 内部で event_bus.start を呼ぶのは line 1004 (_start_step('event_bus', self._event_bus.start, ...)). EmailNotifier の生成は main.py:852-858 で initialize() 末尾、subscribe を行う EmailNotifier.start() は main.py:1083-1089 で同じ start() ループ内。よって publish 時点では (1) event_bus._running=False、(2) EmailNotifier 未生成 + 未 subscribe。memory_adapter.py:94-96 の `if not self._running: logger.warning('Event Bus未起動状態でpublish', event_type=event.event_type); return` で silently drop。InMemoryEventBus の場合のみならず RedisEventBus でも構造的に同じく未起動 publish は subscribe 前で機能不能。第1チームの指摘通り、runner.py 側で AUDIT-2026-0529-003 C-01 として導入された EmailNotifier.start() 先行配線 (runner.py:500-525) は main.py には適用されていない。"
+      },
+      "evidence_recheck": [
+        "main.py:422 initialize() 開始 — 確認",
+        "main.py:478 self._audit_logger.record(...) — 確認",
+        "main.py:492-506 self._event_bus.publish(RiskAlertEvent(...)) — 確認",
+        "main.py:852-858 self._email_notifier = EmailNotifier(...) — 確認",
+        "main.py:1004 self._event_bus.start (start() 経由) — 確認",
+        "main.py:1083-1089 self._email_notifier.start (start() 経由) — 確認",
+        "memory_adapter.py:87-96 publish() 冒頭の未起動 silent return — 完全一致",
+        "runner.py:500-525 (AUDIT-2026-0529-003 C-01) EmailNotifier を slot loop より前で start — 確認、main.py には未適用"
+      ],
+      "adoption_level": "must_fix",
+      "adoption_rationale": "第1チーム評価と完全一致。EXACT_MATCH。runner.py C-01 と同型バグが main.py で再発しており、PLATFORM_ALLOW_MAIN_PRODUCTION_LIVE escape hatch + LIVE Gate 拒否時に Email = 0 通。修正は (a) main.py 経路を UnifiedRunner へ統合 (PA-307)、または (b) start() 内で event_bus.start → email_notifier.start を slot 検証より前に行う構造変更。"
+    },
+    {
+      "id": "PA-402",
+      "claimed_severity": "medium",
+      "validated_severity": "low",
+      "verdict": "SEVERITY_DOWNGRADED",
+      "post_fix_defect_confirmed": true,
+      "fact_check": {
+        "status": "CONFIRMED_WITH_DOWNGRADE",
+        "details": "main.py:141-143 で `self._audit_logger = AuditLogger(writer=JsonlAuditWriter(...))` が __init__ 内で無条件生成される。None 化される代入は他に存在しないため (main.py 全 1500 行 grep)、main.py:477 の `if self._audit_logger is not None` ガードは到達常時 True。記述自体が dead-defense (現状では機能的影響ゼロ)。Cluster B devil-advocate と同結論で medium → low に妥当。"
+      },
+      "bias_detected": [
+        {
+          "type": "OVERESTIMATION",
+          "location": "PA-402 severity=medium",
+          "criticism": "現コードで None 経路は存在せず、機能的影響ゼロ。medium は実害が想定可能なケースに付ける。",
+          "evidence": "main.py:141-143 の AuditLogger 無条件生成と、main.py 全体の AuditLogger 代入カ所が他にないこと。",
+          "counter_proposal": "low へ降格。コード整理のみ。"
+        }
+      ],
+      "adoption_level": "informational",
+      "adoption_rationale": "コードクレンジングのみ。Cluster B 結論と一致。"
+    },
+    {
+      "id": "PA-403",
+      "claimed_severity": "medium",
+      "validated_severity": "low",
+      "verdict": "SEVERITY_DOWNGRADED",
+      "post_fix_defect_confirmed": true,
+      "fact_check": {
+        "status": "CONFIRMED_WITH_DOWNGRADE",
+        "details": "main.py:708-714 で `logger.critical('StateStore backend 選択', env=..., state_backend=_state_backend, persistent=..., note=...)` が常時出力。main.py:730-739 の memory 分岐内で `logger.warning('PA-306: StateStore は InMemoryBackend を使用中。プロセス再起動で全状態消失', env=..., state_persistence='ephemeral', ...)`. env と state_backend を CRITICAL と WARNING で重複出力するが、Prometheus alerting_rules.yml は structlog 行を grep しないので alert への影響なし。Loki/journald の grep 重複のみ。"
+      },
+      "bias_detected": [
+        {
+          "type": "OVERESTIMATION",
+          "location": "PA-403 severity=medium",
+          "criticism": "ログ重複は UX 問題で alert / 取引フロー / Audit には影響ない。",
+          "evidence": "Prometheus alerting_rules.yml は structlog 行を直接消費せず、メトリクスベース。",
+          "counter_proposal": "low へ降格。memory 分岐内 WARNING を INFO へ降格または削除。"
+        }
+      ],
+      "adoption_level": "informational",
+      "adoption_rationale": "純粋なログクレンジング。Cluster B 結論と一致。"
+    },
+    {
+      "id": "PA-404",
+      "claimed_severity": "low",
+      "validated_severity": "low",
+      "verdict": "CONFIRMED",
+      "post_fix_defect_confirmed": false,
+      "fact_check": {
+        "status": "CONFIRMED",
+        "details": "main.py:481 actor=\"main_platform\", runner.py:567 actor=\"unified_runner\"。EmailNotifier / AuditLog / Prometheus いずれの下流で actor 値を見て分岐する経路は存在しない (grep 確認)。forensics メタデータ用途。"
+      },
+      "adoption_level": "informational",
+      "adoption_rationale": "現在の動作影響ゼロ。Enum 化は将来のドリフト防止用。"
+    },
+    {
+      "id": "PA-405",
+      "claimed_severity": "medium",
+      "validated_severity": "low",
+      "verdict": "SEVERITY_DOWNGRADED",
+      "post_fix_defect_confirmed": false,
+      "fact_check": {
+        "status": "PARTIALLY_INCORRECT",
+        "details": "runner.py:1515 _poll_cycle 開始。runner.py:1522 `if self._poll_count % HEARTBEAT_INTERVAL_POLLS == 0:` のハートビート判定ブロック内、runner.py:1547 `await self._check_live_health_alerts()` を呼出。runner.py:1559-1565 で `account_info = await self._broker.get_account_info()` 取得試行、失敗時の return は runner.py:1632 (Line 1547 < Line 1632)。よって `_check_live_health_alerts` は account_info 失敗時でも skip されない。第1チームの『return すると _check_live_health_alerts も skip』というプライマリ主張は実コード実行順序と矛盾。副次効果 (silence_sec が障害中に拡大) は事実だが、live_anomaly throttle が 900s であるため 12h throttle (live_orders_silent kind) の重複発火懸念は別 kind なので影響限定的。"
+      },
+      "bias_detected": [
+        {
+          "type": "CAUSAL_ERROR",
+          "location": "PA-405 プライマリ主張",
+          "criticism": "_check_live_health_alerts はヘルスチェックブロック内で account_info 失敗 return より前に実行される。',skip' は事実誤認。",
+          "evidence": "runner.py:1522-1554 ヘルスチェック → runner.py:1559 account_info → runner.py:1632 return の実行順序が明確。",
+          "counter_proposal": "low へ降格。silence_sec の副次効果のみ記録。"
+        }
+      ],
+      "adoption_level": "informational",
+      "adoption_rationale": "プライマリ前提が誤り。Cluster B 結論と一致。"
+    },
+    {
+      "id": "PA-406",
+      "claimed_severity": "medium",
+      "validated_severity": "low",
+      "verdict": "SEVERITY_DOWNGRADED",
+      "post_fix_defect_confirmed": false,
+      "fact_check": {
+        "status": "CONFIRMED_WITH_DOWNGRADE",
+        "details": "loader.py:693-698 finally で `sys.modules.pop(module_name, None)` を実行。loader.py:50-66 の _ALLOWED_MODULE_PREFIXES は inspect / pickle / globals 系を含まず、loader.py:69-95 の _EXPLICIT_DENYLIST に importlib / pickle / pathlib / os / sys 等を明示。AST allowlist が attack surface を実質遮断しているため、現 ATLAS 戦略では実害なし (finding 自体も自認)。"
+      },
+      "bias_detected": [
+        {
+          "type": "OVERESTIMATION",
+          "location": "PA-406 severity=medium",
+          "criticism": "現状実害ゼロ。AST allowlist で attack surface が遮断。medium は過大評価。",
+          "evidence": "_EXPLICIT_DENYLIST に inspect/pickle/importlib 等が登録済み (loader.py:69-95)",
+          "counter_proposal": "low 維持。docstring 追記のみで十分。"
+        }
+      ],
+      "adoption_level": "informational",
+      "adoption_rationale": "現状実害ゼロ。Cluster B 結論と一致。"
+    },
+    {
+      "id": "PA-407",
+      "claimed_severity": "high",
+      "validated_severity": "high",
+      "verdict": "CONFIRMED",
+      "post_fix_defect_confirmed": false,
+      "fact_check": {
+        "status": "CONFIRMED",
+        "details": "main.py:128-132 と runner.py:407-411 で set_metrics_collector for ループが重複。main.py:455-528 (LIVE Gate 拒否ハンドリング) と runner.py:544-605 で同一パターンの手書き。9998a7a commit message にも『main.py の load_all_strategies を discover + load 個別ループに置換、runner.py の修正パターンを移植』とあり、ペアで書き換える必要があったことを自認。PA-401 はまさにこの二重実装が招いた『片方だけ修正された』例。階層関係: PA-407 が構造的 root cause、PA-401/PA-412 が具象 instance。"
+      },
+      "risk_warnings": [
+        {
+          "scenario": "今後の audit でも同型 'one-side-only fix omission' が高頻度で発見される",
+          "probability": "high — PA-401 が今回ラウンドで実証済み",
+          "impact": "audit コスト O(n) で増加。PA-307 (main.py 廃止 ADR) または bootstrap 共通化が構造的解決策。"
+        }
+      ],
+      "adoption_level": "should_consider",
+      "adoption_rationale": "PA-307 (main.py 廃止 ADR) の前倒し判断材料。Cluster B 結論と一致。"
+    },
+    {
+      "id": "PA-408",
+      "claimed_severity": "medium",
+      "validated_severity": "medium",
+      "verdict": "CONFIRMED",
+      "post_fix_defect_confirmed": false,
+      "fact_check": {
+        "status": "CONFIRMED",
+        "details": "memory_adapter.py:87-96 publish() 冒頭で未起動時に `logger.warning(...); return` で例外を投げない。caller (main.py:491-506 / runner.py:577-592) の `try/except Exception: logger.exception('event_bus_publish_failed')` は publish が return で完了するため except に到達しない。PA-401 のような『publish() を呼んだが silently drop された』類型のバグを静的に検出する経路がない。"
+      },
+      "adoption_level": "should_consider",
+      "adoption_rationale": "PA-401 修正で即時害は除去されるが、defense-in-depth として EventBusNotStartedError or metrics increment を追加する価値あり。"
+    },
+    {
+      "id": "PA-409",
+      "claimed_severity": "low",
+      "validated_severity": "low",
+      "verdict": "CONFIRMED",
+      "post_fix_defect_confirmed": false,
+      "fact_check": {
+        "status": "CONFIRMED",
+        "details": "loader.py:50-66 の _ALLOWED_MODULE_PREFIXES に 'collections' と 'collections.abc' の両方が含まれる。loader.py:108 で `module_name.startswith(prefix + '.')` のドット接頭一致なので、'collections' が許可されている時点で 'collections.deque' / 'collections.OrderedDict' も自動的に通る。現 ATLAS 戦略では collections.deque / OrderedDict 使用は確認されていないため実害ゼロ。"
+      },
+      "adoption_level": "informational",
+      "adoption_rationale": "現状実害ゼロ。将来の ATLAS 生成パターン拡張時の予防的懸念。"
+    },
+    {
+      "id": "PA-410",
+      "claimed_severity": "medium",
+      "validated_severity": "low",
+      "verdict": "SEVERITY_DOWNGRADED",
+      "post_fix_defect_confirmed": false,
+      "fact_check": {
+        "status": "PARTIALLY_INCORRECT",
+        "details": "runner.py:1728 `self._track_live_order_submissions()` は account_info 失敗 return (line 1632) の後にあり、確かに skip される (主張正しい)。一方 runner.py:1551 `_maybe_reconcile_live_positions()` はヘルスチェックブロック内で account_info 取得試行より前に実行されるため、第1チームの『_maybe_reconcile_live_positions が skip される』主張は実コードと矛盾 (PA-405 と同根の execution-order 誤読)。runner.py:1722-1723 の state_manager.save_all は確かに skip されるが、これは設計上正当 (account_info 不能時に状態更新を保留)。"
+      },
+      "bias_detected": [
+        {
+          "type": "CAUSAL_ERROR",
+          "location": "PA-410 主張: _maybe_reconcile_live_positions が skip される",
+          "criticism": "runner.py:1551 (_maybe_reconcile_live_positions) は runner.py:1632 (return) より前に実行される。",
+          "evidence": "runner.py:1551 < runner.py:1632 で確認。",
+          "counter_proposal": "low へ降格。_track_live_order_submissions 主張のみ事実。state_manager.save_all skip は設計上の挙動。"
+        }
+      ],
+      "adoption_level": "informational",
+      "adoption_rationale": "OANDA 障害中の状態保存 skip は設計上受容可能。Cluster B 結論と一致。"
+    },
+    {
+      "id": "PA-411",
+      "claimed_severity": "low",
+      "validated_severity": "low",
+      "verdict": "CONFIRMED",
+      "post_fix_defect_confirmed": false,
+      "fact_check": {
+        "status": "CONFIRMED",
+        "details": "events.py:321-328 で RiskAlertEvent.alert_type は `str = Field(description='アラート種別...')` で Enum 化されていない。runner.py:1275-1290 _ALERT_LEVEL_BY_TYPE は str dict、email_notifier.py:275-326 _RISK_ALERT_KINDS も str dict。typo (例 'live_order_silent' / s 抜け) では (a) _ALERT_LEVEL_BY_TYPE で WARNING fallback、(b) _RISK_ALERT_KINDS で kind 不明 → email silently drop の経路は理論的に存在。"
+      },
+      "adoption_level": "should_consider",
+      "adoption_rationale": "Enum 化は mypy で typo 検知可能になる低コスト改良。Cluster B 結論と一致。"
+    },
+    {
+      "id": "PA-412",
+      "claimed_severity": "high",
+      "validated_severity": "high",
+      "verdict": "CONFIRMED",
+      "post_fix_defect_confirmed": true,
+      "fact_check": {
+        "status": "CONFIRMED",
+        "details": "main.py:357-420 _assert_not_unsupported_production_live() で escape hatch PLATFORM_ALLOW_MAIN_PRODUCTION_LIVE=1 を実装。main.py:386-401 で escape hatch 通過時に CRITICAL ログのみ出して `return` し、後続 initialize/start に進む。grep 'restore_positions' on main.py で確認: 3 件全てコメント (line 362/366/407) のみ、実装ゼロ。runner.py には runner.py:661 `_restore_all_positions` および runner.py:675 `slot.restore_positions(...)` 実装が存在。escape hatch 通過 + OANDA 既存ポジション + Gate FAIL 戦略の同時シナリオで (a) PA-401 経由で Email 通知 = 0、(b) PA-103 想定通り OANDA 既存ポジ無認識で二重エントリーリスク、の二重リスクが顕在化。INC-2026-0526-001 同型再発の構造。"
+      },
+      "risk_warnings": [
+        {
+          "scenario": "escape hatch を緊急時に使用 + OANDA 既存ポジション + Gate FAIL 戦略",
+          "probability": "low — 通常運用では escape hatch 非使用",
+          "impact": "FTS が既存ポジション無認識 → 二重エントリー + Gate 拒否 Email = 0。INC-2026-0526-001 を再現。"
+        }
+      ],
+      "adoption_level": "must_fix",
+      "adoption_rationale": "PA-401 + PA-103 の二重リスクが同一 escape hatch 経路で顕在化。escape hatch 撤廃 (PA-307 前倒し) または fast-path EmailNotifier 配線が必須。Cluster B 結論と一致。"
+    },
+    {
+      "id": "PA-413",
+      "claimed_severity": "low",
+      "validated_severity": "low",
+      "verdict": "CONFIRMED",
+      "post_fix_defect_confirmed": true,
+      "fact_check": {
+        "status": "CONFIRMED",
+        "details": "test_pa301_osg_metrics_injection.py:68-95 の AST 検証は (1) ast.For の iter が Tuple、(2) Tuple elements に _osg_mod の Name がある、(3) for body 内に attr.attr=='set_metrics_collector' の Call が一つでもある、を確認。receiver オブジェクトが _mod ループ変数であることや、attr.value.id == '_mod' 等の追加検証なし。リファクタで receiver が誤ったオブジェクトに変わってもテストが緑のまま実本番が壊れる構造的緩さ。現実装は正しいので即時影響なし。"
+      },
+      "adoption_level": "should_consider",
+      "adoption_rationale": "テスト品質課題。現実装は正しいが、リファクタ regression 検知が弱い。"
+    }
+  ],
+  "missed_findings_search": [
+    {
+      "category": "main.py vs runner.py 非対称",
+      "observation": "main.py には `_shutdown_reason` 追跡が全く存在しない (grep 結果ゼロ件)",
+      "details": "runner.py には _shutdown_reason 追跡 (runner.py:132, 1656-1657, 1750, 1792-1793, 1811, 1829) があり、KS 発動 / signal_interrupt / stop_file / all_slots_disabled の reason を shutdown 時の jsonl に記録する。main.py の run_standalone (main.py:1401-) は stop_event.wait() のみで reason 追跡なし。FastAPI 経路は元々運用されない (PA-307 で廃止候補) ので影響は限定的だが、PA-407 の二重実装罪状の追加証拠。",
+      "severity_proposal": "low",
+      "rationale": "main.py は dev 用なので shutdown reason 不在の運用影響は実質ゼロ。PA-407 の補強材料。"
+    },
+    {
+      "category": "Strategy Loader 動的 import 安全性",
+      "observation": "loader.py:649-698 _import_strategy_class の SANDBOX_BUILTINS 配線は CSR-R1-002 で適用済み",
+      "details": "loader.py:663-664 で from atlas.common.sandbox_builtins import SANDBOX_BUILTINS と module.__builtins__ = SANDBOX_BUILTINS が確認できた。open/exec/eval/__import__ が SANDBOX_BUILTINS で抑止されており、execute_module 前に注入される。AUDIT-2026-0525-002 CSR-101 の RCE 修正は構造的に保持されている。新規 RCE ベクタは今回確認できず。",
+      "severity_proposal": "none",
+      "rationale": "リグレッションなし。PA-409 の collections prefix 過剰許可のみ予防対象として既出。"
+    },
+    {
+      "category": "shutdown.reason 付与経路の網羅性",
+      "observation": "runner.py の shutdown reason 4 経路 (kill_switch / signal_interrupt / stop_file / all_slots_disabled) は確認、他経路は無さそう",
+      "details": "runner.py で _shutdown_reason への代入箇所は 4 箇所のみ。EventBus 連動の RiskAlertEvent → graceful shutdown / supervisor からの shutdown 要求などは _shutdown_reason 経由ではなく individual flag。9998a7a で追加された AUDIT-2026-0529-001/H-01 KS 発動時の shutdown_requested 配線は妥当 (runner.py:1656-1663)。",
+      "severity_proposal": "none",
+      "rationale": "既存設計に問題なし。"
+    },
+    {
+      "category": "9998a7a の他の post_fix_defect",
+      "observation": "9998a7a で導入された変更点を walk-through し、PA-401 以外で structurally similar な dead-path は確認できず",
+      "details": "PA-301 (OSG metrics injection) は両経路に注入済み、現状動作問題なし (PA-413 のテスト緩さは別問題)。PA-303 の actor='main_platform' 経路は PA-401 で発見した dead-path の根本原因として既に finding 化済み。PA-306 (StateStore backend 選択) は本番 production+memory が settings 側で起動拒否されるため latent dead-path はあるが PA-403 (重複ログ) のみが残課題。",
+      "severity_proposal": "none",
+      "rationale": "新規 post_fix_defect は本検証では未発見。"
+    },
+    {
+      "category": "RiskAlertEvent 経路の死角",
+      "observation": "main.py:595 set_risk_alert_emitter は initialize 内末尾近くで呼ばれ、PTRC からの risk_alert publish 自体は initialize 完了後の runtime 経路のため PA-401 と直接同型ではない",
+      "details": "main.py:594-595 で `_ptrc_mod2.set_risk_alert_emitter(self._emit_ptrc_risk_alert)` を呼ぶ。これは PTRC 拒否時の RiskAlertEvent 発火ハンドラ。initialize() 完了 → start() で event_bus.start → EmailNotifier.start で subscribe される頃には runtime 経路の publish はちゃんと届く。PA-401 のように initialize() 内で直接 publish するパターンは main.py:492 の 1 箇所のみ。",
+      "severity_proposal": "none",
+      "rationale": "PA-401 と異なり PTRC 経路は runtime のため dead-path にならず。"
+    }
+  ],
+  "summary": {
+    "total_findings_reviewed": 13,
+    "verdict_distribution": {
+      "CONFIRMED": 7,
+      "SEVERITY_DOWNGRADED": 5,
+      "REJECTED": 0,
+      "PARTIALLY_INCORRECT_root_facts": 2
+    },
+    "validated_severity_distribution": {
+      "high": 3,
+      "medium": 1,
+      "low": 9
+    },
+    "post_fix_defects_confirmed": [
+      "PA-401",
+      "PA-402",
+      "PA-403",
+      "PA-412",
+      "PA-413"
+    ],
+    "must_fix": [
+      "PA-401",
+      "PA-412"
+    ],
+    "should_consider": [
+      "PA-407",
+      "PA-408",
+      "PA-411",
+      "PA-413"
+    ],
+    "informational": [
+      "PA-402",
+      "PA-403",
+      "PA-404",
+      "PA-405",
+      "PA-406",
+      "PA-409",
+      "PA-410"
+    ],
+    "agreement_with_cluster_b": "100% — 全 13 件で Cluster B devil-advocate と同一の verdict / validated_severity に到達。PA-401 EXACT_MATCH 主張は実コードで完全再現。PA-405/PA-410 の execution-order 誤読も同根で確認。"
+  },
+  "critical_observations": [
+    {
+      "observation": "PA-401 EXACT_MATCH は 3 つの独立した証拠で確定",
+      "details": "(1) main.py:492 が initialize() 内で event_bus.publish を呼ぶ、(2) event_bus.start は main.py:1004 で start() 内、(3) EmailNotifier.start は main.py:1083-1089 で start() 内。memory_adapter.py:94-96 の silent return パスが PA-401 を直接的に成立させる。runner.py 側 (line 500-525) には C-01 修正が適用済みで、main.py のみが未修正。"
+    },
+    {
+      "observation": "PA-405 と PA-410 は同一の execution-order 誤読",
+      "details": "両 finding とも account_info 失敗 return (runner.py:1632) より前にあるブロック (_check_live_health_alerts: 1547, _maybe_reconcile_live_positions: 1551) が skip されると主張。実コードでは順序が逆で、ヘルスチェックブロックが先に実行される。第1チームの evidence 行番号は正確だが、実行順序解釈が誤り。Cluster B も同じ分析誤りを指摘済み。"
+    },
+    {
+      "observation": "PA-407 の構造的 root cause 性は PA-401 で empirically 立証",
+      "details": "main.py / runner.py の二重実装は 9998a7a commit message にも『両方に手書き』と明記されており、PA-301 / PA-303 / PA-306 の 3 finding 全てで両側に同じパターンを書いた。PA-401 はその直接的副作用として『片方だけ修正された』バグを実証。PA-307 ADR 前倒しの根拠が PA-401 で empirical に立証された。"
+    },
+    {
+      "observation": "PA-413 のテスト緩さは PA-407 の構造的問題を補強",
+      "details": "test_pa301_osg_metrics_injection.py は二重実装 (main.py / runner.py) のそれぞれに対して AST 検証を書いている。receiver object identity を検証しないため、main.py 側だけリファクタで壊しても runner.py 側のテストが緑のまま本番が壊れる可能性。これ自体は test 品質課題だが、PA-407 の structural debt が test 品質にも波及する例。"
+    },
+    {
+      "observation": "memory_adapter.py:94-96 silent return が PA-401 / PA-408 の共通基盤",
+      "details": "publish() の `if not self._running: logger.warning(...); return` は『起動前 publish を例外で止めない』設計だが、PA-401 のように『起動前 publish が静かに失われる』バグ類型の静的検出を不能にしている。EventBusNotStartedError 例外を投げる、もしくは metric increment するなどの defense-in-depth 改良が PA-408 で提案されており、本検証でも妥当と判断。"
+    }
+  ]
+}

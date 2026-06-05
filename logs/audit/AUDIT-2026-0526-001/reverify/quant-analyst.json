@@ -1,0 +1,62 @@
+{
+  "verifier": "quant-analyst",
+  "audit_id": "AUDIT-2026-0526-001",
+  "atlas_commit": "feb111ee",
+  "method": "第2チーム経験的再検証。引用 file:line を全件 Read で実在確認し、QA-201/202/203 の定量主張を strategies 配下 result.json 1453 件に対し _compute_equity_stats / WFA None 集計ロジックを Python で忠実再現して検算。新規発見はせず第1チーム findings と devil-advocate(validation.json)の妥当性のみ判定。",
+  "summary": "QA-201〜QA-205 全 5 件のコード引用は feb111ee 現コードに実在し計算経路も正確。定量主張は QA-201/QA-202 とも実測再現に成功(QA-202 は完全一致、QA-201 は 83.2% vs 主張 85.3% で 2.1pt 差・同一分母 606)。devil-advocate の QA-201 high→medium 降格は妥当: scorer.py/runner.py に var_95 参照ゼロを grep で確認し Gate 非接続を実証。QA-203 の mean(a/b) 集計も event_simulator.py:1614-1622 で確認。誤り・反証 0 件。",
+  "verifications": [
+    {
+      "id": "QA-201",
+      "claim_accuracy": "正確。(1) event_simulator.py:2090-2094 で eq=state.equity_curve を len>500 のとき step=len//500 で間引く処理を確認。(2) state.equity_curve は event_simulator.py:1231 の append(equity) がメイン bar ループ内で 1 バー 1 点記録される per-bar 系列(per-trade ではない)。(3) result_parser.py:38 equity_stats=_compute_equity_stats(l2.equity_curve)、l2.equity_curve は result.json の間引き済み 503 点。(4) result_parser.py:334-374 で returns=diff(eq)/eq[:-1] から var_95/cvar_95/tail_ratio/efficiency_ratio を算出。(5) docstring 346-348 は per-bar リターン系列と宣言するが実 1 区間=data_bars/500 バー(実測 ATLAS-2026-0408-011: equity_curve=503 点 / data_bars=99452 → 約 198 バー、主張の代表値と一致)。(6) Sharpe/Sortino は event_simulator.py:1412 で FULL state.equity_curve から算出され非対称も確認。weakness_detector.py:145 の var_95<-0.5 ルール実在を確認。",
+      "severity_verdict": "medium が妥当(devil-advocate の high→medium 降格を支持)。Gate 非接続のため pass/fail に影響せず production safety 機構の故障ではない。一方 must_fix 採用は妥当 — 誤発火率 約85% は fx-strategist への weakness フィードバックを系統的に無価値化し改善バジェットを浪費する。",
+      "current_code_quote": "result_parser.py:349 var_95 = float(np.percentile(returns, 5)) * 100 / docstring 346-348 per-bar リターン系列のパーセンタイル timeframe 依存単位(H1=1h, M15=15min) / event_simulator.py:2092-2094 if len(eq) > 500: step = len(eq) // 500; eq = [eq[i] for i in range(0, len(eq), step)] / weakness_detector.py:145 if m.var_95 is not None and m.var_95 < -0.5:",
+      "reproduced": "再現成功(主張と同等)。result.json 1453 件中 layer2 に trades>0 かつ equity_curve>=2 点を持つ L2 戦略=606 件(主張の分母と完全一致)。_compute_equity_stats を忠実再現し var_95<-0.5 発火数を集計 → 504/606=83.2%(主張 517/606=85.3%、差 13 件/2.1pt)。var_95 分布: min=-5.53 / median=-1.00 / mean=-1.23 / max=0.00、count<-1.0=301 件。境界 [-0.5,-0.45) に 40 件の密集クラスタあり、13 件差はこの境界近傍 + commit 間の戦略追加/変更によるものと推定(var_95 は result.json に非保存=両者とも equity_curve から再計算する設計のため計算式差ではない)。結論 var_95 ルールが L2 戦略の 約85% で誤発火 は頑健に確認。",
+      "verdict": "confirmed",
+      "notes": "Gate 非接続の devil 降格根拠を独立 grep で実証: var_95 を atlas 配下全体検索 → 出現は models.py(モデル)/result_parser.py(算出)/weakness_detector.py(誤発火ルール)/metrics.py(risk 表示) の 4 ファイルのみ。scorer.py・runner.py(check_backtest_gate) はゼロ。scorer.py の efficiency_ratio 一致は wfa_efficiency_ratio(別指標)のみ。よって Tier1/Tier2 pass/fail に一切影響せず high→medium は妥当。fill_rate 偽緑バグ(QT-R2-002 修正済)と同型という類比も 間引き/誤分母→weakness_detector 常時発火→fx-strategist 誤フィードバック 構造が一致し適切。"
+    },
+    {
+      "id": "QA-202",
+      "claim_accuracy": "正確。event_simulator.py:1560-1571 で len(walks)<min_walks 時に efficiency_ratio/oos_profit_factor/is_profit_factor/strategy_drift を全 None で返す処理を確認。defaults.py:304 WFA_MIN_WALKS=10 確認。event_simulator.py:1714-1741 で oos_bars=oos_months×bars_per_month、min_is_bars=oos_bars×WFA_IS_OOS_RATIO(=2、defaults.py:301)、walk 列挙ループ(walk_start += step_bars)を確認。runner.py:624-667 _compute_soft_score_redistributed で value is not None の valid component のみ再正規化し None を除外する v5.5.0 ロジックを確認。引用は 1718-1741 だが実関数本体は 1714-1741 で軽微オフセット差のみ。",
+      "severity_verdict": "medium が妥当。robustness ゲートが最も必要な低頻度・長 TF 戦略で構造的に外れる懸念は実在し informational ではない。",
+      "current_code_quote": "event_simulator.py:1560 if len(walks) < min_walks: → return efficiency_ratio/oos_profit_factor/is_profit_factor/strategy_drift = None / defaults.py:304 WFA_MIN_WALKS: Final[int] = 10 / runner.py:658 valid = [c for c in components if c.value is not None]",
+      "reproduced": "再現成功(完全一致)。L2 total_trades>=50=578 件(主張一致)。wfa_efficiency_ratio=None=165 件=28.5%(主張 28.5%、完全一致)。strategy_drift=None=155 件(主張 155 件 一致)。overall_passed=True=308 件(主張一致)、うち wfa_efficiency_ratio=None=10 件(主張 10 件 完全一致)。QA-202 の全定量主張を件数まで再現。",
+      "verdict": "confirmed",
+      "notes": "devil-advocate の指摘どおり finding 本文は v6.0.1 EFFECTIVE_WEIGHT_FLOOR=0.70(膨張倍率を最大 1.43x にキャップ、runner.py:656,665)という緩和機構の記述を省略し soft_score が押し上げられる を無制限であるかのように記述している点はやや不正確。ただしキャップは押し上げ自体を消去しないため medium 維持は妥当(devil 評価と一致)。suggested_fix(WFA not_measured 件数の区別表示)は CLAUDE.md の 3 状態評価(passed/failed/not_measured)と整合する建設的提案。"
+    },
+    {
+      "id": "QA-203",
+      "claim_accuracy": "正確。event_simulator.py:1614-1615 で mean_oos_pf=np.mean(oos_pfs)、mean_is_pf=np.mean(is_pfs) を確認 — 各 walk の PF(gross_profit/gross_loss 比)の単純算術平均でありプールド PF(gross_profit 合計/gross_loss 合計)ではない。oos_pfs/is_pfs は event_simulator.py:1575-1576 で None walk を除外しており母集団が walk ごとにブレる主張も確認。result_parser.py:232-255 _compute_oos_is_ratio が l2.oos_profit_factor / is_pf を算出し Tier2 へ供給(分母 is_pf も is_profit_factor_walks=walk PF 平均、line 249)。runner.py:942-950 で OOS/IS PF Ratio component が GATE_TIER2_WEIGHT_OOS_IS_RATIO で加重。defaults.py:198 GATE_TIER2_WEIGHT_OOS_IS_RATIO=0.12 確認。",
+      "severity_verdict": "medium が妥当。mean(a/b) は sum(a)/sum(b) と一致しない真の統計的誤りで、少数 walk(10〜十数件)では 1 つの好調 OOS walk が比を不当に押し上げ過適合戦略が OOS/IS スコアを取得しうる。confidence=medium も妥当。",
+      "current_code_quote": "event_simulator.py:1614-1615 mean_oos_pf = float(np.mean(oos_pfs)) if oos_pfs else None / mean_is_pf = float(np.mean(is_pfs)) if is_pfs else None / defaults.py:198 GATE_TIER2_WEIGHT_OOS_IS_RATIO: Final[float] = 0.12",
+      "reproduced": "コード経路は確認済み。誤差影響の定量再現(mean-of-ratios vs pooled-PF の乖離分布)は walk 単位の gross_profit/gross_loss 生データが result.json に保存されておらず(oos_profit_factor の集約値のみ persist)再現不可。再現不可理由: 各 walk の gross 内訳が破棄されており pooled PF を後付け算出できない。ただし統計的不適切性自体はコード上自明(np.mean of ratio list)で再現を要しない。",
+      "verdict": "confirmed",
+      "notes": "数値影響の事後検算には walk 単位 gross の persist が前提だが現行 result.json には無い。suggested_fix(プールド PF or median PF 併用 + walk PF 分散/最小値記録)は妥当。devil-advocate validation も同一根拠で medium 確認しており判定一致。"
+    },
+    {
+      "id": "QA-204",
+      "claim_accuracy": "正確。result_parser.py:446-523 _compute_lane_a_metrics が equity_curve 引数(=l2.equity_curve=間引き済み 503 点)から running_peak/dd_ratio を算出し pain_index_pct(492)/ulcer_index(494)/conditional_dd_p50/90/99(499-501)/cvar_99_pct(523)を計算することを確認。docstring(result_parser.py:443-444)は サブサンプリングされた equity_curve 500 点を使うためフル期間 BT 再実行との完全一致は保証しない / Gate 閾値には未接続 と明記し finding と完全整合。event_simulator.py:2090-2094 の間引き元と QA-201 同根も確認。spec_change_log.md:3203 に max_dd_duration_bars が equity curve 500 点に間引かれているためイベント単位 と既知化されている記述を実ファイルで確認。",
+      "severity_verdict": "low が妥当。Gate 非接続(情報メトリクス)のため緊急度低。間引きによる谷底脱落で drawdown 深度・継続を過小評価する方向のバイアスは存在し、横断比較ではデータ長差で崩れる点も正しい。",
+      "current_code_quote": "result_parser.py:443-444 docstring(サブサンプリングされた equity_curve 500 点を使うため、フル期間 BT 再実行との完全一致は保証しない。用途は相対比較・情報量確保であり、Gate 閾値には未接続。)/ result_parser.py:482 eq = np.array(equity_curve, dtype=float)",
+      "reproduced": "定量再現は実施せず(low・Gate 非接続・主張は過小評価方向のバイアス存在指摘のみで具体的誤発火率主張なし)。間引き元(503 点)は QA-201 で実測確認済み(ATLAS-2026-0408-011: 503/99452)。コード経路は全行 Read で確認済み。",
+      "verdict": "confirmed",
+      "notes": "QA-201 と同根(間引き curve からのリスク再計算)。一括修正提案(event_simulator のフル equity から算出し result.json に保存)は QA-201 と整合する設計改善。devil-advocate 判定(low 確認)と一致。"
+    },
+    {
+      "id": "QA-205",
+      "claim_accuracy": "正確。event_simulator.py:1492-1506 で monthly_returns が BARS_PER_MONTH_BY_TIMEFRAME 基準の step=min(bars_per_month, len(equity)) で区切られキーが period_(start//step)(暦月でなくバー数チャンク)であることを確認。最終チャンク端数処理(end=min(start+step, len(equity)-1))も確認。result_parser.py:377-385 _compute_consistency が monthly_returns のプラス率を取ることを確認。scorer.py:98 consistency が core 重み SCORE_WEIGHT_CONSISTENCY 成分、scorer.py:118-128 で required_metrics の必須項目(line 122)、scorer.py:185-192 で quality_mult への二重寄与(1.05/1.0/0.95)を全行確認。defaults.py:332 SCORE_WEIGHT_CONSISTENCY=0.15 確認。",
+      "severity_verdict": "low が妥当。バイアスは全戦略に系統的に作用するため相対ランキングは保存される(devil 指摘どおり)。区間定義が暦月でない名実乖離・短データ/高 TF ほど区間粗化は実在するが Gate pass/fail を直接歪めない。confidence=medium も妥当。",
+      "current_code_quote": "event_simulator.py:1506 monthly_returns key = period_(start // step) / event_simulator.py:1496 step = min(bars_per_month, len(equity)) / scorer.py:122 consistency_score in required_metrics / scorer.py:192 quality_mult *= mult / defaults.py:332 SCORE_WEIGHT_CONSISTENCY: Final[float] = 0.15",
+      "reproduced": "定量再現は実施せず(low・主張はセマンティクス/分解能の指摘で誤発火率の定量主張なし)。コード経路(二重寄与・必須項目・period_N チャンク)は全行 Read で確認済み。",
+      "verdict": "confirmed",
+      "notes": "core(0.15)+quality 乗数の二重寄与は事実だが両寄与とも同一 consistency_score を入力とするため 二重カウント 妥当性再検討提案は合理的。consistency が required_metrics に入るため None 時は evaluable=False→final_score<=0.5 クランプ(scorer.py:111-128)という Gate 接続経路もあるが、暦月 vs バーチャンク差は全戦略一律で相対順位を保つため severity low 維持は妥当。devil-advocate 判定と一致。"
+    }
+  ],
+  "tally": {
+    "confirmed": 5,
+    "refuted": 0,
+    "adjusted": 0,
+    "severity_changes_recommended": 0,
+    "devil_advocate_downgrade_QA201_supported": true
+  },
+  "errors_found_in_first_team": "誤り 0 件。軽微な不正確さ 2 件(結論不変): (1) QA-202 本文が v6.0.1 EFFECTIVE_WEIGHT_FLOOR=0.70 の膨張キャップ緩和機構を記述欠落(devil も同指摘)。(2) QA-201 の var_95 誤発火数は実測 504/606=83.2% で主張 517/606=85.3% と 13 件/2.1pt 差(分母 606 は完全一致、境界密集 + commit 間戦略変更が原因と推定、結論 約85% 誤発火 は頑健)。引用 file:line は全 5 件実在(QA-202 の WFA 関数引用が 1718→1714 で軽微オフセットのみ)。devil-advocate の QA-201 high→medium 降格(scorer/runner に var_95 参照ゼロ=Gate 非接続)は独立 grep で実証され妥当。"
+}

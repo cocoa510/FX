@@ -1,0 +1,181 @@
+{
+  "meta": {
+    "agent": "platform-architect",
+    "audit_id": "AUDIT-2026-0530-001",
+    "phase": "Phase 3/4 - 実装",
+    "session_started_at": "2026-05-30",
+    "scope": "PA-401 / PA-412 high post_fix_defect の修正",
+    "commit_created": false,
+    "commit_policy": "本セッションではコミット作成しない (Phase 4 で別途まとめてレビュー)"
+  },
+  "fixes": [
+    {
+      "id": "PA-401",
+      "title": "main.py LIVE Gate 拒否時の RiskAlertEvent が silently drop されていたバグ",
+      "severity": "high",
+      "category": "post_fix_defect",
+      "tag": "[fix:bug]",
+      "root_cause": "昨日 PA-303 修正で main.py:492-506 に LIVE Gate 拒否時の self._event_bus.publish(RiskAlertEvent(...)) を追加したが、EventBus.start (start() 内 line 1004) と EmailNotifier.start (start() 内 line 1083-1089) はいずれも publish より後で実行されるため、memory_adapter.py:94-96 の `if not self._running: return` で silent drop されていた。runner.py 側は AUDIT-2026-0529-003 C-01 で同型修正済み (runner.py:500-525)、main.py への移植漏れ。",
+      "approach": "(c) 案を採用: main.py:initialize() 内に idempotent helper `_ensure_eventbus_and_notifier_started()` を新設し、LIVE Gate 拒否 publish 直前で呼ぶ。EventBus.start / EmailNotifier.start を早期実行し、後段の start() ループは新規 2 つの状態フラグ (`_eventbus_started_early`, `_email_notifier_started`) で二重 start / 二重 subscribe を回避する。これにより既存 start() 順序を破壊せず非侵襲的に修正できる。",
+      "files_modified": [
+        {
+          "path": "C:\\data\\works\\FX\\fx_trading_system\\trading_platform\\main.py",
+          "change_summary": [
+            "__init__ に状態フラグ `_eventbus_started_early: bool = False` / `_email_notifier_started: bool = False` を追加 (line 194-203 付近)",
+            "新規 helper `async def _ensure_eventbus_and_notifier_started()` を追加 (line 218-275 付近): EventBus 未起動なら start、EmailNotifier 未生成なら生成 (main.py:992 と同一引数)、未起動なら start。各操作を flag で idempotent 化。例外は logger.exception で記録し publish 経路は呼出元で握りつぶす。",
+            "LIVE Gate 拒否 publish 経路 (main.py:494-510 付近) で `await self._event_bus.publish(...)` の直前に `await self._ensure_eventbus_and_notifier_started()` を呼ぶ (PA-401 コメント付き)",
+            "EmailNotifier 生成箇所 (main.py:992 付近) を `if self._email_notifier is None:` でガードし、早期生成済みの場合は再生成しない (二重 subscribe 回避)",
+            "start() 内 EventBus _start_step (line 1004 付近) を `_eventbus_started_early` フラグで分岐: 早期 start 済みなら no-op の start 関数を渡し stop_fn だけ rollback 対象に積む",
+            "start() 内 EmailNotifier _start_step (line 1083-1089 付近) を `_email_notifier_started` フラグで同様に分岐"
+          ],
+          "loc_changed": 219,
+          "verified_by": [
+            "tests/integration/test_pa401_main_eventbus_startup_order.py (新規, 5 テスト all PASS)",
+            "tests/unit/test_main_production_live_guard.py (15 既存テスト regression PASS)",
+            "tests/unit/test_pa303_main_live_gate_rejection.py (6 既存テスト regression PASS)",
+            "tests/integration/test_platform_e2e_smoke.py (4 既存テスト regression PASS)"
+          ]
+        }
+      ],
+      "tests_added": [
+        {
+          "path": "C:\\data\\works\\FX\\fx_trading_system\\tests\\integration\\test_pa401_main_eventbus_startup_order.py",
+          "test_count": 5,
+          "tests": [
+            "test_ensure_helper_starts_eventbus_and_notifier_idempotently — helper が 1 回目で起動、2 回目で no-op",
+            "test_helper_runs_before_start_main_loop — helper 呼出前は publish が silent drop、呼出後は配信される",
+            "test_live_gate_rejection_publish_reaches_subscribers — initialize 完走後 + helper 経由で subscriber に live_strategy_rejected_by_gate が届く",
+            "test_start_skips_eventbus_when_started_early — initialize で早期 start 後の start() が二重 start なしで完走",
+            "test_normal_flow_without_early_start_still_works — 通常 flow (Gate 拒否なし) は従来通り完走"
+          ]
+        }
+      ],
+      "regression_risk": "low",
+      "regression_rationale": "既存 start() ループは『早期 start 済みフラグが True のときのみ』start を skip する分岐を追加しただけで、未起動時の動作は変更なし。InMemoryEventBus.start は元々 idempotent (running フラグ立てるのみ)、RedisEventBus は再接続の副作用があるためフラグで明示的に skip。EmailNotifier.start は subscribe を含むため二重 subscribe を防ぐフラグでガード必須 (実装済)。Round 1 既存 19 テスト + AUDIT-2026-0529-001 17 テスト + 121 関連テスト全 PASS。",
+      "verify_pa_alignment": {
+        "verdict_match": "CONFIRMED (verify_pa.json:14-35)",
+        "post_fix_defect_confirmed": true,
+        "adoption_level": "must_fix",
+        "fix_strategy_alignment": "verify_pa が提案する (b)『start() 内で event_bus.start → email_notifier.start を slot 検証より前に行う構造変更』をより非侵襲的に変形した (c) 案 (initialize 内の idempotent helper) を採用。effective には等価。"
+      }
+    },
+    {
+      "id": "PA-412",
+      "title": "PLATFORM_ALLOW_MAIN_PRODUCTION_LIVE escape hatch 通過時の二重リスク (PA-401 + PA-103 元因) 対策",
+      "severity": "high",
+      "category": "post_fix_defect",
+      "tag": "[fix:bug]",
+      "root_cause": "escape hatch (`PLATFORM_ALLOW_MAIN_PRODUCTION_LIVE=1`) で main.py LIVE 起動した場合に (a) PA-401 (Email 通知 dead-path) + (b) PA-103 元因 (既存ポジション無認識) が同時顕在化。INC-2026-0526-001 同型再発のリスク。`_assert_not_unsupported_production_live` 内で CRITICAL ログを 1 件出して return するだけで、運用者への能動的通知は皆無。",
+      "approach": "(1) escape hatch 通過時の CRITICAL ログを強化: PA-412 タグ + PA-401/PA-103 二重リスク明示 + deprecation 警告 + remediation 案内。(2) `_escape_hatch_active` フラグを立て、initialize 内で PA-103 ガード直後に EventBus / EmailNotifier を早期 start (PA-401 修正の helper を流用) してから新規 alert_type `platform_escape_hatch_active` の RiskAlertEvent (CRITICAL) を publish。(3) EmailNotifier._RISK_ALERT_KINDS に `platform_escape_hatch_active → escape_hatch` kind を追加 (throttle 対象外 = kill_switch 同等の緊急扱い)。",
+      "files_modified": [
+        {
+          "path": "C:\\data\\works\\FX\\fx_trading_system\\trading_platform\\main.py",
+          "change_summary": [
+            "__init__ に `_escape_hatch_active: bool = False` フラグを追加",
+            "`_assert_not_unsupported_production_live` の escape hatch 通過分岐を強化: PA-412 タグ、deprecated=True、deprecation_note、risks リスト (PA-103/PA-401)、remediation 付きの CRITICAL ログ。同時に `_escape_hatch_active = True` をセット。",
+            "initialize() 内 PA-103 ガード直後に escape hatch 専用ブロックを追加: `_ensure_eventbus_and_notifier_started()` で EventBus + EmailNotifier 早期 start し、`platform_escape_hatch_active` alert_type の RiskAlertEvent (CRITICAL) を publish。"
+          ],
+          "loc_changed_partial": 50
+        },
+        {
+          "path": "C:\\data\\works\\FX\\fx_trading_system\\trading_platform\\core\\monitoring\\email_notifier.py",
+          "change_summary": [
+            "_RISK_ALERT_KINDS に `platform_escape_hatch_active → escape_hatch` 行を追加 (line 333 付近)",
+            "_EMAIL_THROTTLE_INTERVAL_SEC には escape_hatch を登録しない (= throttle 対象外、起動時 1 回のみ発火する kill_switch 同等扱い)"
+          ],
+          "loc_changed": 23
+        }
+      ],
+      "tests_added": [
+        {
+          "path": "C:\\data\\works\\FX\\fx_trading_system\\tests\\integration\\test_pa412_escape_hatch_warning.py",
+          "test_count": 4,
+          "tests": [
+            "test_escape_hatch_sets_flag_and_emits_critical_log — escape hatch ON で `_escape_hatch_active=True` かつ stdout CRITICAL JSON に PA-412/deprecated/run_unified.py が出る",
+            "test_escape_hatch_disabled_does_not_set_flag — escape hatch 未設定では flag=False のまま RuntimeError 拒否",
+            "test_email_notifier_kind_registered_for_escape_hatch — `platform_escape_hatch_active → escape_hatch` 登録 + throttle 対象外確認",
+            "test_initialize_publishes_escape_hatch_alert — initialize で subscriber に platform_escape_hatch_active CRITICAL が届く E2E"
+          ]
+        }
+      ],
+      "regression_risk": "low",
+      "regression_rationale": "escape hatch 通過時の追加処理は (1) ログ強化、(2) フラグ立て、(3) initialize 内 publish のみで、escape hatch OFF 経路 (= 通常 production 拒否) は完全に従来動作維持。研究/dev/staging 経路も無影響。既存 15 ガードテスト + 4 email_notifier_live_anomaly テスト + 39 関連 PA テスト全 PASS。",
+      "verify_pa_alignment": {
+        "verdict_match": "CONFIRMED (verify_pa.json:219-237)",
+        "post_fix_defect_confirmed": true,
+        "adoption_level": "must_fix",
+        "fix_strategy_alignment": "verify_pa が提案する『escape hatch 撤廃 (PA-307 前倒し) または fast-path EmailNotifier 配線が必須』のうち、後者 (fast-path EmailNotifier 配線) を採用。PA-401 修正と同じ helper を共有することで実装コストを最小化。escape hatch 撤廃 (PA-307) は ADR レベルの判断なので本セッションでは deprecation 警告のみに留め、フラグを温存して将来の段階的廃止に備える。"
+      }
+    }
+  ],
+  "test_summary": {
+    "new_tests_added": 9,
+    "new_test_files": 2,
+    "existing_tests_run": [
+      {
+        "suite": "tests/unit/test_main_production_live_guard.py",
+        "result": "15 passed",
+        "regression": false
+      },
+      {
+        "suite": "tests/unit/test_pa303_main_live_gate_rejection.py",
+        "result": "6 passed",
+        "regression": false
+      },
+      {
+        "suite": "tests/unit/test_pa306_state_store_backend_selection.py",
+        "result": "5 passed",
+        "regression": false
+      },
+      {
+        "suite": "tests/unit/test_pa301_osg_metrics_injection.py",
+        "result": "6 passed",
+        "regression": false
+      },
+      {
+        "suite": "tests/unit/test_email_notifier.py",
+        "result": "18 passed",
+        "regression": false
+      },
+      {
+        "suite": "tests/unit/test_email_notifier_live_anomaly.py",
+        "result": "8 passed",
+        "regression": false
+      },
+      {
+        "suite": "tests/integration/test_platform_e2e_smoke.py",
+        "result": "4 passed",
+        "regression": false
+      },
+      {
+        "suite": "tests/unit/test_event_bus*.py + tests/unit/test_runner*.py",
+        "result": "broader regression - 121 passed combined",
+        "regression": false
+      }
+    ],
+    "new_test_results": {
+      "tests/integration/test_pa401_main_eventbus_startup_order.py": "5 passed (PA-401)",
+      "tests/integration/test_pa412_escape_hatch_warning.py": "4 passed (PA-412)"
+    },
+    "total_tests_executed": "34 (focused) + 121 (broader) = 155 PASS / 0 FAIL"
+  },
+  "files_changed_overall": {
+    "modified": [
+      "trading_platform/main.py (+196 -23, 219 LoC delta)",
+      "trading_platform/core/monitoring/email_notifier.py (+23 -0, 1 alert_type 追加)"
+    ],
+    "added": [
+      "tests/integration/test_pa401_main_eventbus_startup_order.py (5 テスト)",
+      "tests/integration/test_pa412_escape_hatch_warning.py (4 テスト)"
+    ]
+  },
+  "notes": {
+    "design_consideration": "verify_pa.json は『PA-307 (main.py 廃止 ADR) 前倒し』を should_consider として推奨しているが、本セッションは AUDIT 修正範囲のため ADR は範囲外とした。PA-307 の前倒しが採用されると本修正で追加した helper / フラグは将来不要になる (main.py 経路自体が廃止される)。中間期間の安全策としては適切。",
+    "edge_case_handled": "Redis Event Bus フォールバック経路 (production で OANDA API キー無 → Paper Broker, Redis 接続失敗 → InMemory) でも helper は idempotent に動作。`_eventbus_started_early` フラグで二重起動を防ぎ、Redis 再接続の副作用 (subscribe/listener task 二重起動) を完全に回避。",
+    "out_of_scope": [
+      "PA-307 (main.py 経路廃止 ADR) — 構造的解決策、本修正の範囲外",
+      "PA-408 (EventBusNotStartedError 例外 / metrics increment 追加) — defense-in-depth 改良、別タスクとして将来検討",
+      "PA-411 (RiskAlertEvent.alert_type Enum 化) — typo 検知強化、別タスクとして将来検討"
+    ]
+  }
+}

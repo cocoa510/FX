@@ -1,0 +1,214 @@
+{
+  "agent": "platform-architect",
+  "scope": "FTS アーキテクチャ (Event Bus, Strategy Loader, runner.py / main.py / run_unified.py, Pydantic, Async, Config, Gate, DI 配線)",
+  "commit": "2803be5",
+  "files_audited": [
+    "trading_platform/main.py",
+    "scripts/run_unified.py",
+    "trading_platform/core/unified_runner/runner.py",
+    "trading_platform/core/unified_runner/strategy_slot.py",
+    "trading_platform/core/unified_runner/state_manager.py",
+    "trading_platform/core/unified_runner/discovery.py",
+    "trading_platform/core/event_bus/protocols.py",
+    "trading_platform/core/event_bus/memory_adapter.py",
+    "trading_platform/core/event_bus/redis_adapter.py",
+    "trading_platform/core/strategy_engine/loader.py",
+    "trading_platform/core/strategy_engine/worker.py",
+    "trading_platform/core/execution_engine/coordinator.py",
+    "trading_platform/core/execution_engine/order_submission_guard.py",
+    "trading_platform/core/models/events.py",
+    "trading_platform/core/models/orders.py",
+    "trading_platform/core/models/risk.py",
+    "trading_platform/core/models/payloads.py",
+    "trading_platform/config/settings.py",
+    "trading_platform/data/state_store/redis_store.py"
+  ],
+  "findings": [
+    {
+      "id": "PA-301",
+      "severity": "high",
+      "area": "main",
+      "title": "main.py / runner.py 両経路で order_submission_guard.set_metrics_collector が未注入 (fx_snapshot_persistence_failures サイレント)",
+      "description": "OrderSubmissionGuard はモジュールレベル `_metrics` を持ち、submit_with_guard 失敗時に `_metrics.inc_snapshot_persistence_failure()` を呼ぶが (order_submission_guard.py:102-103)、main.py:111-121 と runner.py:387-397 の set_metrics_collector 注入ループに `order_submission_guard` モジュールが含まれていない。本番経路 (run_unified.py 経由 UnifiedRunner、main.py 経由 ExecutionCoordinator) の両方で `_metrics is None` のままで Snapshot 永続化失敗が Prometheus に上がらない。alerting_rules.yml で `FxSnapshotPersistenceFailures` 系アラートが定義されていればプロセス全体で発火不能 (fail-closed REJECT で発注は止まるがメトリクス可視化が dead)。これは AUDIT-2026-0525-002 で同型再発した『二重実装の配線乖離』パターン (runner.py:380-397 のコメント) と完全に同じ構造。",
+      "evidence": [
+        "trading_platform/core/execution_engine/order_submission_guard.py:39-46 (_metrics: MetricsCollector | None = None, set_metrics_collector)",
+        "trading_platform/core/execution_engine/order_submission_guard.py:100-107 (failure_count 加算後の _metrics.inc_snapshot_persistence_failure())",
+        "trading_platform/main.py:111-121 (注入対象: _fp_mod, _cb_mod, _ptrc_mod, _bb_mod, _cf_mod, _sr_mod, _loader_mod — order_submission_guard なし)",
+        "trading_platform/core/unified_runner/runner.py:387-397 (注入対象: 同上 — order_submission_guard なし)",
+        "trading_platform/core/monitoring/metrics.py:164-167 (fx_snapshot_persistence_failures カウンタ定義)"
+      ],
+      "reproduction": "PaperBroker でも SnapshotWriter.write_or_raise が SnapshotPersistenceError を上げる状況 (例: snapshot_log_path 親ディレクトリの権限剥奪) を作り、submit_with_guard を実行。Guard.failure_count は加算されるが Prometheus registry には `fx_snapshot_persistence_failures_total` が 0 のまま。",
+      "suggested_fix": "main.py:111-118 と runner.py:387-395 の注入ループに `from trading_platform.core.execution_engine import order_submission_guard as _osg_mod` を追加し、_osg_mod を for loop に含める。同時に AST メタテスト (test_metrics_collector_injection_coverage 等) で『SnapshotWriter / OrderSubmissionGuard を経由するモジュールは全て注入対象』を構造的に強制する。",
+      "regression_of": "DM-204 / DM-F-029 (主要モジュールの一括注入で同型対応済み、本モジュールのみ漏れ)"
+    },
+    {
+      "id": "PA-302",
+      "severity": "high",
+      "area": "async",
+      "title": "シグナルハンドラ二重登録 (run_unified.py signal.signal が runner.run() の loop.add_signal_handler で Linux 限定上書き)",
+      "description": "scripts/run_unified.py:185-193 で `signal.signal(SIGINT/SIGTERM, _shutdown_handler)` を登録した直後、async_main → runner.run() に入る。runner.py:1452-1456 で `if sys.platform != \"win32\":` の場合 `loop.add_signal_handler(sig, self._request_shutdown)` を**上書き登録**する。同じ runner._request_shutdown を呼ぶ点では結果同じだが、(a) Linux でだけ上書きが効く非対称、(b) run_unified.py の _shutdown_handler はクロージャで `runner` を保持しており、将来 run_unified.py 側に PID file クリーンアップ等の前処理を入れた場合に Linux で skip される構造的死角、(c) Windows では signal.signal が残るが Linux では loop.add_signal_handler に切り替わるため、シグナル受信時のスレッディングセマンティクスが OS 間で異なる (Windows: メインスレッド同期 / Linux: イベントループ via writer fd) という潜在的な再入挙動の OS 差。M-PLAT-5 (PR14) で「signal.signal に統一」と main.py:1284-1287 にコメントがあるのに runner.py だけ古い実装が残存。",
+      "evidence": [
+        "scripts/run_unified.py:181-193 (signal.signal(sig_num, _shutdown_handler))",
+        "trading_platform/core/unified_runner/runner.py:1452-1456 (if sys.platform != 'win32': loop.add_signal_handler(sig, self._request_shutdown))",
+        "trading_platform/main.py:1284-1300 (M-PLAT-5 で signal.signal に統一済みコメント — runner.py だけ未追従)"
+      ],
+      "reproduction": "Linux ホストで `python scripts/run_unified.py` を起動 → ループに入った後 (runner.run() の add_signal_handler 実行後) に SIGTERM を送る。run_unified.py の _shutdown_handler は呼ばれず、runner._request_shutdown が直接呼ばれる。run_unified.py:189 のハンドラ参照を保持しても呼び出されない。",
+      "suggested_fix": "runner.run() 内の `if sys.platform != 'win32':` ブロックを削除し、シグナルハンドラ登録を呼出側 (run_unified.py / forward_test.py) に一本化する。M-PLAT-5 と整合させ「runner はシグナルを直接 hook しない」契約に揃える。スレッディング差異リスクも解消。",
+      "regression_of": null
+    },
+    {
+      "id": "PA-303",
+      "severity": "medium",
+      "area": "main",
+      "title": "main.py LIVE 経路で StrategyLoadError が握りつぶされ live_strategy_rejected_by_gate イベントが発火しない (PA-103 escape hatch 時の再発リスク)",
+      "description": "AUDIT-2026-0529-001 / Task C (c2cd46d) で runner.py:533-578 に追加された『LIVE Gate 拒否を専用イベント (live_strategy_rejected_by_gate) として Audit Log + Email Notifier に格上げする』処理が、main.py 側には実装されていない。main.py:428 は load_all_strategies(strategies_dir, live_mode=live_mode) を呼ぶが、loader.py:557 で `except StrategyLoadError as e: result.rejected[strategy_dir.name] = str(e)` で握りつぶされ呼出側 main.py:472-477 では `logger.warning(rejected_count=...)` のみ。EmailNotifier 経路を完全に経由しない。通常 PA-103 fail-closed で main.py の production LIVE 起動は拒否されるが、PLATFORM_ALLOW_MAIN_PRODUCTION_LIVE=1 で escape hatch 通過時にこの dead path が顕在化する (main.py:367-409 で意図的に escape hatch を残してある)。escape hatch 想定が稀でも、AUDIT-2026-0529-001 が解消した『LIVE Gate 拒否 silent skip』が**同 commit で別経路に再導入されたまま**になっている。",
+      "evidence": [
+        "trading_platform/main.py:428 (load_all_strategies(strategies_dir, live_mode=live_mode) を呼ぶが Gate 拒否を再発出しない)",
+        "trading_platform/main.py:472-477 (rejected_count を warning ログするだけ)",
+        "trading_platform/core/strategy_engine/loader.py:553-571 (load_all_strategies は StrategyLoadError を握りつぶし result.rejected dict に詰める)",
+        "trading_platform/core/unified_runner/runner.py:528-578 (Task C で実装した LIVE 専用 RiskAlertEvent + Audit Log 経路 — main.py には未実装)",
+        "trading_platform/main.py:340-409 (PA-103 escape hatch 定義)"
+      ],
+      "reproduction": "(a) ENV=production / OANDA_API_KEY=設定 / PLATFORM_ALLOW_MAIN_PRODUCTION_LIVE=1 で main.py を起動。(b) Gate 未通過の戦略 (gate_results.json overall_passed=False) を strategies/imported/ に置く。(c) ログには warning で rejected_count だけが出る。EmailNotifier 通知も Audit Log の live_strategy_rejected_by_gate エントリも出ない。AUDIT-2026-0529-001 で塞いだはずの silent skip パスが main.py で再生する。",
+      "suggested_fix": "(短期) main.py:428 を load_all_strategies 一括呼びから、strategy_dir ごとの load_strategy 個別ループに置き換え、runner.py:533-578 と同型の LIVE 専用 RiskAlertEvent + Audit Log + log エミットを実装する。(中期) load_all_strategies に optional な `on_live_reject: callable` フックを追加し、main.py / runner.py 両者が共通実装を呼べるようにする。テストで両経路の同型カバレッジを構造的に強制。",
+      "regression_of": "AUDIT-2026-0529-001 Task C (c2cd46d) — runner.py のみ修正で main.py 未対応"
+    },
+    {
+      "id": "PA-304",
+      "severity": "medium",
+      "area": "event_bus",
+      "title": "HeartbeatEvent が dead class (publish も subscribe も無く EventType.HEARTBEAT 経路全体が死んでいる)",
+      "description": "events.py:335-339 で HeartbeatEvent を定義し、protocols / redis_adapter.EVENT_CLASS_MAP:51 で EventType.HEARTBEAT → HeartbeatEvent をマップしているが、grep の結果 publish ・ subscribe どちらも `HeartbeatEvent(` を使う本番コードがゼロ。runner.py の `heartbeat` ログ (line 1481-1488) は構造化ログのみで EventBus 経路を通らない。CLAUDE.md『コンポーネント生存確認イベント』としての設計意図は描かれているが、実装が空。Redis 経由で他プロセスが component 死活を観測できる API 表面はあるのにバックエンドが空 → 監視を作る側 (Prometheus alerting / Grafana dashboard) が「HEARTBEAT が来ない=死亡」ルールを書くと永続偽陽性になる。EmailNotifier 等が将来 subscribe 実装したときに発火源ゼロで dead loop に陥る再発リスクを内包。",
+      "evidence": [
+        "trading_platform/core/models/events.py:335-339 (HeartbeatEvent クラス定義)",
+        "trading_platform/core/event_bus/redis_adapter.py:51 (EVENT_CLASS_MAP に EventType.HEARTBEAT 登録)",
+        "Grep `HeartbeatEvent\\(|subscribe.*HEARTBEAT` 結果: 定義箇所のみで本番 publish/subscribe ゼロ",
+        "trading_platform/core/unified_runner/runner.py:1481-1488 (heartbeat ログ — EventBus は通らない)"
+      ],
+      "reproduction": "grep -r 'HeartbeatEvent(' trading_platform/ tests/ scripts/ → 定義以外マッチなし。grep -r 'subscribe.*HEARTBEAT' → 同様にゼロ。",
+      "suggested_fix": "(A) コンポーネント生存確認を Prometheus gauge (fx_component_last_heartbeat_seconds) に統一し、HeartbeatEvent と EventType.HEARTBEAT を削除する (現状の死活監視は structlog + Prometheus で実用可能)。(B) または runner._poll_cycle と worker._on_bar_event の終端で HeartbeatEvent を publish し、EmailNotifier が `_last_heartbeat_at` 経過秒数で alert を発する経路を実装。両案いずれかを ADR で決めて死蔵を解消。",
+      "regression_of": null
+    },
+    {
+      "id": "PA-305",
+      "severity": "medium",
+      "area": "runner",
+      "title": "_kill_switch_was_active がセット専用で参照ゼロ (dead state) — KS 発動エッジ検知の意図が実装されていない",
+      "description": "runner.py:195 で `self._kill_switch_was_active: bool = False` を持ち、:1548 で `self._kill_switch_was_active = ks_active` を毎 poll で更新するが、grep の結果『**参照箇所がゼロ**』。コメント (line 191-194) は『Kill Switch 発動エッジ検知。halt critical ログ判定のみに使用』『PR36.1 で二重発火防止のため、このフラグで通知を再実装しないこと』とあるが、実装上は何も判定していない (read 元なし)。フィールドそのものが目的を持たない。AUDIT-2026-0529-003 H-01 で KS 発動経路に self._shutdown_requested = True 設定が追加 (line 1560) されたため、kill_switch_was_active による状態保持の役目すら無くなった。dead state は将来の改修で『参照箇所がないから消して良い』と判断されて消されると、二重発火防止のセーフティネット (コメントが警告する内容) の根拠が失われる。",
+      "evidence": [
+        "trading_platform/core/unified_runner/runner.py:195 (self._kill_switch_was_active: bool = False)",
+        "trading_platform/core/unified_runner/runner.py:1548 (代入のみ — self._kill_switch_was_active = ks_active)",
+        "Grep _kill_switch_was_active 結果: 3 hits 全て同ファイル内で定義+コメント+代入のみ、参照ゼロ"
+      ],
+      "reproduction": "grep -rn '_kill_switch_was_active' trading_platform/ tests/ scripts/ で参照 (read) を確認。読取箇所がゼロ。",
+      "suggested_fix": "(A) 本フィールドと line 1548 の代入を削除し、二重発火防止の根拠コメントを GlobalRiskSupervisor._dispatch_alert / _activate_kill_switch の docstring に移植する。(B) もしくは『初回 active 立ち上がりエッジで何か追加処理する』設計を完成させる (例: critical Email を 1 回だけ送る等)。dead state のまま放置しない。",
+      "regression_of": "AUDIT-2026-0529-003 H-01 (KS 発動経路の構造変更で原意図が部分的に蒸発)"
+    },
+    {
+      "id": "PA-306",
+      "severity": "medium",
+      "area": "state_store",
+      "title": "main.py 経路の StateStore は **常に InMemoryBackend** で永続化不能 (production は起動拒否されるが dev/staging では『書いた気』だけのサイレント no-op)",
+      "description": "main.py:620 `self._state_store = StateStore()` は backend 引数なし → redis_store.py:135 で `InMemoryBackend()` がデフォルト。main.py:613-619 で `state_backend == 'redis'` なら RuntimeError を投げる (Stage A の fail-loud)。settings._enforce_production_state_backend で production+memory は拒否される。よって production は起動しない。**しかし dev/staging では state_backend='memory' で起動可能** + コードは StateStore.save_position / save_order / save_account_risk_state を呼ぶ → InMemoryBackend のプロセス内 dict に書くだけ → プロセス停止で全消失。CoreCheck (test, demo) では『state_store.save_* が呼ばれて成功している』ように見えるため、Stage B (AioRedisBackend) 実装時に save 周りの不変条件が緩んでいてもテストが緑になり続ける false-green 死角。さらに main.py:1207 `platform._health.check_all()` から見える state_store の健全性指標もない (state_store_prober が未登録)。",
+      "evidence": [
+        "trading_platform/main.py:600-620 (StateStore 構築、backend 引数なし)",
+        "trading_platform/data/state_store/redis_store.py:131-135 (def __init__(self, backend=None): self._backend = backend or InMemoryBackend())",
+        "trading_platform/config/settings.py:191-201 (state_backend デフォルト 'memory')",
+        "trading_platform/main.py:613-619 (state_backend == 'redis' なら RuntimeError = Stage B 未実装の明示)"
+      ],
+      "reproduction": "ENV=staging で main.py を起動 → InMemoryBackend が選ばれる。order を1件発注 → save_order が呼ばれ Memory dict に入る → プロセス再起動 → load_all_orders は 0 件。`logger.warning('RE-001: 状態復元 audit log', orders_recovered=0, ...)` が出るが『そもそも書けていなかった』と区別不能。",
+      "suggested_fix": "(A) PA-R2-006 Stage B (AioRedisBackend 実装) を優先実装し state_backend='redis' を staging で使える状態にする。(B) 短期: dev/staging で InMemoryBackend を選択した場合は initialize() で CRITICAL ログ + main.py の get_status() レスポンスに `state_persistence=ephemeral` を必ず出す。(C) HealthChecker に state_store_prober (例: 起動時 round-trip テスト) を登録し、health/detail で persistent/ephemeral を露出する。",
+      "regression_of": null
+    },
+    {
+      "id": "PA-307",
+      "severity": "medium",
+      "area": "runner",
+      "title": "main.py と runner.py の StrategyWorker / StrategySlot 二重実装が非対称な機能セットを持つ (発注経路、特徴量、保護機能が乖離)",
+      "description": "main.py は StrategyWorker (worker.py) + ExecutionCoordinator (coordinator.py) を使用、runner.py は StrategySlot (strategy_slot.py) を直接使用、Coordinator は使わない (grep ExecutionCoordinator パス: runner.py に 0 hits)。両者は SIGNAL→ORDER→FILL 経路が**完全に分かれる別実装**で、同じ ATLAS 戦略を実行しても (a) StrategyWorker は generate_signal を asyncio.wait_for(GENERATE_SIGNAL_TIMEOUT_SEC=0.1) で保護するが、StrategySlot の on_bar 経路は同等の timeout 保護があるか別ロジック (要さらなる確認)、(b) main.py 経路では aux_timeframes バー注入は worker._process_aux_bar 経由、runner.py 経路では runner._aux_instrument_slots → slot.on_aux_bar 経由で別実装、(c) main.py は OrderSubmissionGuard を Coordinator 内で新規構築 (coordinator.py:107) するが runner.py はインスタンスを共有 (runner.py:449 → slot.order_guard で同一 instance)、(d) main.py の OrderManager / FillProcessor / Coordinator は singleton だが runner.py の各 StrategySlot は独自の OrderManager / BrokerGateway を保持 (KS halt の `for slot in self._slots: slot.gateway.halt()` から判明)。**二重実装の維持コストが高く** (REV-9 H-PLAT-4 で『将来 Coordinator に委譲』とコメントがあるが未実装)、main.py が dev/staging でのみ動く dead path 化している現状で、AUDIT-2026-0529-001 Task C のような『LIVE 経路の重要修正』を毎回両方に施す必要があるが、PA-303 のように実際には片方しか修正されない事象が再発している。",
+      "evidence": [
+        "trading_platform/main.py:43, 655-672 (StrategyWorker と ExecutionCoordinator を構築)",
+        "trading_platform/core/unified_runner/runner.py:55-58, 697-710 (StrategySlot を直接構築、ExecutionCoordinator なし)",
+        "trading_platform/core/execution_engine/coordinator.py:107 (self._order_guard = OrderSubmissionGuard(snapshot_writer) — Coordinator 内で新規)",
+        "trading_platform/core/unified_runner/runner.py:443-449, 705 (シングルトン OrderSubmissionGuard を全 slot で共有)",
+        "trading_platform/core/strategy_engine/worker.py:336-346 (asyncio.wait_for で generate_signal を 0.1s 保護)",
+        "trading_platform/core/execution_engine/order_submission_guard.py:3-6 (REV-9 H-PLAT-4 整合: 『X-1 中期で StrategySlot 削除 (Coordinator 委譲) されても本 Guard は残る』 = 統合方針はあるが未実施)"
+      ],
+      "reproduction": "両経路を SIGNAL→FILL までトレースし、各段階で呼ばれるメソッドの集合と引数型を比較。worker.py / strategy_slot.py の on_bar / on_aux_bar の処理パスが非対称であることを確認。",
+      "suggested_fix": "(A) ADR-XXXX として StrategyWorker と StrategySlot の統合方針を決定 (Coordinator 経由に一本化、もしくは StrategySlot 一本化)。(B) 短期で配線同型性テスト (test_main_vs_runner_wiring_parity) を AST メタテストに追加し、DI 注入対象モジュール集合・purchase 経路の主要ステップ・Audit/Email 配線の片方欠落を構造的に検出。AUDIT-2026-0525-002 で『main.py vs runner.py 配線非対称』が根因として明示されているため、二度と同型再発させない構造を組む。",
+      "regression_of": "AUDIT-2026-0525-002 (main.py vs runner.py 二重実装の運用インフラ配線漏れ) — 根本未解消"
+    },
+    {
+      "id": "PA-308",
+      "severity": "low",
+      "area": "main",
+      "title": "main.py の戦略一括 ratio 配分が Gate 拒否カウントを除外しない (Portfolio Manager 配分が稀に >1.0)",
+      "description": "main.py:455-457 で `n_strategies = len(load_result.loaded); ratio = 1.0 / n_strategies if n_strategies > 0 else 1.0` を毎ループ計算し、`self._portfolio_manager.set_allocation(loaded.strategy_id, ratio)` を呼ぶ。`n_strategies` は loaded 件数で固定だが、`for loaded in load_result.loaded` ループ内で個別の initialize_strategy/StrategyWorker 構築が例外で失敗した戦略は self._strategies_rejected に追加され self._workers には登録されない (main.py:464-470)。つまり portfolio_manager の set_allocation は **失敗戦略にも均等 ratio を割り当ててしまう** = 配分合計 = 1.0 (失敗ぶんも含めた均等)。失敗が多いと実稼働 worker の合計 ratio < 1.0 → 資金が遊ぶ。逆に、loaded 段階での失敗は load_result.rejected に既に分類されてから来る (loader.py で握りつぶし済み) ため `for loaded in load_result.loaded` 入口時点で n_strategies は『loaded only』。よって配分合計が 1.0 を超える事象は起きないが、`initialize_strategy` 例外時に rejected dict には追加されるが set_allocation は **already called** という順序問題は起こりうる (line 457 が line 464 except より前)。配分された ratio が dangling のまま残る。",
+      "evidence": [
+        "trading_platform/main.py:454-470 (set_allocation → 例外時に rejected 入り、set_allocation の reverse なし)"
+      ],
+      "reproduction": "戦略 5 件 (A-E) のうち A,B,C は initialize_strategy 成功、D で例外、E で成功 → ratio=0.2 を A,B,C,D,E 全員に set_allocation するが、self._workers は A,B,C,E の 4 件のみ。portfolio_manager は D の 0.2 を抱え続ける。",
+      "suggested_fix": "set_allocation 呼出を初期化成功確定後に移動する (try block の末尾)。または initialize_strategy が失敗したら portfolio_manager.remove_allocation(strategy_id) で取り消す。ratio 計算自体を self._workers の長さで実行直前にやり直す方が確実。",
+      "regression_of": null
+    },
+    {
+      "id": "PA-309",
+      "severity": "low",
+      "area": "async",
+      "title": "main.py の `_refresh_balance_from_broker` が coordinator._account_balance を private 属性経由で書き換え (encapsulation 違反 + race condition)",
+      "description": "main.py:192-193 で `if self._coordinator is not None: self._coordinator._account_balance = balance` と private 属性を**外から直接代入**する。coordinator.py 側にこの代入を許容する setter は無く、Coordinator 内部の他フィールド (e.g., used_margin 計算) や PTRC が `_account_balance` を参照する経路があれば、書き換え中に PTRC.evaluate が走るとミックスドステートで判定する潜在的な race。さらに `_balance_refresh_loop` はバックグラウンドタスクで `_refresh_balance_from_broker` を呼ぶため、coordinator が SIGNAL 処理中（同期コードブロック内）でなければ衝突しないが、asyncio スケジューラのコンテキストスイッチタイミングで PTRC の途中の `_account_balance` 参照と入れ替わる可能性。",
+      "evidence": [
+        "trading_platform/main.py:184-204 (_refresh_balance_from_broker)",
+        "trading_platform/main.py:192-193 (self._coordinator._account_balance = balance — private 直書き)",
+        "trading_platform/main.py:968-975 (_balance_refresh_task を asyncio.create_task でバックグラウンド起動)"
+      ],
+      "reproduction": "Coordinator 内で _account_balance を read する箇所 (PTRC margin check 等) と _balance_refresh_loop の代入を同時実行させ、Coordinator が内部で計算途中に値が変わる observable シナリオを構築 (pytest-asyncio で `asyncio.gather(coordinator.process_signal(...), platform._refresh_balance_from_broker())`)。",
+      "suggested_fix": "Coordinator に `set_account_balance(value: float)` 公開メソッドを追加し、内部で必要な再計算を atomic に行う (or asyncio.Lock で保護)。同様に PortfolioManager.total_balance も setter 経由に統一する。CLAUDE.md『dict 直接受渡し禁止』と同方針で、private 属性の外部代入も禁止する命名規約を導入。",
+      "regression_of": null
+    },
+    {
+      "id": "PA-310",
+      "severity": "low",
+      "area": "config",
+      "title": "settings.PlatformSettings の field 名と環境変数名のキャッシング非対称 (case_sensitive=False + 一部 validation_alias 混在)",
+      "description": "settings.py:311-315 で `case_sensitive: False` を指定しているが、skip_state_recovery のみ `validation_alias=\"PLATFORM_SKIP_STATE_RECOVERY\"` を明示 (line 181)。他のフィールドは Pydantic Settings の自動 case-insensitive lookup に依存。これにより `OANDA_API_KEY` と `oanda_api_key` どちらの環境変数も拾われる挙動になるが、`PLATFORM_SKIP_STATE_RECOVERY` のみ alias 必須で他は不要、という非対称が運用者に分かりにくい。さらに main.py:344 で `_ALLOW_PRODUCTION_ENV_VAR: str = \"PLATFORM_ALLOW_MAIN_PRODUCTION_LIVE\"` を `os.environ.get()` で直接読み込む (settings ではない) と、env-var の優先順位が一部 main.py / 一部 settings / 一部 alias と 3 経路に散在。複数環境間で `.env` ファイルと CLI/env-var の上書き優先順位がドキュメント外で誤運用される潜在リスク。",
+      "evidence": [
+        "trading_platform/config/settings.py:179-189 (skip_state_recovery が validation_alias 必須)",
+        "trading_platform/config/settings.py:311-315 (case_sensitive=False)",
+        "trading_platform/main.py:344, 375 (PLATFORM_ALLOW_MAIN_PRODUCTION_LIVE は settings 外で os.environ 直読み)",
+        "scripts/run_unified.py:177 (FTS_METRICS_PORT も os.environ 直読み)"
+      ],
+      "reproduction": "コードベース内の `os.environ.get(`、`os.getenv(` を grep して PlatformSettings 経由を経ない env-var read 箇所を列挙 (run_unified.py / main.py / runner.py に複数存在)。",
+      "suggested_fix": "(A) 全 env-var を PlatformSettings に寄せ、validation_alias を必須化または PlatformSettings 経由のみ許容する規約を ADR 化。(B) PLATFORM_ALLOW_MAIN_PRODUCTION_LIVE と FTS_METRICS_PORT も PlatformSettings に追加。(C) `os.environ` を直読みする箇所に test_no_direct_os_environ_outside_settings AST メタテストを追加。",
+      "regression_of": null
+    },
+    {
+      "id": "PA-311",
+      "severity": "low",
+      "area": "state_store",
+      "title": "StateManager.append_jsonl が fsync を行わず crash 時に shutdown.reason が末尾欠損する潜在リスク",
+      "description": "state_manager.py:233-256 の `append_jsonl` は `with open(self._jsonl_path, 'a', encoding='utf-8') as f: f.write(line + '\\n')` のみ。os.fsync / flush 呼出しなし。AUDIT-2026-0529-001 で導入された runner_shutdown の reason 記録 (runner.py:1751-1756) も同経路を通る。OS バッファに書いたままプロセス SIGKILL → 直前 line が欠損する可能性。MEMORY.md にある『parity.yml CI のエラー多発』のような短期再起動が連続するシナリオで、reason 欠落が再発する死角。append-only ファイルは個別 write は atomic だがそれは『書けた場合』の話で、buffer flush 前に kill されると消える。",
+      "evidence": [
+        "trading_platform/core/unified_runner/state_manager.py:233-256 (append_jsonl、fsync なし)",
+        "trading_platform/core/unified_runner/runner.py:1751-1756 (shutdown reason の append_jsonl 呼出 — fsync 経路に乗れていない)"
+      ],
+      "reproduction": "(a) runner を起動 → shutdown フローを開始させる (b) append_jsonl の `f.write` 直後 (with block 抜ける前) に SIGKILL を打つ (kill -9 PID)。reason エントリが unified_runner.jsonl に残らない可能性。",
+      "suggested_fix": "append_jsonl で `with open(..., 'a') as f: f.write(line+'\\n'); f.flush(); os.fsync(f.fileno())` に変更。特に shutdown reason 記録のような『落ちる直前に書く』用途では fsync 必須。save_strategy_state は既に mkstemp+os.replace で OK だが、JSONL append もカバレッジに含める。",
+      "regression_of": "AUDIT-2026-0529-001 / Task B (shutdown reason 付与) — 部分対応"
+    },
+    {
+      "id": "PA-312",
+      "severity": "low",
+      "area": "event_bus",
+      "title": "InMemoryEventBus.publish が _running=False 時にイベントを silent drop (停止中の正当な late publish を error ではなく warn 1 行で捨てる)",
+      "description": "memory_adapter.py:94-96 `if not self._running: logger.warning('Event Bus未起動状態でpublish', event_type=event.event_type); return`。redis_adapter.py:215-234 では Redis 未接続時に `_dispatch_local` でローカルハンドラに必ず配信するフォールバックがあるのに、InMemoryEventBus は stop 後 publish は warning ログ 1 行で event を **完全破棄**。stop() → 直後にどこかのタスクが late SIGNAL を投げる、というケースで silently 消失する。SIGNAL/ORDER/FILL の場合は監査要件上『どこに行ったか追跡できない』状態。FTS-PA-15 で in-flight drain は実装したが、drain 中に新規 publish された分が drop されることへの対処はない。",
+      "evidence": [
+        "trading_platform/core/event_bus/memory_adapter.py:94-96 (停止中 publish の silent drop)",
+        "trading_platform/core/event_bus/redis_adapter.py:215-234 (Redis 経路は Redis 未接続でも _dispatch_local でローカル配信)"
+      ],
+      "reproduction": "テスト: bus.start() → bus.stop() → bus.publish(SignalEvent(...)) → bus.get_event_log() に SignalEvent が含まれていない。assert で確認可能。",
+      "suggested_fix": "(A) stop 中 publish は WARNING の代わりに ERROR ログ + イベントタイプ別 metrics inc (例: fx_event_bus_published_after_stop_total) で可視化。(B) 停止後 publish を完全に拒否する場合は ValueError を raise し、呼出元が必ず気づくようにする (silent drop 禁止)。(C) FillEvent 等の不可逆イベントは強制的に _event_log に書いてから drop し、運用者が後追いできる証跡を残す。",
+      "regression_of": null
+    }
+  ]
+}

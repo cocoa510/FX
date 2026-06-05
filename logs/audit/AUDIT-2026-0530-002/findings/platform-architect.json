@@ -1,0 +1,158 @@
+{
+  "agent": "platform-architect",
+  "scope": "FTS アーキテクチャ (commit eccab9a 事後検証 + 新規)",
+  "audit_id": "AUDIT-2026-0530-002",
+  "fts_commit": "eccab9a (HEAD: 9f605e0)",
+  "files_inspected": [
+    "trading_platform/main.py",
+    "trading_platform/core/monitoring/email_notifier.py",
+    "trading_platform/core/event_bus/memory_adapter.py",
+    "trading_platform/core/event_bus/redis_adapter.py",
+    "trading_platform/core/unified_runner/runner.py",
+    "trading_platform/core/strategy_engine/loader.py",
+    "trading_platform/forward_test.py",
+    "tests/integration/test_pa401_main_eventbus_startup_order.py",
+    "tests/integration/test_pa412_escape_hatch_warning.py",
+    "tests/integration/test_graceful_shutdown.py"
+  ],
+  "post_fix_verification": {
+    "PA-401_helper": "concerns: 4 件 (重大1+中2+軽1) — PA-501 (_strategies_metadata 参照切れ post_fix_defect / 重大), PA-502 (race protection 欠如 / 中), PA-503 (rollback 後フラグリセット欠如 / 中), PA-504 (getattr 防御コードが test 都合の production 汚染 / 設計smell)",
+    "PA-412_escape_hatch_alert": "concerns: 2 件 — PA-505 (_assert_* メソッド名と隠れた flag 副作用の矛盾 / 設計smell), PA-506 (_LIVE_ANOMALY_LABELS に platform_escape_hatch_active 未登録で件名が誤誘導『Live 異常』に倒れる / 中)",
+    "phase_4_5_BLOCKING_dispatcher": "OK (dispatcher 分岐自体は正しく追加され silent drop は確実に解消)。throttle 0.0 の挙動は数学的に未登録と等価で問題なし。ただし PA-506 によりメール本文/件名が escape_hatch 用にローカライズされておらず、運用者の状況認識を損なう副作用が残る"
+  },
+  "summary": {
+    "post_fix_defect": 2,
+    "new_high": 0,
+    "new_medium": 3,
+    "new_low": 2,
+    "design_smell": 2,
+    "total_findings": 7
+  },
+  "findings": [
+    {
+      "id": "PA-501",
+      "severity": "high",
+      "area": "main.py / EmailNotifier 早期生成パス",
+      "title": "PA-401 helper が EmailNotifier に空 dict を渡すと strategies_metadata の参照が切断され、以後の決済/アラートメールから display_name / direction_bias / hypothesis 等が永続的に欠落する",
+      "description": "main.py:213-278 `_ensure_eventbus_and_notifier_started()` は initialize の冒頭 (escape hatch ブロック / 各 LIVE Gate 拒否反復) で呼ばれる。この時点で `self._strategies_metadata` はまだ空 dict (戦略ロード loop は line 672 以降)。helper は line 259 で `strategies_metadata=self._strategies_metadata` を渡すが、EmailNotifier 側 (email_notifier.py:126-128) は `self._strategies_metadata = strategies_metadata or {}` と truthy 判定を行うため、空 dict (`{}`) は falsy → 右オペランドで新規 `{}` を生成し、main 側 dict と参照が切れる。その後 main.py:691 で `self._strategies_metadata[loaded.strategy_id] = ...` を埋めても EmailNotifier が保持するのは別 dict なので反映されない。結果として escape_hatch / Gate 拒否経路を踏んだセッションでは、決済通知 (`_build_fill_message` line 477: `self._strategies_metadata.get(event.strategy_id, {})`) や RiskAlert メールが strategy_id 以外のメタデータをすべて `'-'` と表示し続ける。helper の docstring (line 251-252) は『dict 参照渡しで初期化後の追加も反映される設計』と明記しているが、実装はその設計を満たしていない。__init__.py 経路 (line 994) では Gate 拒否が無ければ EmailNotifier 生成は戦略ロード後なので dict 非空 → truthy → 参照保たれるため、本不具合は今回の helper 経路のみで顕在化する真の post_fix_defect。",
+      "evidence": [
+        "trading_platform/main.py:259",
+        "trading_platform/main.py:251-252 (docstring の意図)",
+        "trading_platform/main.py:691 (後段の populate)",
+        "trading_platform/core/monitoring/email_notifier.py:126-128 (or {} で参照切断)",
+        "trading_platform/core/monitoring/email_notifier.py:477 (_build_fill_message が metadata 参照)"
+      ],
+      "reproduction": "1) `PLATFORM_ALLOW_MAIN_PRODUCTION_LIVE=1` で TradingPlatform.initialize() を実行 (escape hatch 経由) → helper が空 dict 段階で EmailNotifier を生成。2) initialize 後に戦略を 1 件以上ロード成功させる。3) FillEvent を publish。4) 送信メール本文の『display_name』『direction_bias』『hypothesis』『timeframe』『strategy_type』が全て `'-'` になる。同等再現: pytest 形式で `EmailNotifier(strategies_metadata={})` 生成→外部 dict に key 追加→`notifier._strategies_metadata.get(key)` が None を返すことで `is not` 検証可能 (`id(notifier._strategies_metadata) != id(passed_dict)`)。",
+      "suggested_fix": "(a) EmailNotifier.__init__ の `strategies_metadata or {}` を `strategies_metadata if strategies_metadata is not None else {}` に変更し、空 dict も参照保持する (root cause 修正、影響範囲最小)。(b) もしくは helper 側で main.py 内『self._strategies_metadata は **永続的に同一インスタンス**であること』を契約化し、空でも `dict(self._strategies_metadata)` ではなく直接渡しを徹底するテスト (id 比較) を追加する。test_pa401_main_eventbus_startup_order.py に metadata 反映の回帰テストが無いため併せて追加する。",
+      "regression_of": "PA-401 修正で新規に出現 (元の EmailNotifier 経路 line 994 では Gate 拒否が無ければ常に dict 非空で参照が保たれていた)",
+      "post_fix_defect": true
+    },
+    {
+      "id": "PA-502",
+      "severity": "medium",
+      "area": "main.py / _ensure_eventbus_and_notifier_started",
+      "title": "_ensure_eventbus_and_notifier_started のフラグ更新が non-atomic で、将来の並行呼び出しに対して二重 start / 二重 subscribe を防げない",
+      "description": "main.py:235-269 のフラグ check-then-set は asyncio の協調マルチタスク前提で書かれているが、その間に `await self._event_bus.start()` / `await self._email_notifier.start()` の suspend point を含むため、概念的には複数 coroutine の同時通過が可能。現状の initialize() は逐次実行のため race は発生しないが、将来 LIVE Gate 拒否のループを `asyncio.gather` で並列化したり、helper を他のサブシステムから呼ぶ拡張が入った瞬間に潜在化する。RedisEventBus.start() は pubsub と listener task を作り直す副作用があるため二重起動で **リスナータスクリーク** が発生する。EmailNotifier.start() は subscribe を 2 回呼びハンドラ重複登録 (同一 FillEvent で重複メール) を招く。helper docstring の『idempotent』の主張に対し実装上の保証が無いことが問題。",
+      "evidence": [
+        "trading_platform/main.py:235",
+        "trading_platform/main.py:266",
+        "trading_platform/main.py:227-232 (docstring の idempotent 主張)",
+        "trading_platform/core/event_bus/redis_adapter.py:147-170 (start は pubsub と listener task を作り直す副作用あり)",
+        "trading_platform/core/monitoring/email_notifier.py:222-223 (start は subscribe を 2 回呼ぶ)"
+      ],
+      "reproduction": "現状の同期 initialize では再現しない (将来劣化リスク)。明示的再現は `asyncio.gather(platform._ensure_eventbus_and_notifier_started(), platform._ensure_eventbus_and_notifier_started())` を Redis アダプタで実行し、listener_task が 2 本 / handlers リストが 2 重になるかを確認することで可能。",
+      "suggested_fix": "`asyncio.Lock` (例えば `self._early_start_lock`) を `__init__` で生成し、helper 全体を `async with self._early_start_lock:` で囲む。これにより未来の並列呼び出しでも idempotent 契約が構造的に保たれる。",
+      "regression_of": null,
+      "post_fix_defect": false
+    },
+    {
+      "id": "PA-503",
+      "severity": "medium",
+      "area": "main.py / start() rollback",
+      "title": "rollback_stop が走った後に _eventbus_started_early / _email_notifier_started が True のまま残り、再 start() 試行を構造的に壊す (stale flag)",
+      "description": "main.py:1144-1264 の start() で _start_step がコンポーネント start 失敗を捕捉すると `_rollback_stop` で停止済みコンポーネントを逆順 stop する。stop 完了後も `_eventbus_started_early=True` / `_email_notifier_started=True` のフラグはリセットされない。一方 EventBus / EmailNotifier の実体は stop で `_running=False` / 購読解除済み。この状態で呼出元が start() を再試行すると、ガード分岐 (line 1150 / 1248) は『早期起動済み』と判定し `_eventbus_already_started` no-op を選択 → 実際の start は永遠に呼ばれず EventBus が停止したまま正常起動扱いになる。現状 start() 失敗時の挙動は『再試行せず exit』が一般的なので即時の事故にはならないが、リトライポリシーやプロセスマネージャによる自動再起動と組み合わせると **silent dead bus** という事故クラスに発展しうる。",
+      "evidence": [
+        "trading_platform/main.py:1135-1142 (rollback_stop 呼出)",
+        "trading_platform/main.py:1150",
+        "trading_platform/main.py:1248",
+        "trading_platform/main.py:1341-1346 (_rollback_stop 実装)"
+      ],
+      "reproduction": "1) PlatformSettings(env=research) で escape hatch を有効化し _ensure_eventbus_and_notifier_started を強制呼出。2) coordinator.start を意図的に raise させて start() を失敗→rollback。3) `platform._eventbus_started_early` が True、`platform._event_bus._running` が False であることを確認 (フラグと実体の不一致)。4) もう一度 `await platform.start()` を呼ぶと event_bus.start 経路が skip → InMemoryEventBus._running は False のまま → 後段の publish が memory_adapter:94 で silent drop。",
+      "suggested_fix": "_rollback_stop の最後に `if 'event_bus' のロールバックが含まれていた then self._eventbus_started_early = False`、同様に email_notifier も False に戻す。あるいは helper 内のガードを『フラグ AND 実体の running 状態』のダブルチェックに変更する。",
+      "regression_of": "PA-401 修正で導入されたフラグの未リセット",
+      "post_fix_defect": true
+    },
+    {
+      "id": "PA-504",
+      "severity": "low",
+      "area": "main.py / start() の getattr 防御",
+      "title": "getattr(self, '_eventbus_started_early', False) は test_graceful_shutdown が __init__ をバイパスする都合に合わせた production 側の防御コードで、設計smell かつ実害を隠蔽する",
+      "description": "main.py:1150, 1248 の `getattr(self, '_eventbus_started_early', False)` は『TradingPlatform.__new__ で __init__ をバイパスする test (tests/integration/test_graceful_shutdown.py:31)』のための保険として導入された (line 1149 / 1247 のコメントに明記)。しかし AttributeError を握りつぶす効果しか持たず、本来テスト側で `platform._eventbus_started_early = False` を明示的に初期化すべき。getattr ガードを残すと、将来 __init__ が新規必須属性を増やしても production 側がそれをサイレントに『未設定=False』として扱う劣化に繋がる (テストを通すために production に noise が漏れた典型例)。",
+      "evidence": [
+        "trading_platform/main.py:1149-1150",
+        "trading_platform/main.py:1247-1248",
+        "tests/integration/test_graceful_shutdown.py:31 (__init__ バイパス)"
+      ],
+      "reproduction": "概念的な smell。実害は『__init__ で属性が増えたときに test がエラーで落ちず production 側で fallback 動作して気付かない』というメタ的な劣化耐性問題。",
+      "suggested_fix": "(a) getattr を消し、test_graceful_shutdown 側で `platform._eventbus_started_early = False; platform._email_notifier_started = False` を明示する。(b) もしくは TradingPlatform にテスト用 factory classmethod `for_shutdown_test()` を設け、テストはそれを使う (production __init__ 変更時にもテストが自動追従)。",
+      "regression_of": "PA-401 修正で導入された設計 smell",
+      "post_fix_defect": false
+    },
+    {
+      "id": "PA-505",
+      "severity": "low",
+      "area": "main.py / _assert_not_unsupported_production_live",
+      "title": "_assert_* メソッドが副作用 (self._escape_hatch_active=True) を持つのは命名規約違反 (predicate と side-effect の混在)",
+      "description": "main.py:446-522 `_assert_not_unsupported_production_live` は『assert』命名規約上、副作用なしの不変条件検証であるべき。しかし PA-412 修正で line 484 で `self._escape_hatch_active = True` を立てる副作用が追加された。これは『副作用なし predicate』という暗黙契約を破壊し、コードリーダーがメソッド名から実装を予測できない smell。また `_escape_hatch_active` フィールドは『一度立てて、initialize 内で一度読まれる』 set-once read-once pattern であり、ローカル変数で十分。フィールド化することで instance state が増え、stop/restart サイクルのリセット責務が曖昧になる (PA-503 と関連)。",
+      "evidence": [
+        "trading_platform/main.py:446 (メソッド名)",
+        "trading_platform/main.py:484 (副作用)",
+        "trading_platform/main.py:211 (フィールド宣言)",
+        "trading_platform/main.py:537 (唯一の read 箇所)"
+      ],
+      "reproduction": "コードリビュー観点のみ。動作上の不具合は無い。",
+      "suggested_fix": "(a) メソッド名を `_check_and_arm_escape_hatch` 等に変更し、副作用を命名で明示する。(b) `_escape_hatch_active` フィールドを削除し、`_assert_*` の戻り値 (bool) を initialize() 側で local 変数に受け取って分岐する。",
+      "regression_of": "PA-412 修正で導入",
+      "post_fix_defect": false
+    },
+    {
+      "id": "PA-506",
+      "severity": "medium",
+      "area": "core/monitoring/email_notifier.py / _build_live_anomaly_message reuse",
+      "title": "escape_hatch / entry_rollback_orphan の dispatcher 分岐が _build_live_anomaly_message を再利用するが _LIVE_ANOMALY_LABELS に該当 alert_type が登録されておらず、メール件名が誤誘導的な『Live 異常』に倒れる + 本文文脈も不適切",
+      "description": "email_notifier.py:447-458 で `entry_rollback_orphan` と `escape_hatch` の両 kind が `_build_live_anomaly_message(event)` を共用する設計だが、`_LIVE_ANOMALY_LABELS` (line 814-819) には `account_position_mismatch` / `live_orders_silent` / `exposure_near_cap` / `position_reconcile_mismatch` のみが登録されている。`platform_escape_hatch_active` / `entry_rollback_orphan` を渡すと line 844 `self._LIVE_ANOMALY_LABELS.get(event.alert_type, 'Live 異常')` のデフォルトに落ち、メール件名は `[FX] [WARN/CRITICAL] Live 異常` という極めて非情報的な文字列になる。本文 (line 866) も『Live 取引の異常兆候を能動検知したアラート (INC-2026-0526-001)』『幻エクスポージャー・上限張り付き・Live 沈黙のいずれかが疑われます』と固定文言で記述され、escape_hatch (startup 設定警告) / entry_rollback_orphan (孤児 trade) の文脈と全く一致しない。dispatcher のコメント (line 450) は『subject のみ専用化』と書いてあるが実際には specialization は何もされていない (コメントと実装の食い違い)。運用者は件名で対応緊急度を判断できず、メール本文を読んでも誤った『INC-2026-0526-001 系の幻ポジション』対応手順に誘導される。",
+      "evidence": [
+        "trading_platform/core/monitoring/email_notifier.py:447-458 (dispatcher 分岐, 『subject のみ専用化』コメント)",
+        "trading_platform/core/monitoring/email_notifier.py:814-819 (_LIVE_ANOMALY_LABELS)",
+        "trading_platform/core/monitoring/email_notifier.py:844 (label default fallback)",
+        "trading_platform/core/monitoring/email_notifier.py:866-872 (本文の固定文言)"
+      ],
+      "reproduction": "1) RiskAlertEvent(alert_type='platform_escape_hatch_active', level=CRITICAL, message='PA-412 ...') を publish。2) notifier._build_live_anomaly_message(event) を直接呼んで返り値 subject を確認。3) `[<prefix>] [WARN/CRITICAL] Live 異常` 文字列が返り、PA-412 / escape_hatch の語が件名に含まれないことを確認。同じく entry_rollback_orphan でも再現可能。",
+      "suggested_fix": "(a) `_LIVE_ANOMALY_LABELS` に `'platform_escape_hatch_active': 'main.py 経路 escape hatch 有効化 (本番 LIVE)'` と `'entry_rollback_orphan': '孤児 trade 残存 (entry_rollback 後 close 失敗)'` を追加。(b) より良いのは dispatcher 共用をやめ、`_build_escape_hatch_message` / `_build_entry_rollback_orphan_message` を本文文脈に合わせて新設する (現状の本文文言は INC-2026-0526-001 固定なので運用者に誤った対応手順を提示する)。Phase 4.5 が dispatcher 漏れは捕まえたが builder の意味不一致は見逃した穴。",
+      "regression_of": "PA-412 / RE-402 修正で新規導入",
+      "post_fix_defect": true
+    },
+    {
+      "id": "PA-507",
+      "severity": "low",
+      "area": "main.py / EmailNotifier 部分失敗",
+      "title": "EmailNotifier.start() が 1 つ目の subscribe 後・2 つ目の subscribe 前で raise すると helper のフラグは False のまま残り、後続 start() で同 subscribe が二重登録される潜在経路",
+      "description": "email_notifier.py:222-223 で `subscribe(EventType.FILL, ...)` と `subscribe(EventType.RISK_ALERT, ...)` を逐次 await する。仮に FILL の subscribe が成功して RISK_ALERT の subscribe が raise した場合、helper 側 (main.py:266-278) は except で `_email_notifier_started=True` を立てずに戻る。続いて main.py:1248-1264 の通常 start() フロー (`if not _email_notifier_started: en.start を呼ぶ`) で再度 `en.start()` を呼び、FILL の subscribe が **2 回登録** される (handlers リスト append のみで idempotency 無し)。同一 FillEvent で 2 通メールが届く。現状 EventBus の subscribe 実装は単純な append なので二重登録は無防備。短時間の SMTP-側 issue でも顕在化しうる low~medium 経路。",
+      "evidence": [
+        "trading_platform/core/monitoring/email_notifier.py:222-223 (連続 subscribe)",
+        "trading_platform/core/event_bus/memory_adapter.py:199 (handlers append のみ)",
+        "trading_platform/main.py:266-278 (失敗時にフラグ立てない)"
+      ],
+      "reproduction": "1) EmailNotifier.start を monkeypatch して RISK_ALERT subscribe で raise させる。2) helper を呼ぶ → 例外ログ + フラグ False。3) main start() を呼ぶ → 通常 start が再 subscribe → FILL handler が 2 つ登録される。4) FillEvent を publish → _on_fill が 2 回呼ばれメール 2 通送信。",
+      "suggested_fix": "EmailNotifier.start() を冪等にする (既に subscribe 済みなら no-op で抜ける `_subscribed` ローカルフラグを持つ)。または subscribe を `try/except` で囲み、部分失敗時に既登録ハンドラを unsubscribe して原子化する。",
+      "regression_of": "PA-401 で新規露出した境界ケース",
+      "post_fix_defect": false
+    }
+  ],
+  "design_c_001_platform_view": {
+    "issue": "RE-305 が consecutive_poll_errors の 30 倍数ごとに live_orders_silent を emit する (runner.py:1617-1640) のに対し、live_orders_silent kind は _EMAIL_THROTTLE_INTERVAL_SEC で 43200s (12h) throttle を持つ。30 errors→初報、60 errors→throttled (12h 経過前)、90 errors→throttled、...と escalation cadence が無効化される。",
+    "platform_impact": "platform 側からは『RE-305 の 30 倍数の意図』が email layer で実質 12h cadence に書き換えられていることが見えない。設計者の意図 (escalation) と運用者の体感 (1 通だけ) が乖離する dead-cadence。",
+    "tradeoff": "(a) live_orders_silent を escalation kind と stale kind に分離し、escalation は throttle 短く (例: 30min)、stale は 12h のまま、(b) RE-305 emit 側で escalation 用に別 alert_type を作る、(c) 現状を許容して RE-305 の 30 倍数を 30/60/90 でなく 30/360/720 errors の指数バックオフに変更する。本フィールドは『矛盾の存在』を platform 視点で記録するのみで、修正提案はユーザー判断待ち (DESIGN-C-001 として上位エージェントに委ねる)。",
+    "no_finding_created": "DESIGN-C-001 は別系統で扱うため本 platform-architect では finding 化せず観察記録のみ。"
+  }
+}

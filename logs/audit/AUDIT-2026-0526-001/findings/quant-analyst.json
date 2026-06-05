@@ -1,0 +1,85 @@
+{
+  "agent": "quant-analyst",
+  "summary": "ATLAS の評価指標・Gate・統計計算を実コード読込で監査。Gate 階層化(Tier1/2/3)・Sharpe/Sortino/PF/MaxDD の退化ケース処理・None 伝播は概ね健全で、直近 AUDIT-2026-0525-001/002 の修正退行は確認されなかった。一方、result.json に保存される equity_curve が ~500 点に間引かれているにもかかわらず、result_parser._compute_equity_stats がそこから var_95/cvar_95/efficiency_ratio/tail_ratio を per-bar と称して再計算しており、実際は ~(data_bars/500) バーのリターン単位になっている整合性欠陥を発見(QA-201, high)。これにより weakness_detector の var_95 ルールが L2 戦略の 85% で誤発火し、過去の fill_rate 偽緑バグと同型の誤フィードバックが再発している。加えて WFA の PF 集計が比の平均で統計的に不適切(QA-203)、WFA_MIN_WALKS=10 により L2 適格戦略の 28.5% で WFA 指標が全 None になり Tier2 再正規化で評価対象外化(QA-202)、Lane A pain/ulcer 系も間引き curve 由来で過小評価(QA-204)、consistency_score が暦月でなくバー数チャンクのプラス率(QA-205)、を確認。critical 該当なし。",
+  "findings": [
+    {
+      "id": "QA-201",
+      "severity": "high",
+      "confidence": "high",
+      "area": "metrics/risk-metrics integrity",
+      "title": "var_95/cvar_95/efficiency_ratio/tail_ratio が間引き後 equity_curve(~500点)から per-bar と誤って再計算され、単位がデータ長依存・横断比較不能",
+      "description": "event_simulator.run_layer2 は equity_curve を len>500 のとき step=len//500 で ~503 点に間引いて result.json に保存する(event_simulator.py:2090-2094)。一方 atlas metrics 経路では result_parser.parse_performance_metrics が result.json をロードし、_compute_equity_stats でこの間引き済み equity_curve から returns=diff(eq)/eq[:-1] を取り、var_95/cvar_95/tail_ratio/efficiency_ratio を算出する(result_parser.py:81-93, 334-374)。しかしコメント(result_parser.py:346-348)は per-bar リターン系列のパーセンタイル、timeframe 依存単位(H1=1h, M15=15min)と宣言しているが、実際の 1 区間は data_bars/500 バー(代表例 99452 bars→約198 bars、24863 bars→約49 bars)に相当する。結果、(1) var_95 等は真の per-bar VaR の数十倍の絶対値となり timeframe/データ長で意味がスケールし横断比較不能、(2) これらの値は metrics の risk カテゴリとして報告され戦略選定の判断材料になる、(3) weakness_detector._check_risk_management の var_95<-0.5% ルール(weakness_detector.py:145)が L2 戦略の実測 85.3%(517/606)で発火し fx-strategist へテールリスク対策不十分を恒常的に誤通知する。これは spec_change_log で修正済みの fill_rate 偽緑バグ(分母取り違えで全戦略誤発火)と同型の欠陥であり、その教訓が _compute_equity_stats に適用されていない。Sharpe/Sortino/MaxDD/recovery は event_simulator 側でフル equity から算出され正しい点と非対称。",
+      "evidence": [
+        "atlas/backtest/event_simulator.py:2090-2094",
+        "atlas/backtest/result_parser.py:81-93",
+        "atlas/backtest/result_parser.py:334-374",
+        "atlas/backtest/result_parser.py:346-348",
+        "atlas/analyzer/weakness_detector.py:145",
+        "measured: L2 strategies 606, var_95<-0.5% fires 517 (85.3%)"
+      ],
+      "suggested_fix": "(a) var_95/cvar_95/efficiency_ratio/tail_ratio を event_simulator._compute_metrics 内でフル equity_curve(state.equity_curve)から算出し result.json に first-class フィールドとして保存して result_parser は読むだけにする、または (b) result.json にフル解像度の per-bar returns 統計を別途保存する。最低限、現行コメントの per-bar 表記を間引き区間(data_bars/500 バー)単位に訂正し、weakness_detector の var_95 閾値を再キャリブレーションする。[change:spec] 手順 + ゴールデン更新が必要。"
+    },
+    {
+      "id": "QA-202",
+      "severity": "medium",
+      "confidence": "high",
+      "area": "WFA / robustness gate",
+      "title": "WFA_MIN_WALKS=10 と H4 等の bars_per_month により L2 適格戦略の 28.5% で WFA 指標が全 None 化し、Tier2 再正規化で robustness 評価が実質スキップされる",
+      "description": "_run_walk_forward は oos_bars=oos_months×bars_per_month、min_is_bars=oos_bars×WFA_IS_OOS_RATIO(=2) で walk を列挙し、_aggregate_wfa_walks は len(walks)<WFA_MIN_WALKS(=10) のとき efficiency/oos_pf/is_pf/drift を全 None で返す(event_simulator.py:1560-1571, 1718-1741)。H4 は bars_per_month=180 のため 1 walk に min 3240 bars 必要で step=180 と相まって 3 年級データで 10 walk に届きにくい(過去にも H4 戦略で WFA 算出不可として記録)。実測で L2>=50trades の 578 件中 165 件(28.5%)が wfa_efficiency_ratio=None、155 件が strategy_drift=None。v5.5.0 の _compute_soft_score_redistributed は value=None の component を valid 集合から除外し残り重みを再正規化する(runner.py:624-667)ため、WFA(重み0.10)・OOS/IS・drift が None の戦略は未評価=中立として soft_score が押し上げられる。実測で overall_passed=True の 308 件中 10 件は wfa_efficiency_ratio=None のまま通過。robustness 検証が最も必要な低頻度・長 TF 戦略でロバスト性ゲートが構造的に外れる。",
+      "evidence": [
+        "atlas/backtest/event_simulator.py:1560-1571",
+        "atlas/backtest/event_simulator.py:1714-1741",
+        "atlas/config/defaults.py:304 (WFA_MIN_WALKS=10)",
+        "atlas/backtest/runner.py:624-667 (None redistribution)",
+        "measured: L2>=50 of 578, wfa None 165 (28.5%), passed 308 of which wfa None 10"
+      ],
+      "suggested_fix": "WFA が None になる戦略割合を継続監視し、(a) 長 TF 用に anchored/expanding-window WFA や step 縮小で walk 数を確保する、(b) WFA None 戦略は Tier2 で中立化せず informational に降格しつつ Tier3 に WFA 未測定フラグを明示記録する、のいずれか。少なくとも report 出力で WFA not_measured 件数を区別表示する(3 状態評価と整合)。"
+    },
+    {
+      "id": "QA-203",
+      "severity": "medium",
+      "confidence": "medium",
+      "area": "WFA / OOS-IS ratio statistics",
+      "title": "WFA の oos_profit_factor / is_profit_factor が各 walk PF の単純平均であり、比の平均という統計的に不適切な集計で OOS/IS 比が単一好調 walk に過敏",
+      "description": "_aggregate_wfa_walks は mean_oos_pf=np.mean(oos_pfs)、mean_is_pf=np.mean(is_pfs) を各 walk の PF の単純平均で算出する(event_simulator.py:1614-1622)。PF は gross_profit/gross_loss の比であり、比の算術平均はサンプルサイズや 1 walk の極端値(例: ほぼ無敗 walk で PF=10)に強く引っ張られ、母集団の真の PF(全 walk の gross をプールした比)から系統的に乖離する。この mean_oos_pf / mean_is_pf が _compute_oos_is_ratio(result_parser.py:232-255)で Tier2 の OOS/IS 比 component(重み0.12)に直結する。少数 walk(10〜十数件)では 1 つの好調 OOS walk が比を不当に押し上げ、過適合戦略が OOS/IS スコアを取得しうる。なお oos_pfs は None walk(無敗で PF=None)を除外して平均するため母集団も walk ごとにブレる。",
+      "evidence": [
+        "atlas/backtest/event_simulator.py:1573-1576",
+        "atlas/backtest/event_simulator.py:1614-1622",
+        "atlas/backtest/result_parser.py:232-255",
+        "atlas/backtest/runner.py:942-950 (OOS/IS component weight 0.12)"
+      ],
+      "suggested_fix": "walk 横断の PF は各 walk の gross_profit 合計 / gross_loss 合計(プールドPF)で集計するか、median PF を併用して外れ walk の影響を抑える。[change:spec] となるためゴールデン更新と過去戦略 backfill を伴う。最低限 walk PF の分散/最小値も記録し、平均 PF への過信を防ぐ。"
+    },
+    {
+      "id": "QA-204",
+      "severity": "low",
+      "confidence": "high",
+      "area": "metrics/Lane A risk metrics",
+      "title": "pain_index/ulcer_index/conditional_dd/cvar_99 が間引き後 equity_curve から算出され drawdown 深度・継続を過小評価(max_dd_duration_bars のみ spec で既知化済み)",
+      "description": "Lane A 指標(_compute_lane_a_metrics, result_parser.py:446-557)は equity_curve から running_peak/dd_ratio を求め pain_index/ulcer_index/conditional_dd_p50/90/99/cvar_99 を算出するが、入力は result.json の間引き済み(~500点)equity_curve。間引きにより谷底のバーが脱落し drawdown のピーク深度・継続イベント数を過小評価する。docstring(result_parser.py:441-444)は完全一致を保証しないと注記し、spec_change_log でも max_dd_duration_bars については 500点間引きのためイベント単位と明記済みだが、pain/ulcer/cvar_99 の過小評価方向のバイアスは Gate 非接続(情報メトリクス)である点に救われているのみで、相対比較もデータ長が異なる戦略間では崩れる。QA-201 と同根(間引き curve からのリスク再計算)。",
+      "evidence": [
+        "atlas/backtest/result_parser.py:441-444",
+        "atlas/backtest/result_parser.py:480-523",
+        "atlas/backtest/event_simulator.py:2090-2094",
+        "docs/spec_change_log.md:3203 (max_dd_duration_bars subsampling note)"
+      ],
+      "suggested_fix": "QA-201 と一括で、drawdown 系リスク指標は event_simulator のフル equity から算出し result.json に保存する設計へ統一する。Gate 非接続のため緊急度は低いが、横断比較・FTS 選定で参照する場合はデータ長正規化の注意書きを評価レポートに残す。"
+    },
+    {
+      "id": "QA-205",
+      "severity": "low",
+      "confidence": "medium",
+      "area": "metrics/consistency-score semantics",
+      "title": "consistency_score が暦月のプラス率ではなく timeframe-月バー数で区切った period_N チャンクのプラス率で、timeframe・データ長により分解能が変化",
+      "description": "_compute_metrics の monthly_returns は BARS_PER_MONTH_BY_TIMEFRAME 基準で step を決め period_{start//step} をキーに区切る(event_simulator.py:1492-1506)。これは暦月ではなくバー数チャンクであり、step=min(bars_per_month, len(equity)) かつ最終チャンクが端数になるため、チャンク数=区間数が timeframe とデータ長で変動する。_compute_consistency はこの period_N 群のプラス率を取る(result_parser.py:377-385)。スコアリングでは consistency_score が core 重み 0.15 + quality 乗数(1.05/1.0/0.95)に二重寄与し(scorer.py:98,185-192)、かつ required_metrics の必須項目(scorer.py:118-128)でもある。区間定義がカレンダー月でないため月次一貫性という名目と実体が乖離し、短データ・高 TF 戦略ほど区間数が少なくスコアが粗くなる。",
+      "evidence": [
+        "atlas/backtest/event_simulator.py:1492-1506",
+        "atlas/backtest/result_parser.py:377-385",
+        "atlas/analyzer/scorer.py:98",
+        "atlas/analyzer/scorer.py:118-128",
+        "atlas/analyzer/scorer.py:185-192"
+      ],
+      "suggested_fix": "monthly_returns を実 timestamp の暦月(period→YYYY-MM)でグルーピングするか、consistency_score の定義を等長 N チャンクのプラス率と明示し名称を rolling_period_consistency 等に改める。core と quality への二重寄与の妥当性も再検討。"
+    }
+  ]
+}

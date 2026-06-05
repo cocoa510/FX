@@ -1,0 +1,172 @@
+{
+  "agent": "qa-tester",
+  "scope": "FTS テスト基盤 (commit 9998a7a の 16 新規テスト + 既存変更検証)",
+  "audit_date": "2026-05-30",
+  "post_fix_verification": {
+    "new_tests_quality": "concerns: [QT-401, QT-402, QT-403, QT-404, QT-405]",
+    "existing_tests_side_effects": "concerns: [QT-406, QT-407]"
+  },
+  "findings": [
+    {
+      "id": "QT-401",
+      "severity": "medium",
+      "area": "mocking",
+      "title": "test_pa303: test_live_gate_rejection_publishes_audit_and_event_bus が本番経路を踏まない偽緑 (RE-201 同型)",
+      "description": "test_pa303_main_live_gate_rejection.py の test_live_gate_rejection_publishes_audit_and_event_bus は main.py の TradingPlatform.initialize() を呼ばず、テスト自身が AuditEntry / RiskAlertEvent を構築して MagicMock に渡し、それを assert している。これは RE-201 と同一の構造的偽緑である。main.py の実装に例えば live_strategy_rejected_by_gate の alert_type が誤っていても本テストは合格する。AST ベースの 4 静的テスト（文字列存在確認）は実行パスを検証せず、本テストが唯一の動的検証のつもりで配置されているが実質何も動的検証していない。",
+      "evidence": [
+        "tests/unit/test_pa303_main_live_gate_rejection.py:126-182"
+      ],
+      "reproduction": "main.py の live_strategy_rejected_by_gate 文字列を別の値に変えた状態で pytest test_pa303_main_live_gate_rejection.py::test_live_gate_rejection_publishes_audit_and_event_bus を実行すると、AST テスト（test_main_has_live_strategy_rejected_by_gate_handling）は FAIL するが、当該テスト自体は PASS する。",
+      "suggested_fix": "TradingPlatform.initialize() を pytest.monkeypatch / tmp_path で最小構成（PaperBroker + 意図的 Gate FAIL な偽 strategy_dir）で呼び、実際の LIVE 拒否ルートが event_bus.publish を経由することを統合的に確認するテストへ昇格させる。",
+      "test_blind_spot": "PLATFORM_ALLOW_MAIN_PRODUCTION_LIVE=1 経由で main.py 経路の LIVE Gate 拒否が正しく発火するかどうかは引き続き未検証。",
+      "regression_of": null,
+      "post_fix_defect": false
+    },
+    {
+      "id": "QT-402",
+      "severity": "medium",
+      "area": "injection",
+      "title": "test_de303: 29 回失敗→1 回成功→再度失敗によるアラート再発火シーケンスが未テスト",
+      "description": "test_de303_poll_latest_failure_alert.py の 6 テストは以下を網羅する: (1) 閾値未満 (2) 閾値到達時 1 回発火 (3) 閾値超継続で再発火なし (4) 成功でカウンタリセット (5) event_bus None でクラッシュなし (6) キー分離。しかし「29 回失敗→1 回成功（リセット）→1 回失敗」というシーケンスにおいて、リセット後のカウンタが 1 であることの確認と、それがアラート閾値（30）まで再度到達できる動線が正しく機能するかのテストが存在しない。実装の _reset_poll_failure_state は _poll_alert_active[key]=False もリセットするため、再到達時に再発火するはずだが、このパスは未検証。",
+      "evidence": [
+        "tests/fault/test_de303_poll_latest_failure_alert.py:145-162",
+        "trading_platform/core/unified_runner/data_provider.py:300-310"
+      ],
+      "reproduction": "test_de303_recovery_resets_counter は success=1 回で counter=0 を確認するが、その後さらに 30 回失敗させてアラートが再発火することは検証していない。",
+      "suggested_fix": "test_de303_second_alert_after_recovery テストを追加: 閾値-1 回失敗→1 回成功（alert_active リセット）→再度閾値まで失敗→アラートが合計 2 回発火することを検証する。",
+      "test_blind_spot": "一度回復した後の再障害でアラートが機能するかどうか（本番での真の運用価値）が未検証。",
+      "regression_of": null,
+      "post_fix_defect": false
+    },
+    {
+      "id": "QT-403",
+      "severity": "low",
+      "area": "mocking",
+      "title": "test_re305: _poll_cycle を例外握りつぶし try/except で囲み、アラートが発火したかどうかの判定が不安定",
+      "description": "test_re305_poll_errors_alert.py の全テストが _poll_cycle() 呼び出しを try/except Exception: pass で囲んでいる。これは _poll_cycle の冒頭ガード後の処理（_check_daily_reset 等）が None アクセスで例外を投げた場合にも無条件 pass するため、アラート発火の検証が _poll_cycle の正常実行を前提にしている。実際、runner._risk_supervisor = None / runner._slots = [] を設定しているが、_check_daily_reset に依存する内部状態（_last_daily_reset_date 等）が未初期化の場合に AttributeError が発生し、account_info 失敗 except ブロックに到達する前に通り過ぎてしまう可能性がある。",
+      "evidence": [
+        "tests/unit/test_re305_poll_errors_alert.py:77-82",
+        "tests/unit/test_re305_poll_errors_alert.py:108-113"
+      ],
+      "reproduction": "runner のバージョンアップで _check_daily_reset が新しいフィールドを参照するようになった場合、try/except pass により silent に pass し、captured が空でも assert が見落とされる可能性がある。",
+      "suggested_fix": "except Exception を except AttributeError に限定するか、runner の最小初期化（_last_daily_reset_date 等の必須属性を事前セット）を行ってから _poll_cycle を呼ぶ。もしくは pytest.raises を使わず、_poll_cycle の実行完了後に captured を検証するよりも、_emit_risk_alert のロジックを直接単体テストする。",
+      "test_blind_spot": null,
+      "regression_of": null,
+      "post_fix_defect": false
+    },
+    {
+      "id": "QT-404",
+      "severity": "medium",
+      "area": "mocking",
+      "title": "test_dm302: _ensure_session をモックすることで OANDABroker の実際の HTTP 経路・semaphore・タイムアウト処理を完全にバイパス",
+      "description": "test_dm302_metrics_instrumentation.py の各テストは patch.object(broker, '_ensure_session') で session を差し替え、mock_session.get = MagicMock(return_value=mock_resp) で応答を固定している。これにより _record_api_metric の呼び出しは検証できるが、(1) aiohttp の実際の async context manager protocol を経由しないため、本番では session.get が aiohttp の response object を返すのに対してテストは MagicMock を返しており、_elapsed_ms の計測タイミングが本番と異なる可能性がある。(2) _semaphore（asyncio.Semaphore）を通過しているかどうかも未検証。(3) submit_order / cancel_order は _record_api_metric を呼ぶことのテストが存在しない（get_account_info / get_open_trades / get_candles の 3 メソッドのみ）。",
+      "evidence": [
+        "tests/unit/test_dm302_metrics_instrumentation.py:50-90",
+        "trading_platform/broker/oanda_adapter/client.py:366-373",
+        "trading_platform/broker/oanda_adapter/client.py:495-522"
+      ],
+      "reproduction": "submit_order と cancel_order の _record_api_metric 呼び出し（client.py:373, 500-522）に対応するテストが存在しない。",
+      "suggested_fix": "submit_order と cancel_order に対しても同様のモックテストを追加し、計装の網羅性を高める。また LiveFeatureStore の test_feature_staleness_not_called_for_aux_tf_bar は observe_feature_staleness が H4→H1 の順で追加するが、H1 2 本目で staleness が計測される境界ケースが未検証。",
+      "test_blind_spot": "cancel_order / submit_order の Prometheus 計装が実際に呼ばれているかどうかが完全に未検証。",
+      "regression_of": null,
+      "post_fix_defect": false
+    },
+    {
+      "id": "QT-405",
+      "severity": "low",
+      "area": "fixture",
+      "title": "test_qt308: make_sample_ohlcv を tests.conftest から直接 import しているため、conftest が変更された際の暗黙的結合が強い",
+      "description": "test_qt308_sample_ohlcv_datetime_index.py の冒頭で from tests.conftest import make_sample_ohlcv を直接 import している。conftest.py で make_sample_ohlcv のシグネチャ変更（引数追加・デフォルト値変更等）があった場合にテストが壊れるリスクがある。また sample_ohlcv_df fixture が変更（行数・開始日・freq 変更）された場合、test_sample_ohlcv_df_index_covers_multiple_hours の 'asia_bars.sum() > 0' アサーションが静かに弱体化する可能性がある。より本質的には、これはテストの健全性を保証するためのテストであり、本番コードのバグを検出するテストではないため、fixture の実装変更後に自動で問題を検出する役割を担っている点では設計意図に沿っている。",
+      "evidence": [
+        "tests/unit/test_qt308_sample_ohlcv_datetime_index.py:24"
+      ],
+      "reproduction": "make_sample_ohlcv の start 引数のデフォルト値を '2024-01-15' に変えても test_make_sample_ohlcv_custom_start 以外は影響を受けない（無害だが設計上の依存）。",
+      "suggested_fix": "fixture の構造的テストとしては適切。ただし from tests.conftest import は pytest の conftest 規約の外 (conftest は自動 import) であり、今後の conftest 分割時に import パスが壊れる可能性があるため、make_sample_ohlcv を tests/helpers.py 等の明示的なユーティリティモジュールに移動させることを検討する。",
+      "test_blind_spot": null,
+      "regression_of": null,
+      "post_fix_defect": false
+    },
+    {
+      "id": "QT-406",
+      "severity": "medium",
+      "area": "regression",
+      "title": "test_pr16_data_layer.py の test_check_gap_weekend_friday_to_monday が DE-306 修正後のシナリオ変更により旧 Fri 23:00→Mon 00:00 ケースのカバレッジを失った",
+      "description": "DE-306 修正前の test_check_gap_weekend_friday_to_monday は 'Fri 23:00 UTC → Mon 00:00 UTC' (raw_gap=49h, effective=1h) で PASS を検証していた。DE-306 修正後のコメント（tests/unit/test_pr16_data_layer.py:49-75）によれば、このシナリオは OANDA 市場時間ベースでは Mon 00:00 UTC は OANDA Sun open (22:00 UTC) から 2h 経過であり Sun 22:00 / 23:00 の H1 バー欠落を意味するため FAIL が正解だと説明を変更している。しかし新テストシナリオ（Fri 22:00→Sun 22:00）は旧シナリオと全く異なるため、旧シナリオに依存していた他のコードの退行を検出できなくなった。特に Fri 23:00→Mon 00:00 が effective_gap > 0 かつ max_gap 内に収まるかどうかという境界ケースが未カバー。",
+      "evidence": [
+        "tests/unit/test_pr16_data_layer.py:49-75",
+        "tests/unit/test_de306_weekend_seconds.py:57-72 (test_friday_23_to_monday_00_pass_case)"
+      ],
+      "reproduction": "test_de306_weekend_seconds.py:test_friday_23_to_monday_00_pass_case は weekend_seconds=47h を返すことを検証しているが、test_pr16_data_layer.py 側での end-to-end レベルの同シナリオテストは削除された。",
+      "suggested_fix": "test_pr16_data_layer.py に Fri 23:00 → Mon 00:00 のケースも追加し、DE-306 実装の end-to-end 正確性を複数シナリオで担保する。test_de306_weekend_seconds.py のユニットテストだけでは validate_bar 経由の経路が検証できない。",
+      "test_blind_spot": "Fri 23:00 → Mon 00:00 シナリオで validate_bar が正しく effective_gap=max(0, 2h) = 2h を返し、H1 max_gap (5400s=1.5h) を超えて FAIL になるかどうかが未検証。",
+      "regression_of": null,
+      "post_fix_defect": false
+    },
+    {
+      "id": "QT-407",
+      "severity": "low",
+      "area": "regression",
+      "title": "QT-311/312 統一後、test_platform_e2e_smoke と test_restore_positions_multi_slot の Prometheus 隔離がデフォルト autouse のみに依存し、明示的な隔離意図が失われた",
+      "description": "test_platform_e2e_smoke.py と test_restore_positions_multi_slot.py から独自の _reset_prometheus_registry fixture が削除され、conftest.py の _cleanup_global_prometheus_registry autouse fixture に依存している。QT-311/312 のコメント自体は正確であり、fx_* 接頭辞のコレクターのみを対象とする conftest 実装の方が安全。ただし、もし conftest.py から _cleanup_global_prometheus_registry が削除されたり、autouse=True が外れた場合に、この統合テストが Prometheus 二重登録エラーで壊れても、テスト自身は隔離失敗を自己検出できない。また TradingPlatform が内部で MetricsCollector() を引数なし生成する部分（main.py:104 相当）が、隔離 autouse の fx_* 除去で rescue されているかどうかを確認するメタテストが存在しない。",
+      "evidence": [
+        "tests/integration/test_platform_e2e_smoke.py:17-21",
+        "tests/integration/test_restore_positions_multi_slot.py:41-47",
+        "tests/conftest.py:87-126"
+      ],
+      "reproduction": "conftest.py の _cleanup_global_prometheus_registry を autouse=False に変えた状態で pytest tests/integration/test_platform_e2e_smoke.py を複数回連続実行すると Prometheus 二重登録エラーが再発する（隔離が conftest autouse に完全依存している証拠）。",
+      "suggested_fix": "統合テスト側では隔離の理由をコメントとして残しているが、autouse fixture の削除検知手段がない。test_pr52_code_quality.py 等の AST メタテストに『統合テストで MetricsCollector() を引数なしで直接 new していないこと』のチェックを追加するか、E2E テスト側で isolated_metrics_collector を明示的に使う構造に変更する。",
+      "test_blind_spot": null,
+      "regression_of": null,
+      "post_fix_defect": false
+    },
+    {
+      "id": "QT-408",
+      "severity": "low",
+      "area": "injection",
+      "title": "RE-302 テスト: submit_order / cancel_order / get_trade の同型 BrokerUnavailableError 伝播テストが不在",
+      "description": "test_re302_oanda_timeout_phantom_trade.py は get_open_trades の BrokerUnavailableError 伝播（5 テスト）を検証するが、同じ BrokerGateway が持つ submit_order / cancel_order / get_trade メソッドの例外処理については同型テストが存在しない。RE-302 の修正対象は get_open_trades のみだったが、broker_gateway.py の cancel_order（line 410）は broker 例外をラップせず直接 re-raise しており、BrokerUnavailableError への型変換が行われていない。これは意図的設計かもしれないが、呼び出し元がどの例外型を捕まえるべきかのドキュメントがなく、将来の類似バグのリスクがある。",
+      "evidence": [
+        "trading_platform/core/execution_engine/broker_gateway.py:407-410",
+        "trading_platform/core/execution_engine/broker_gateway.py:460-467",
+        "tests/fault/test_re302_oanda_timeout_phantom_trade.py"
+      ],
+      "reproduction": "cancel_order が ConnectionError を投げた場合、BrokerGateway は BrokerUnavailableError に変換せず ConnectionError をそのまま伝播する（get_open_trades とは例外型が異なる）。",
+      "suggested_fix": "cancel_order / submit_order / get_trade の例外型の扱い方を CLAUDE.md や docstring で明示し、各メソッドの例外伝播ポリシーを統一するかドキュメント化する。テストとして、cancel_order 失敗時に呼び出し元が正しく処理できることを確認する fault injection テストを追加する。",
+      "test_blind_spot": "cancel_order / submit_order が ConnectionError をそのまま伝播する場合に、呼び出し元（StrategySlot）が BrokerUnavailableError 型でキャッチしようとして見逃すケースが未検証。",
+      "regression_of": null,
+      "post_fix_defect": false
+    },
+    {
+      "id": "QT-409",
+      "severity": "low",
+      "area": "parity",
+      "title": "test_de306_weekend_seconds.py の two_weekends_full テストで想定週末カウントが OANDA 市場時間ベースの検証のみ行い DST 変動シナリオを考慮しない",
+      "description": "test_two_weekends_full は 2026-05-25 (Mon) から 2026-06-08 (Mon) で 2 週末 96h を期待しているが、OANDA は UTC 基準で金曜 22:00 close を固定しているため DST は無関係（OANDA は UTC 固定）。これ自体は問題ないが、DataQualityEngine._count_weekend_seconds の実装が UTC 固定であることのテストが UTC 以外のタイムスタンプ（tz-naive 等）を渡した場合の防御的動作を検証していない。tz-naive datetime が渡された場合の AttributeError や誤計算リスクが未テスト。",
+      "evidence": [
+        "tests/unit/test_de306_weekend_seconds.py:119-127",
+        "trading_platform/data/quality/quality_engine.py (実装側の tz 扱い)"
+      ],
+      "reproduction": "DataQualityEngine._count_weekend_seconds に tz-naive datetime を渡した場合の挙動が未検証（tzinfo=None の datetime が混入するバグを検出できない）。",
+      "suggested_fix": "tz-naive datetime が渡された場合に ValueError を raise するか、UTC と仮定して処理するかを明示した上で、該当ケースのテストを追加する。",
+      "test_blind_spot": null,
+      "regression_of": null,
+      "post_fix_defect": false
+    },
+    {
+      "id": "QT-410",
+      "severity": "medium",
+      "area": "injection",
+      "title": "QT-310: asyncio.sleep(0) 2 回によるタスク完了待機が非同期タスクスケジューリングの実装依存で flaky になりうる",
+      "description": "test_qt310_ks_audit_log_failure.py の各テストで asyncio.create_task によって生成される fire-and-forget タスクの完了を await asyncio.sleep(0) + await asyncio.sleep(0)（2 回の yield）で待っている。Python asyncio のイベントループは sleep(0) で 1 回のタスク切り替え機会を与えるが、タスクが内部で複数の await ポイントを持つ場合（例: done_callback が asyncio.gather を呼ぶ等）は 2 回の sleep(0) では不十分で、アサーション時点でタスクが未完了のケースがある。現在の KillSwitch 実装が 1 ステップで完了するのであれば問題ないが、将来の変更で脆弱になる。",
+      "evidence": [
+        "tests/fault/test_qt310_ks_audit_log_failure.py:83-84",
+        "tests/fault/test_qt310_ks_audit_log_failure.py:118-119"
+      ],
+      "reproduction": "KillSwitch._fire_ks_audit() 内の done_callback が複数 await を含む処理を行うように変更されると、test_activate_logs_error_on_audit_failure の logger.error 呼び出し検出が間欠的に失敗する。",
+      "suggested_fix": "asyncio.sleep(0) の代わりに asyncio.sleep(0.01) を使うか、asyncio.gather(*asyncio.all_tasks()) でタスク完了を明示的に待つか、KillSwitch テスト専用の同期フックを提供してタスク完了を確実に待てるようにする。",
+      "test_blind_spot": null,
+      "regression_of": null,
+      "post_fix_defect": false
+    }
+  ]
+}

@@ -1,0 +1,77 @@
+{
+  "agent": "data-engineer",
+  "session": "AUDIT-2026-0525-002",
+  "mode": "dry-run (調査のみ)",
+  "parity_test_result": {
+    "command": ".venv/Scripts/python.exe -m pytest tests/parity/ -q",
+    "result": "65 passed in 369.82s (0:06:09)",
+    "regression": false,
+    "note": "本日の修正コミット (61c1f86 / 77472af) 適用後も parity 全 65 件 PASS。EWM 系含む全インジケータの BT/Live 数値一致 (許容 1e-10) を再確認。DE-004 で追加された buffer-trim parity 5 件 (shift/macd line/close 系) も含まれる。"
+  },
+  "findings": [
+    {
+      "id": "DE-101",
+      "severity": "high",
+      "area": "data quality wiring / DE-002 fix の有効性",
+      "title": "DataQualityEngine が production 配線に注入されず、DE-002 の forced-publish + RiskAlert 可視化が本番で dead code 化している",
+      "description": "本日の DE-002 (61c1f86) は『品質 FAIL 確定バーを silent drop せず publish 継続し、異常事象を CRITICAL RiskAlertEvent + fx_data_quality_forced_publish_total で必ず可視化する』と謳い、production_impact: yes として medium 確定された。しかし main.py の Live 配線では BarBuilder / CandleFetcher / OANDAStreamReceiver いずれも quality_engine 引数を渡さず None で初期化しており、DataQualityEngine( はリポジトリ内 (trading_platform/) で一度もインスタンス化されない。結果として validate_bar / validate_tick / DE-002 の forced-publish 計上・RiskAlert 発行・forced_publish メトリクスは production 経路で全て実行されない (`if self._quality_engine is not None:` が常に False)。Parity 観点では『FAIL バーも publish 継続』という DE-002 の目的 (= ATLAS BT が全バーを使うのと整合) は素通りで自動達成されてしまうため Parity は守られるが、DE-002 が約束した『確定バー品質 FAIL という異常事象の握りつぶさない可視化』(Data Quality First 原則) は本番で一切機能しない。すなわち DE-002 の fix は単体/結合テストでは正しいが production では無効。これは『Data Quality First』アーキ原則 (CLAUDE.md 原則7) と DE-002 の production_impact 主張の両方に反する配線欠落。前回監査 AUDIT-2026-0525-001 の DE-001〜006 はいずれもこの未配線そのものを指摘していない (quality_engine が注入されている前提で挙動を議論)。",
+      "evidence": [
+        "trading_platform/main.py:318 BarBuilder(...) — quality_engine 引数なし",
+        "trading_platform/main.py:334 CandleFetcher(...) — quality_engine 引数なし",
+        "trading_platform/main.py:459 OANDAStreamReceiver(...) — quality_engine 引数なし",
+        "trading_platform/data/market_data/bar_builder.py:239 `if is_complete and self._quality_engine is not None:` (None なら全 DE-002 ロジックを skip)",
+        "trading_platform/data/market_data/candle_fetcher.py:284 `if self._quality_engine is not None:` (同上)",
+        "trading_platform/data/market_data/stream_receiver.py:380 `if self._quality_engine is not None:` (同上)",
+        "grep `DataQualityEngine(` → trading_platform/ 配下で 0 件 (テストのみ)"
+      ],
+      "suggested_fix": "main.py 初期化で DataQualityConfig (本番は spread_check_mode='disabled' のまま等) から DataQualityEngine を 1 つ生成し、BarBuilder / CandleFetcher / OANDAStreamReceiver に注入する。BarBuilder(確定モード時)・CandleFetcher と StreamReceiver(tick) で _last_bars/_last_ticks 状態が混線しないよう、bar 経路と tick 経路で別インスタンスを用いる (validate_bar と validate_tick は別 dict を更新するため同一インスタンスでも実害は低いが、bar を BarBuilder と CandleFetcher の双方が共有すると _last_bars がインターリーブして price_jump 判定が乱れるため、確定バー発行は実質 CandleFetcher 1 系統に統一されている前提で 1 インスタンスとし、BarBuilder は intra-bar (is_complete=False) なので quality 検証対象外で問題ない)。配線後に DE-002 の forced-publish/RiskAlert が production で発火することを統合テストで確認する。",
+      "category": "incomplete_fix"
+    },
+    {
+      "id": "DE-102",
+      "severity": "low",
+      "area": "data quality / quality engine 共有インスタンスの状態混線リスク (将来の配線時)",
+      "title": "DataQualityEngine.validate_bar は instrument 単位の _last_bars をステートフルに保持しており、BarBuilder と CandleFetcher が同一インスタンスを共有すると price_jump/timestamp_order 判定が乱れて誤 forced-publish を誘発しうる",
+      "description": "DE-101 を解消して quality_engine を配線する際の注意点。validate_bar は `self._last_bars[bar.instrument] = bar` を毎回更新する (quality_engine.py:283)。truth_source='oanda_candle' の本番では確定バーは CandleFetcher のみが発行し BarBuilder は intra-bar (is_complete=False で検証対象外) なので、CandleFetcher 単独配線なら問題ない。しかし truth_source='tick_aggregation' (staging/research) では BarBuilder が確定バーを検証する。仮に将来 BarBuilder と CandleFetcher が同一 DataQualityEngine を共有すると、同一 instrument の確定バーが 2 系統からインターリーブして _last_bars を上書きし、price_jump (前回 close 比) と timestamp_order (逆行検知) の基準バーが取り違えられ、本来 PASS のバーが FAIL→forced-publish される偽陽性が起きうる。現状は未配線のため非発現だが、配線設計時に経路ごとに別インスタンスとするか単一発行系統に限定する設計判断を明文化すべき。",
+      "evidence": [
+        "trading_platform/data/quality/quality_engine.py:283 `self._last_bars[bar.instrument] = bar` (validate_bar 末尾で常時更新)",
+        "trading_platform/data/quality/quality_engine.py:571-606 _check_price_jump は last_bar.close を基準に判定 (混線すると誤判定)",
+        "trading_platform/data/quality/quality_engine.py:485-509 _check_timestamp_order も last_bar.bar_time 基準"
+      ],
+      "suggested_fix": "DE-101 の配線時に、確定バー検証は単一発行系統 (oanda_candle なら CandleFetcher のみ) に限定し、BarBuilder は intra-bar のみ検証対象外であることを docstring/コメントで明示する。tick_aggregation モードでは BarBuilder 専用インスタンスを与え、CandleFetcher とは共有しない設計を採る。",
+      "category": "new"
+    },
+    {
+      "id": "DE-103",
+      "severity": "info",
+      "area": "DE-002 fix の方向検証 (Parity 整合)",
+      "title": "DE-002 の『品質 FAIL でも確定バー publish 継続』は ATLAS BT の挙動と一致しており Parity 方向は正しい (確証)",
+      "description": "DE-002 の修正方向が BT と一致するかを ATLAS 側で実読確認した。ATLAS の _SimpleFeatureStore は parquet から読み込んだ df 全体に対し指標を計算し、いかなる行 (バー) フィルタリングも品質ドロップも行わない。data_loader.check_data_quality は品質スコアと warnings を返すだけの『レポート専用』関数で個別バーを drop しない。行レベルの操作は fetch/write 時の drop_duplicates(subset=['timestamp']) (重複除去) のみ。したがって BT は品質 FAIL に相当する異常バー (大ギャップ・価格ジャンプ等) も全て使う。Live が確定バーを silent drop すると BT より 1 本欠けて EWM(adjust=False) が永続ドリフトするという DE-002 の論拠は正当で、publish 継続が正しい Parity 方向である。新たに『不正な価格バーを下流に流し込むリスク』は理論上あるが、(a) BT も同じバーを使うため Parity 上は同等、(b) 本番では DE-101 の通りそもそも quality 検証が走らず全バー publish が既定動作。よって DE-002 は Parity を破壊しない。なお tick FAIL の silent drop (stream_receiver.py:394) は確定列に載らないため Parity 非影響で従来通りで妥当。",
+      "evidence": [
+        "ATLAS/atlas/backtest/vectorbt_engine.py:342-377 _SimpleFeatureStore は df 全体を使用、品質フィルタなし",
+        "ATLAS/atlas/backtest/data_loader.py:399-506 check_data_quality はレポート専用 (バー drop なし)",
+        "ATLAS/atlas/backtest/data_loader.py:288 行レベル操作は drop_duplicates(timestamp) のみ",
+        "trading_platform/data/market_data/bar_builder.py:242-258 確定バー FAIL → forced_publish (drop しない)",
+        "tests/parity/ 65 passed (本セッション実測、回帰なし)"
+      ],
+      "suggested_fix": "対応不要 (確証のための記録)。DE-101 配線後も BT が全バー使用である前提を parity 連続性テスト (FAIL バー混在でバー欠落 0) で継続担保すること。",
+      "category": "new"
+    },
+    {
+      "id": "DE-104",
+      "severity": "info",
+      "area": "DE-001 tick timestamp / DE-006 complete 契約 / DE-005 docstring の回帰確認",
+      "title": "DE-001/004/005/006 は tick 集約・truth_source 判定・品質ゲートに回帰を生んでいない (確認)",
+      "description": "本日 low batch (77472af) の各修正を実読し回帰なしを確認した。DE-001: stream_receiver は OANDA PRICE.time を parse_iso_to_utc でパースし TickEvent(timestamp=) に渡す。欠落/不正時のみ受信時刻フォールバック + メトリクス。BarBuilder._BarAccumulator は元々 FTS-DATA-012 で逆行 tick (tick_time < last_tick_time) と bar_start 後退を破棄するため、真の event time 採用で out-of-order が増えても確定バーの単調性は保たれ Parity 非影響。計算式不変。DE-006: candle_fetcher は fetch/backfill 両経路で complete が明示 False の candle を防御スキップ、キー欠落は確定扱い (_is_incomplete_candle: complete is False のみ True)。本番 OANDABroker が確定バー抽出時に complete キーを落とす契約と整合し、正常確定バーを誤って弾かない。_fetch_and_emit / backfill_missing の `bt <= last` 重複ガードも維持され timestamp 逆行確定バーは元々混入しない。DE-005: redis_store docstring 修正のみで機能変更なし。DE-004: parity buffer-trim に 5 件追加し全 PASS。いずれも回帰なし。",
+      "evidence": [
+        "trading_platform/data/market_data/stream_receiver.py:340-377 DE-001 time パース + フォールバック",
+        "trading_platform/data/market_data/bar_builder.py:435-463 FTS-DATA-012 逆行 tick / bar_start 後退の破棄 (DE-001 と独立に単調性担保)",
+        "trading_platform/data/market_data/candle_fetcher.py:453-463 _is_incomplete_candle は complete is False のみ未確定判定",
+        "trading_platform/data/market_data/candle_fetcher.py:247,438 `bt <= last` 重複/逆行確定バー防御",
+        "trading_platform/common/iso_time.py:40 parse_iso_to_utc 存在確認"
+      ],
+      "suggested_fix": "対応不要 (回帰なしの確認記録)。",
+      "category": "regression"
+    }
+  ]
+}

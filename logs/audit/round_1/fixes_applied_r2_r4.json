@@ -1,0 +1,28 @@
+{
+  "session": "AUDIT-2026-0525-001",
+  "phases": "Round 2-4 medium fixes (Phase 4)",
+  "date": "2026-05-25",
+  "commit_status": "全件 commit + push 済み (ATLAS / FTS master)",
+  "summary": "critical 1 + high 6 (Round 1) に続き medium 全件を Round 2-4 で修正完了",
+  "round2": [
+    {"id": "QT-007", "commit": "c43f013", "summary": "CI contract パスを tests/integration/contract に修正"},
+    {"id": "QT-006", "commit": "6da918e", "summary": "条件付き assert silent skip 排除 + 定数 pin 番兵"},
+    {"id": "DM-007", "commit": "(R2)", "summary": "run_unified.py print→structlog + AST 番兵"},
+    {"id": "RE-004", "commit": "b814f1d", "summary": "KS 発動で全 BrokerGateway halt (defense-in-depth)"},
+    {"id": "DE-002", "commit": "61c1f86", "summary": "品質FAIL確定バーを drop せず publish+CRITICAL alert (Parity 維持)"}
+  ],
+  "round3": [
+    {"id": "QT-011", "commit": "73b4ac7(前)", "summary": "OHLCV fixture を OHLC 整合化 (open が high/low 範囲外を解消)"},
+    {"id": "PA-004", "commit": "73b4ac7", "summary": "SHARED_CONTRACT に atlas.common.sandbox_builtins を明記"},
+    {"id": "RE-002", "commit": "6f5b4cb", "summary": "[docs] 日次損失ハードリミット realized-only (REV-1) 明文化 + pin テスト (ユーザー判断: 現状維持)"},
+    {"id": "PA-006", "commit": "dc754ce", "summary": "再起動時 _entry_bar_index を OANDA open_time から逆算復元 (max_hold 正確化)"},
+    {"id": "DM-009", "commit": "dc754ce", "summary": "correlation_id を structlog contextvars でログ伝播 (PA-006 と同コミット, strategy_slot entanglement)"}
+  ],
+  "round4": [
+    {"id": "CSR-005", "commit": "497a1c00(ATLAS)", "summary": "SandboxWorker の例外無言破棄を解消 (実エラーが Timeout に化けるのを防止)"},
+    {"id": "DM-006", "commit": "8deceed", "summary": "watchdog 再起動/タスク無効化に PUSH/機械可読アラート追加"}
+  ],
+  "code_safety_reviews": "全 FTS 修正に code-safety-reviewer の diff レビュー実施。B-001 (datetime.UTC) を Round1 で捕捉・修正。Round3 PA-006/DM-009 はメソッド分割の挙動同一性・contextvars リークなしを検証し safe 判定",
+  "verification_totals": "ATLAS golden+validator+sandbox 全PASS / FTS unit+risk ~890, integration, parity 60 全PASS / 戦略 import 誤検出 0 / トレード執行判定は不変",
+  "remaining": "low 33件 (情報系/軽微)。critical=0, high=0, medium=0 (全て解消)"
+}

@@ -1,0 +1,66 @@
+{
+  "verifier": "devil-advocate",
+  "mandate": "find_errors",
+  "audit_id": "AUDIT-2026-0525-002",
+  "verification_date": "2026-05-26",
+  "results": [
+    {
+      "id": "DM-101",
+      "report_claim": "dashboard/app.py:36 が http://localhost:8000 ハードコード、UnifiedRunner は HTTP API を持たないため本番監視不能 (high)",
+      "verdict": "confirmed",
+      "evidence": "app.py:36 実読: API_BASE_URL='http://localhost:8000' ハードコード確認。app.py:40-57: fetch_status()/fetch_health() が同 URL に requests.get。scripts/run_unified.py: start_http_server/uvicorn/FastAPI/make_wsgi_app の grep ヒット 0件。logs/audit/round_1/fixes_applied.json: DM-004 の記載なし（未修正継続）。緩和条件の検討: dashboard を本番で使わないという運用前提は document されていない。app.py に開発環境専用の警告もない。main.py は FastAPI で localhost:8000 を起動するが本番は run_unified.py 経由のため常時起動しない設計。よって high 相当の監視空白は本物。",
+      "corrected_severity": "high",
+      "rationale": "レポートの主張は実コード実読で三重確認済み。緩和条件（dashboard 不使用の明示的設計判断または代替ファイル直読み経路）はいずれも実装・文書化未実施。high 維持が妥当。"
+    },
+    {
+      "id": "QT-101",
+      "report_claim": "_make_broker_trades() が list[dict] を返すが PositionReconciler は OpenTrade を要求し AttributeError (high→medium 格下げ)",
+      "verdict": "confirmed",
+      "evidence": "test_reconnect_cycle.py:50-64 実読: def _make_broker_trades() -> list[dict] で dict 返却確認。position_reconciler.py:140-158: broker_trades: list[OpenTrade] と明示型注釈。bt.trade_id を属性アクセス（dict には .trade_id なし）。broker.py:35-51: class OpenTrade(BaseModel) に trade_id: str='' 確認。position_reconciler.py:65-66 のコメントで list[OpenTrade] 要求を明記。本番配線の OANDABroker.get_open_trades() は OpenTrade を返す設計。PR52-M-C3 で OpenTrade モデル導入時にテスト fixture が追従しなかった incomplete_fix。本番コードは正しい。格下げ (high→medium) は妥当。",
+      "corrected_severity": "medium",
+      "rationale": "validation_fts_qa_dm.json の格下げ判断（テスト fixture バグ、本番コード正常）は実コードで裏付けられる。安全性クリティカルなテストが 2件 FAIL のため must_fix の priority は維持。medium は適切な最終評価。"
+    },
+    {
+      "id": "COMPOUND_RISK_DM101_102_106",
+      "report_claim": "DM-101+DM-102+DM-106 が同時に存在すると Kill Switch 発動を検知する自動/手動の全経路が実質 dead (high 相当)",
+      "verdict": "report_error_overstated",
+      "evidence": "Kill Switch 発動時の通知経路を実コード追跡した結果、以下 3 経路が DM-101/DM-102/DM-106 存在下でも生存している。(1) EmailNotifier 経路: runner.py:38,133,392 で EmailNotifier が配線済み。email_notifier.py:93,223 で EventType.RISK_ALERT を subscribe し alert_type=kill_switch_activated に SMTP メール送信。_emit_risk_alert (runner.py:570-604) は event_bus.publish(RiskAlertEvent(...)) を直接呼ぶ独立経路であり DM-102 の HealthChecker prober TypeError とは無関係。DM-102 は health_check.py の prober が always False を返す問題であり EventBus の publish/subscribe 機能自体を破壊しない。(2) structlog/RotatingFileHandler 経路: run_unified.py:141-148 で unified_runner.log (100MB/10世代) への記録。KS 発動は必ずログに残る。(3) AuditLog 経路: risk_supervisor.py:997-1002 の _fire_ks_audit が audit log に kill_switch_activated を記録。",
+      "corrected_severity": "medium-compound（DM-101+DM-106 の組み合わせは『ダッシュボードと Prometheus アラートが dead』という限定的主張として medium+medium 相当。DM-102 は単独 high として維持）",
+      "rationale": "複合リスク主張は EmailNotifier SMTP 経路と structlog/AuditLog 経路を見落とした過大評価。正確な影響は『リアルタイムダッシュボード監視（DM-101）と Prometheus アラート（DM-106）が dead』であり KS 発動の検知経路が完全に dead になるわけではない。補足: SMTP 設定が .env で未設定の場合 EmailNotifier も機能しないため、その条件での複合リスクは別途評価が必要。"
+    },
+    {
+      "id": "PA-103_SEVERITY_CONFLICT",
+      "report_claim": "PA-103 high→medium 格下げ（サマリー 108 行）",
+      "verdict": "report_error_overstated",
+      "evidence": "validation_atlas.json の PA-103: adjusted_severity=high, validated=true, rationale='Ghost positions risk after restart via dev path. High severity confirmed.' validation_fts_core.json の PA-103: adjusted_severity=medium, rationale='.env に ENV= 行なし (grep確認)、env デフォルト=RESEARCH、live_mode 常に False'。2 つの独立 DA が正反対の結論を出しているにもかかわらずサマリーは fts クラスタ DA の medium のみを採用し atlas クラスタ DA の high を黙殺。scripts/gen_full.py:157 も 'PA-103 becomes high-severity the moment ENV=production added to .env' と潜在高リスクを自認。",
+      "corrected_severity": "medium（現状: .env に ENV=production なし）/ high（ENV=production 追加時即座に発現）。サマリーの格下げ結果は妥当だが DA 間不一致の隠蔽がプロセスの透明性を損なう。",
+      "rationale": "2 DA の意見相違を片方のみ採用してサマリーに記載するのは集約プロセスの不透明性問題。結論（medium）の妥当性は fts クラスタ DA の根拠（.env grep 実証）で支持されるが atlas クラスタ DA のリスク評価も開示すべきだった。"
+    },
+    {
+      "id": "QT-101_ATLAS_DA_CONFLICT",
+      "report_claim": "QT-101 high→medium 格下げ（サマリー 108 行）—格下げ判断自体は correct だが DA 間不一致を隠蔽",
+      "verdict": "confirmed",
+      "evidence": "validation_atlas.json の QT-101: adjusted_severity=high, rationale='Test masks production code defect path.' validation_fts_qa_dm.json: adjusted_severity=medium。fts クラスタ DA の根拠（テスト fixture バグ、本番コード正）は position_reconciler.py:65-66 と broker.py:35-51 の実読で evidence 的に優越。atlas クラスタ DA の高維持根拠は誤認の可能性。最終 medium は correct だがサマリーが不一致を開示していない。",
+      "corrected_severity": "medium",
+      "rationale": "medium への格下げ結論は correct。atlas DA の 'Test masks production code defect path' という主張は実際には本番コードに欠陥はなくテスト fixture が追従していないだけ。fts DA が正しい。サマリーへの DA 間不一致の明示が必要。"
+    },
+    {
+      "id": "DM-102_SCOPE_CLARIFICATION",
+      "report_claim": "DM-102: event_bus prober が同期 health_status() を await し恒久 UNHEALTHY (high)",
+      "verdict": "confirmed",
+      "evidence": "runner.py:324-328: async def _event_bus_prober() -> bool: return await _bus_ref.health_status() 確認。memory_adapter.py:253: def health_status(self) -> dict (sync)。redis_adapter.py:384: def health_status(self) -> dict (sync)。await dict_object で TypeError。health_check.py:43 の CRITICAL_COMPONENTS に event_bus が含まれる。補足: この問題は HealthChecker の health reporting を破壊するが EventBus の publish/subscribe 機能には影響しない。_emit_risk_alert (runner.py:570) の event_bus.publish() は prober とは独立して機能する。",
+      "corrected_severity": "high（HealthChecker 全体が偽陽性を出し続ける問題として妥当）",
+      "rationale": "DM-102 は high として正確。ただし複合リスク主張でこの問題が EventBus の通信機能そのものを破壊するかのように論じられている点を是正。prober の TypeError は HealthChecker の check_all() 結果のみに影響し Event Bus を通じた RiskAlertEvent の publish は独立して機能する。"
+    }
+  ],
+  "report_logic_issues": [
+    "PA-103 と QT-101 の DA 間意見対立（atlas DA: high 維持 vs fts DA: medium 格下げ）をサマリーが黙殺し最終 severity を一方の結論のみで記載している。サマリー p.108 の『devil-advocate による格下げ 6件』はどの DA が格下げしどの DA が high 維持かを開示していない。透明性のある集約プロセスには両方の根拠と解決理由の明示が必要。",
+    "複合リスク主張 (DM-101+DM-102+DM-106 = 全経路 dead) において EmailNotifier 経由の SMTP 通知経路（runner.py:38,392 / email_notifier.py:93,223）と structlog RotatingFileHandler 記録および AuditLog 記録を見落としている。DM-102 は HealthChecker の prober 問題であり EventBus の publish/subscribe 自体は正常に機能する。『全経路 dead』という表現は事実誤認（過大評価）であり正確には『リアルタイムダッシュボード監視と Prometheus アラート経路が dead』に限定すべき。",
+    "サマリー p.134 の『devil-advocate 却下率: 0/49 = 0%』は DA 間で severity 不一致だった PA-103/QT-101 の存在を隠している。却下ゼロの事実は正確だが DA の品質評価として引用する際に『DA 間の不一致が存在しない』かのような印象を与える表現となっており誤解を招く。"
+  ],
+  "missed_findings": [
+    "EmailNotifier が Kill Switch 発動を SMTP で通知する経路（runner.py:38,392 / email_notifier.py:93,223）が複合リスク分析（DM-101+DM-102+DM-106）において言及されていない。この経路の生存確認により複合リスクの実際の深刻度が変わる（全経路 dead → ダッシュボード+Prometheus 経路のみ dead）。追加評価事項: SMTP 設定（FTS_NOTIFY_EMAIL_TO 等の .env 設定）が未設定の場合 EmailNotifier も機能しないため、その条件での複合リスクは別途評価が必要。",
+    "DM-102 の影響範囲の正確な限定（HealthChecker の health reporting のみ影響、EventBus の publish/subscribe は正常）が findings に含まれていない。DM-102 修正前後で RiskAlertEvent の publish が機能するかどうかの明示的な証明を report に含めることで複合リスクの severity 判断がより正確になる。",
+    "runner.py:324-330 の _event_bus_prober が UNHEALTHY を報告するまでの時間（PROBER_UNHEALTHY_THRESHOLD=3 回 x PING_INTERVAL_SEC の実測値）が推定ベース。health_check.py:40 の PROBER_UNHEALTHY_THRESHOLD=3 と PING_INTERVAL_SEC=10 の実読根拠を report に明記すべき（30秒後という推定の裏付け）。"
+  ]
+}

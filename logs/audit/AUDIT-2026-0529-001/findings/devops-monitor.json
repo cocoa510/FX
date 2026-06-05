@@ -1,0 +1,212 @@
+{
+  "agent": "devops-monitor",
+  "scope": "FTS 監視・運用",
+  "audit_id": "AUDIT-2026-0529-001",
+  "date": "2026-05-29",
+  "findings": [
+    {
+      "id": "DM-301",
+      "severity": "high",
+      "area": "metrics",
+      "title": "fx_fills_total / fx_orders_total / fx_signals_total が本番経路で一切 inc されない",
+      "description": "MetricsCollector に inc_fill / inc_order / inc_signal の 3 メソッドが定義されているが、fx_trading_system 全体のコード（metrics.py を除く）で 1 か所も呼び出されていない。FillProcessor / StrategyWorker / BrokerGateway のいずれにも呼出箇所がなく、本番では fx_fills_total / fx_orders_total / fx_signals_total が常に 0 のまま。Grafana での約定数・シグナル生成率の可視化が完全に機能しない。また、Prometheus scrape 側でこれらメトリクスに対するアラートが定義されていれば永久に発火しない。",
+      "evidence": [
+        "trading_platform/core/monitoring/metrics.py:457 inc_fill 定義",
+        "trading_platform/core/monitoring/metrics.py:449 inc_order 定義",
+        "trading_platform/core/monitoring/metrics.py:439 inc_signal 定義",
+        "grep -rn '.inc_fill|.inc_order|.inc_signal' trading_platform/ --include='*.py' => 0件ヒット（metrics.py 定義行除く）"
+      ],
+      "reproduction": "run_unified.py で起動後、Prometheus /metrics で fx_fills_total{} を確認すると計上なし。FillProcessor.process() が呼ばれても fill カウンタが動かない。",
+      "suggested_fix": "FillProcessor.process() 内の約定成功パス（OrderState.FILLED 付近）で _metrics.inc_fill(strategy_id, instrument) を、StrategyWorker.process_bar() でシグナル生成後に _metrics.inc_signal(strategy_id, direction) を、OrderManager.create_order() で _metrics.inc_order(strategy_id, action) を呼ぶ。モジュールシングルトン _metrics パターン（ptrc.py:397-400 と同型）を採用する。",
+      "dead_path": "本番で fx_fills_total / fx_orders_total / fx_signals_total が永遠に 0 を維持する",
+      "regression_of": null
+    },
+    {
+      "id": "DM-302",
+      "severity": "high",
+      "area": "metrics",
+      "title": "fx_oanda_api_latency_ms / fx_oanda_api_responses_total / fx_feature_staleness_sec / fx_order_success_rate が本番で一切計装されない",
+      "description": "MetricsCollector に observe_oanda_api_latency / inc_oanda_api_status / observe_feature_staleness / set_order_success_rate が定義されているが、OANDABroker/CandleFetcher/StreamReceiver/LiveFeatureStore いずれもこれらのメソッドを呼んでいない。4 つのメトリクスはすべてテストコード（tests/unit/test_prometheus_metrics_dm_f_002.py）でしか使われない dead gauge/counter。alerting_rules.yml に FxOandaApiLatencyHigh (P95>2000ms) と FxFeatureStorestaleHigh (max>60s) が定義されているが、依存するメトリクスが常に空のため永久に発火しない。",
+      "evidence": [
+        "trading_platform/core/monitoring/metrics.py:562-591 observe_oanda_api_latency / inc_oanda_api_status 定義",
+        "trading_platform/core/monitoring/metrics.py:832-844 observe_feature_staleness 定義",
+        "trading_platform/core/monitoring/metrics.py:822-830 set_order_success_rate 定義",
+        "grep -rn 'observe_oanda_api_latency|inc_oanda_api_status|observe_feature_staleness|set_order_success_rate' trading_platform/ => 0件ヒット（metrics.py 定義除く・本番コード）",
+        "deploy/prometheus/alerting_rules.yml:70-81 FxOandaApiLatencyHigh",
+        "deploy/prometheus/alerting_rules.yml:97-111 FxFeatureStorestaleHigh"
+      ],
+      "reproduction": "run_unified.py 起動後、Prometheus scrape で fx_oanda_api_latency_ms_bucket{} を確認すると histogram が空。OANDA が 3000ms を超えても FxOandaApiLatencyHigh が発火しない。",
+      "suggested_fix": "oanda_adapter/client.py の各 REST コール前後で observe_oanda_api_latency(endpoint, elapsed_ms) を呼ぶ。LiveFeatureStore.update_bar() 末尾で observe_feature_staleness(strategy_id, age_sec) を呼ぶ。ExecutionEngine で fills/orders の比を算出して set_order_success_rate を定期更新する。",
+      "dead_path": "FxOandaApiLatencyHigh / FxFeatureStorestaleHigh アラートは本番で永久に発火しない",
+      "regression_of": null
+    },
+    {
+      "id": "DM-303",
+      "severity": "high",
+      "area": "metrics",
+      "title": "fx_event_bus_latency_ms が本番で一切計装されない（observe_event_bus_latency が未呼出）",
+      "description": "MetricsCollector.observe_event_bus_latency() が定義されているが、RedisEventBus / InMemoryEventBus / その他 publish 経路のいずれにも呼出箇所がない。Event Bus の publish→consume レイテンシ（P50/P95/P99）は監視要件（DM-F-002）に明記されているが本番では常に空ヒストグラムになる。",
+      "evidence": [
+        "trading_platform/core/monitoring/metrics.py:546-560 observe_event_bus_latency 定義",
+        "grep -rn 'observe_event_bus_latency' trading_platform/ => 0件ヒット（metrics.py 除く・本番コード）"
+      ],
+      "reproduction": "run_unified.py 起動後、fx_event_bus_latency_ms_bucket{} が空のまま。",
+      "suggested_fix": "InMemoryEventBus.publish() / RedisEventBus._dispatch_handler() で publish 時刻を記録し、ハンドラ呼出完了後に observe_event_bus_latency(event_type, elapsed_ms) を呼ぶ。",
+      "dead_path": "DM-F-002 で要求された Event Bus レイテンシ可視化が本番で機能しない",
+      "regression_of": null
+    },
+    {
+      "id": "DM-304",
+      "severity": "medium",
+      "area": "alerting",
+      "title": "FxPositionReconcilerMismatch の runbook ファイルが存在しない",
+      "description": "alerting_rules.yml の FxPositionReconcilerMismatch アラート（severity=critical）は対応手順として docs/runbook/position_reconciler_mismatch.md を参照しているが、当該ファイルは存在しない。severity=critical のアラートが発火した際に運用者が参照できる一次対応手順が欠落している。docs/runbook/position_mismatch.md（起動時ポジション不整合）は存在するが、稼働中 Reconciler 不整合の手順は別途必要。",
+      "evidence": [
+        "deploy/prometheus/alerting_rules.yml:127 '対応手順: docs/runbook/position_reconciler_mismatch.md'",
+        "docs/runbook/ に position_reconciler_mismatch.md が存在しない（ls 出力確認済）",
+        "docs/runbook/email_notifier_smtp.md:58 '- docs/runbook/position_reconciler_mismatch.md — Reconciler CRITICAL 通知不在時' （複数箇所から参照される）"
+      ],
+      "reproduction": "FxPositionReconcilerMismatch 発火時に Alertmanager の description に記載された runbook URL が 404/not found になる。",
+      "suggested_fix": "docs/runbook/position_reconciler_mismatch.md を新規作成する。内容は position_reconciler.py の reconcile ロジック確認手順・OANDA Web 照合・state.json 点検・Kill Switch 判断基準を含めること。",
+      "dead_path": "critical アラート発火時に一次対応手順が参照不能",
+      "regression_of": null
+    },
+    {
+      "id": "DM-305",
+      "severity": "medium",
+      "area": "email",
+      "title": "EmailNotifier の kind ラベルコメントが AUDIT-0529-003 で追加された新 kind を未記載",
+      "description": "metrics.py の email_notifier_sent / _failures / _retries の kind ラベル一覧コメントには 'fill / kill_switch / kill_switch_cancel_failed / position_reconciler / unrealized_warning' のみ記載されている。しかし AUDIT-2026-0529-003 C-02 で追加された 'live_gate_rejection' および既存の 'position_mismatch' / 'live_anomaly' は EmailNotifier._RISK_ALERT_KINDS でメール送信 kind として使われているにもかかわらずコメント未記載。Grafana でこれらの kind を検索する際に正確なラベル値が分からない運用ミスを招く。",
+      "evidence": [
+        "trading_platform/core/monitoring/metrics.py:356-363 kind ラベルコメント（live_gate_rejection / position_mismatch / live_anomaly なし）",
+        "trading_platform/core/monitoring/email_notifier.py:275-307 _RISK_ALERT_KINDS に live_gate_rejection / position_mismatch / live_anomaly が存在"
+      ],
+      "reproduction": "fx_email_notifier_sent_total{kind='live_gate_rejection'} を Grafana でクエリすると認識されるが、metrics.py のコメントからは存在が分からない。",
+      "suggested_fix": "metrics.py:356-363 のコメントに live_gate_rejection / position_mismatch / live_anomaly の 3 kind を追記する。",
+      "dead_path": null,
+      "regression_of": null
+    },
+    {
+      "id": "DM-306",
+      "severity": "medium",
+      "area": "healthcheck",
+      "title": "HealthChecker の oanda_connection_lost アラートが EmailNotifier に到達しない",
+      "description": "HealthChecker._publish_oanda_outage_alert() は alert_type='oanda_connection_lost' の RiskAlertEvent を publish するが、EmailNotifier._RISK_ALERT_KINDS にこの alert_type が登録されていない。OANDA が 60 秒超断絶した際に Prometheus アラート（FxOandaApiLatencyHigh）は発火しないし（DM-302）、Email 通知も届かない。運用者への通知経路が完全に欠落している。",
+      "evidence": [
+        "trading_platform/core/monitoring/health_check.py:417 alert_type='oanda_connection_lost' で RiskAlertEvent を publish",
+        "trading_platform/core/monitoring/email_notifier.py:275-307 _RISK_ALERT_KINDS に 'oanda_connection_lost' なし",
+        "deploy/prometheus/alerting_rules.yml に oanda_connection_lost 発火メトリクスなし"
+      ],
+      "reproduction": "OANDA 接続を 60 秒超切断した状態で run_unified.py を稼働させると RiskAlertEvent(oanda_connection_lost) が publish されるが EmailNotifier が無視してメールが届かない。",
+      "suggested_fix": "_RISK_ALERT_KINDS に 'oanda_connection_lost': 'live_anomaly' を追加する（throttle あり）。または専用 kind 'oanda_outage' を追加して別ビルダーを実装する。alerting_rules.yml にも oanda_outage のメトリクスアラートを追加することが望ましい。",
+      "dead_path": "OANDA 60s 断絶時の Email 通知が silently drop される",
+      "regression_of": null
+    },
+    {
+      "id": "DM-307",
+      "severity": "medium",
+      "area": "alerting",
+      "title": "FxOandaApiLatencyHigh が依存するメトリクスは常に空のため実質的にデッドアラート",
+      "description": "alerting_rules.yml に定義された FxOandaApiLatencyHigh は histogram_quantile(0.95, rate(fx_oanda_api_latency_ms_bucket[5m])) > 2000 を条件とするが、fx_oanda_api_latency_ms が本番コードで一切 observe されない（DM-302）。そのため OANDA API のレイテンシがどれだけ劣化しても永久に発火しない。",
+      "evidence": [
+        "deploy/prometheus/alerting_rules.yml:71 histogram_quantile(0.95, rate(fx_oanda_api_latency_ms_bucket[5m])) > 2000",
+        "DM-302 参照: observe_oanda_api_latency が本番経路で未呼出"
+      ],
+      "reproduction": "Prometheus で fx_oanda_api_latency_ms_bucket{} をクエリすると空系列。FxOandaApiLatencyHigh は常に Inactive 状態。",
+      "suggested_fix": "DM-302 の修正（oanda_adapter/client.py への計装追加）が前提。計装なしには alerting_rules.yml の記述を維持しても意味がない。",
+      "dead_path": "本番で永久に発火しない",
+      "regression_of": null
+    },
+    {
+      "id": "DM-308",
+      "severity": "medium",
+      "area": "alerting",
+      "title": "FxFeatureStorestaleHigh が依存するメトリクスは常に空のため実質的にデッドアラート",
+      "description": "alerting_rules.yml の FxFeatureStorestaleHigh は max(fx_feature_staleness_sec) > 60 を条件とするが、fx_feature_staleness_sec が本番コードで一切 set されない（DM-302）。FeatureStore が陳腐化してもアラートが発火しない。",
+      "evidence": [
+        "deploy/prometheus/alerting_rules.yml:99 max(fx_feature_staleness_sec) > 60",
+        "DM-302 参照: observe_feature_staleness が本番経路で未呼出"
+      ],
+      "reproduction": "BarBuilder が止まり LiveFeatureStore の更新が停止しても FxFeatureStorestaleHigh は Inactive のまま。",
+      "suggested_fix": "DM-302 の修正が前提。LiveFeatureStore.update_bar() で最終更新時刻を記録し observe_feature_staleness を呼ぶか、runner.py のポーリング周期で set_signal_silence_sec と同様に feature staleness を計算して set する。",
+      "dead_path": "本番で永久に発火しない",
+      "regression_of": null
+    },
+    {
+      "id": "DM-309",
+      "severity": "low",
+      "area": "dashboard",
+      "title": "Streamlit Dashboard に認証機構がなく OANDA 口座情報・ポジション・PnL が無保護で閲覧可能",
+      "description": "trading_platform/dashboard/app.py には HTTP Basic 認証・セッション管理・IP 制限が一切実装されていない。streamlit コマンドで起動すると（デフォルト port 8501）、LAN 内の任意のホストから認証なしでダッシュボードにアクセスできる。Kill Switch 状態・実現 PnL・ポジション詳細・ストラテジー ID 等が露出する。ただし read-only 表示のみで制御操作はできない。",
+      "evidence": [
+        "trading_platform/dashboard/app.py 全体: login / authenticate / password / auth 関連コードが存在しない（grep 0件確認済）",
+        "trading_platform/dashboard/app.py:39 st.set_page_config（認証なし）"
+      ],
+      "reproduction": "streamlit run trading_platform/dashboard/app.py 起動後、同一 LAN から http://<host>:8501 にアクセスするとログインなしで全情報が閲覧可能。",
+      "suggested_fix": "Phase 1 では streamlit-authenticator ライブラリまたは Streamlit Community Cloud の built-in auth を使用する。または systemd ユニットで --server.address=127.0.0.1 を指定して localhost のみにバインドし、SSH トンネル経由でアクセスさせる運用とする。",
+      "dead_path": null,
+      "regression_of": null
+    },
+    {
+      "id": "DM-310",
+      "severity": "low",
+      "area": "dashboard",
+      "title": "Dashboard の fetch_health() が HTTP API 未使用時に HealthChecker の実態を反映しない",
+      "description": "FTS_DASHBOARD_API_BASE_URL 未設定の本番主経路では fetch_health() は state ファイルの存在確認のみで 'running' を返す。HealthChecker（oanda prober / event_bus prober）の ping 状態や staleness が考慮されないため、OANDA が断絶して HealthChecker が unhealthy 判定していても Dashboard は 'running' を表示する。",
+      "evidence": [
+        "trading_platform/dashboard/app.py:136-138 _read_state_files 経路では {'status': 'running'} を即返す",
+        "trading_platform/dashboard/app.py:122-139 fetch_health(): state ファイル存在で 'running'"
+      ],
+      "reproduction": "run_unified.py で起動中に OANDA 接続を切断し、Dashboard を開くと 'running' 表示のままで HealthChecker の unhealthy が見えない。",
+      "suggested_fix": "state ファイルに HealthChecker の集約ステータスを定期書き込みする（runner.py の heartbeat 周期で health_checker.check_all() 結果を logs/unified_state/health.json に出力し、Dashboard がそれを読む）。",
+      "dead_path": "HealthChecker の prober 状態が本番 Dashboard に反映されない",
+      "regression_of": null
+    },
+    {
+      "id": "DM-311",
+      "severity": "low",
+      "area": "metrics",
+      "title": "fx_account_equity / fx_total_exposure / fx_daily_pnl ゲージが本番経路で更新されない",
+      "description": "MetricsCollector に set_equity / set_exposure / set_daily_pnl が定義されているが、UnifiedRunner / GlobalRiskSupervisor / runner.py のいずれにも呼出箇所がない。Grafana での口座残高・総エクスポージャー・日次損益の可視化が機能しない。",
+      "evidence": [
+        "trading_platform/core/monitoring/metrics.py:473-489 set_equity / set_exposure / set_daily_pnl 定義",
+        "grep -rn 'set_equity|set_exposure|set_daily_pnl' trading_platform/ => 0件ヒット（metrics.py 定義除く・本番コード）"
+      ],
+      "reproduction": "run_unified.py 起動後、fx_account_equity{} / fx_total_exposure{} / fx_daily_pnl{} が常に 0 のまま。",
+      "suggested_fix": "GlobalRiskSupervisor._update_account_state() または runner.py の heartbeat 周期で account_state から値を取得し、self._metrics.set_equity / set_exposure / set_daily_pnl を呼ぶ。",
+      "dead_path": "口座状態ゲージが本番で機能しない",
+      "regression_of": null
+    },
+    {
+      "id": "DM-312",
+      "severity": "low",
+      "area": "logging",
+      "title": "structlog contextvars.bind_contextvars が strategy_slot.py のみで使用され、PTRC/FillProcessor には correlation_id 伝播がない",
+      "description": "correlation_id の structlog 伝播は trading_platform/core/unified_runner/strategy_slot.py:573 でのみ bind_contextvars が呼ばれる。PTRC.check() / FillProcessor.process() ではこの contextvars を継承せずに独立したログエントリを出力するため、SIGNAL→ORDER→FILL の一連の structlog ログを correlation_id で JOIN できない。",
+      "evidence": [
+        "trading_platform/core/unified_runner/strategy_slot.py:573 bind_contextvars(correlation_id=...)",
+        "trading_platform/core/risk_engine/ptrc.py: bind_contextvars 呼出なし",
+        "trading_platform/core/execution_engine/fill_processor.py: bind_contextvars 呼出なし"
+      ],
+      "reproduction": "約定発生時のログを correlation_id でフィルタすると、strategy_slot のログのみヒットし PTRC・FillProcessor のログはヒットしない。",
+      "suggested_fix": "ptrc.py の check() 実行時および fill_processor.py の process() で structlog.contextvars.bind_contextvars(correlation_id=order.correlation_id) を呼ぶ。asyncio コンテキスト境界に注意しコルーチン内での bind/unbind を対にする。",
+      "dead_path": null,
+      "regression_of": null
+    },
+    {
+      "id": "DM-313",
+      "severity": "low",
+      "area": "ci",
+      "title": "parity.yml に unit tests ステップが含まれており PR レビュアーが CI の意図を誤解しやすい",
+      "description": "parity.yml は名称上は Parity & Contract テスト専用のように見えるが、末尾に 'Run unit tests (non-live, non-parity)' ステップが追加されており、unit テスト全体を兼務している。unit tests が失敗した場合の通知メールは parity.yml から届くため、unit テスト失敗が parity/contract 破壊と区別できない。また unit tests 専用のワークフローファイルが存在しない（unit.yml 不在）。",
+      "evidence": [
+        ".github/workflows/parity.yml:83-89 'Run unit tests (non-live, non-parity)' ステップが存在",
+        ".github/workflows/ に unit.yml / unit-tests.yml が存在しない（ls 確認済）"
+      ],
+      "reproduction": "unit tests で失敗した際の GitHub Actions 通知メールが 'Parity CI' という件名で届くため、parity/contract 破壊と誤認する可能性がある。",
+      "suggested_fix": "unit.yml を別途作成して unit tests を分離する、またはステップ名を 'Run unit tests (smoke, part of parity pipeline)' と明示する。現状では動作上の問題はないため low とする。",
+      "dead_path": null,
+      "regression_of": null
+    }
+  ]
+}

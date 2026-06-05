@@ -1,0 +1,124 @@
+{
+  "verifier": "devil-advocate (meta round 2)",
+  "verified_at": "2026-05-29",
+  "audit_id": "AUDIT-2026-0529-001",
+  "logical_flaws": [
+    {
+      "finding_id": "DM-306 (DA-C upgrade: medium->high)",
+      "flaw": "全3経路deadは絶対表現として過剰。health_check.py:417がpublishするRiskAlertEventのEventBus subscriber一覧が確認されておらず、runner.py等の内部subscriberを経由した観測路が排除されていない。Email/Prometheus/Dashboardの3系統のみ確認でstructlog/AuditLog経路は対象外。前回AUDIT-0525-002でも全KS deadが過大評価と指摘された既知パターンと同型の絶対表現。実害の重大性はhigh評価の妥当性を保つが全3経路表現は修正すべき。",
+      "evidence": "cluster_c validationの確認対象がEmail(_RISK_ALERT_KINDS未登録)/alerting_rules.yml(DM-302でdead)/Dashboard(DM-310で未反映)の3系統のみ。runner.pyのRiskAlertEvent handler有無が未確認。"
+    },
+    {
+      "finding_id": "DE-311 (DA-C upgrade: medium->high)",
+      "flaw": "INC-2026-0527-001と同類という論拠に飛躍がある。INC-0527はpaper建玉のlive supervisor混入(is_liveガード欠如)が原因、DE-311はRedis未実装による再起動後全消失が原因。根本原因が異なり修正策も別。INC-0526-001(幻エクスポージャーによるexposure上限張り付き)の方が類似度が高い。",
+      "evidence": "cluster_c validationがINC-2026-0527-001と同型と記述するが、INC-0527根因はstrategy_slot.py:1232/runner.py:690修正済のpaper->live state mixing。DE-311根因はredis_store.py:134-135 default InMemoryBackend。シナリオが別(混入 vs 消失)。"
+    },
+    {
+      "finding_id": "QA-301",
+      "flaw": "WFA/Drift/OOS/Top3の4指標全欠落でPASSの計算は正確だが実発生確率の根拠が薄弱。Top3 Stripped PFもNoneになる条件(walks<3程度)の実発生頻度が未確認のまま severity=high。DA-A validationで修正した最小ケース(3指標None+Top3あり)ではvalid_weight=0.70=FLOORとなり残り4指標全max時のみPASSで現実的発生確率はfinding記述より低い。",
+      "evidence": "cluster_a.json QA-301: valid_weight=0.50の場合のsoft_score approx 0.71を示す修正計算あり。finding本文のsoft_score約0.857は4指標全Noneケースに限定されるが発生条件の説明が曖昧。"
+    },
+    {
+      "finding_id": "RE-302 suggested_fix",
+      "flaw": "1行修正としてif not self.is_live and not trades:変更を提示しているが、Liveでのentry_rollbackルートへの合流時のセカンダリ失敗ケースが未検討。entry_rollbackはorder cancel試行だが既に約定済みorderへのcancelはOANDA 404を返す。rollback失敗時の処理が仕様として未記載。",
+      "evidence": "strategy_slot.py:749-759のentry_rollback経路でOANDA cancel_orderが既約定orderに対して呼ばれるケースの処理が監査スコープ内で未確認。"
+    },
+    {
+      "finding_id": "PA-307 (DA-B検出済だが不完全)",
+      "flaw": "DA-BはPA-307のgenerate_signal timeout乖離例示の誤りを正しく指摘した。しかしOrderSubmissionGuardシングルトン共有の別リスクが未指摘。runner.py:443-449でシングルトンOSGを全StrategySlotで共有しており、あるSlotのSnapshotPersistenceErrorがfailure_countを加算すると別SlotのFail-closed REJECTトリガーに影響する連鎖リスクがある。PA-301(metrics未配線)と組み合わさるとfailure_countは加算されているのにPrometheusで不可視のまま。",
+      "evidence": "runner.py:443-449 シングルトンOrderSubmissionGuard。order_submission_guard.py:39-46 failure_countはインスタンス変数でシングルトン共有により横断集計される。"
+    }
+  ],
+  "bias_corrections": [
+    {
+      "finding_id": "DM-301 (DA-C: high->medium)",
+      "direction": "under",
+      "rationale": "Email/AuditLog/structlogの3代替経路が生存としてmediumに降格したが、StrategySlotベースのUnifiedRunner本番経路でFillEventがEmailNotifierに届いているか(FillProcessorのevent publish経路)を確認せずに代替経路生存と判断した。observability deadの程度がDA-C評価より深刻な可能性がある。"
+    },
+    {
+      "finding_id": "QA-302 (DA-A: high->medium)",
+      "direction": "over",
+      "rationale": "QA-301とQA-302が部分相殺するとして降格したが、2バグが常に同一シナリオで相殺するという前提が成立しない場合がある。QA-302フォールバックのみ発動するシナリオ(WFA計算できたがis_pf算出失敗)ではQA-301の相殺が機能しない。medium維持はおおむね妥当だが相殺論の根拠に条件付けが必要。"
+    },
+    {
+      "finding_id": "DE-302 (DA-C: medium->low)",
+      "direction": "over",
+      "rationale": "ATLAS Strategy IFの規約がコード上で強制されているか未確認のまま発生確率実質ゼロと評価。規約がdocstringのみ記述であれば将来のLLM生成で遅延registerコードが生成される可能性がある。"
+    },
+    {
+      "finding_id": "QT-301/302/303 (DA-C: high->medium)",
+      "direction": "over",
+      "rationale": "QT-301はRE-201の回帰防止テストとして機能するはずなのに実際は照合ロジック本体未検証という構造的ギャップを含む。テスト設計問題という降格理由が単純すぎる。medium方向への降格自体は適切だが根拠の精度に問題がある。"
+    }
+  ],
+  "missed_critical_areas": [
+    {
+      "area": "scripts/import_atlas_strategy.py のperiod上限ゲート未実装",
+      "potential_issue": "DE-301(high)の修正方針としてimport_atlas_strategy.pyにperiod>384戦略のlive_mode昇格ゲートを追加が示されているが、7専門家・3DA全員がimport_atlas_strategy.pyの現状コードを確認せずこの欠落を見落とした。ema_period>384の戦略のlive_mode拒否ロジックは存在しない。DE-301のhigh修正対象ファイルが監査スコープ外のまま。",
+      "evidence_or_suspicion": "import_atlas_strategy.pyのgrep max_registered_period|period.*gate|ema.*live = 0件を確認。_check_gate関数にperiod検証ロジックなし。ATLAS-2026-0508-069のema_slow_period=800は現状ゲートなしでliveモード投入可能。"
+    },
+    {
+      "area": "scripts/ 配下オペレーションスクリプト(live_order_test.py等6本)",
+      "potential_issue": "live_order_test.py/live_preflight.py/oanda_position_inspect.py等6本の運用スクリプトが本番OANDAに直接接続するが7専門家スコープ外。live_order_test.pyは実際の注文を送信するスクリプトで誤った引数やENV混在でproduction accountに誤注文を送るリスクがある。本番確認フラグや環境ガードの有無が未確認。",
+      "evidence_or_suspicion": "live_order_test.py: dotenv + os.environ OANDA_API_KEY でOANDABrokerに接続する構造を確認。実行時の本番/practice環境切り替え保護の有無未確認。"
+    },
+    {
+      "area": "deploy/ 配下がPrometheus設定のみ(systemd/docker/ansible不在)",
+      "potential_issue": "deploy/ はalertingRules.ymlとREADMEのみ。systemdユニット(OOM killer設定・自動再起動)が存在するかどうか未確認。OOM発生時のrestart挙動(DE-311のState消失を悪化させる)やプロセス間環境変数の引き継ぎが監査スコープ外。",
+      "evidence_or_suspicion": "Glob deploy/**/* = 2ファイルのみ確認。MEMORY.mdに5-20連続再起動原因調査の記録あり。"
+    },
+    {
+      "area": "pyproject.toml のバージョン上限指定なし",
+      "potential_issue": "全依存が下限指定のみ(aiohttp>=3.11.0等)で上限なし。prometheus-clientがoptional扱いだが過去のPrometheus global REGISTRY二重登録バグとprometheus-clientバージョンの相関が未調査。将来のメジャーバージョンアップでCIが通過しつつ本番が壊れる可能性。",
+      "evidence_or_suspicion": "pyproject.toml:6-25 全依存下限のみ確認。prometheus_client二重登録バグcommit c450d69がどのバージョンで発生したか未記録。"
+    },
+    {
+      "area": "時刻同期(NTP/UTC)の前提検証",
+      "potential_issue": "quality_engine.pyの週末ギャップ計算(DE-306)はUTC前提だが、Windows 11環境でTimezone設定がUTCでないとgap計算が更に壊れる。datetime.now()使用箇所のUTC保証の全数確認なし。",
+      "evidence_or_suspicion": "common/iso_time.pyがdatetime.UTCを使用するが、NTP同期確認やシステムクロックずれのガードは存在しない。"
+    },
+    {
+      "area": "ログローテーションとdisk fill時の挙動",
+      "potential_issue": "logger.pyにRotatingFileHandlerあり(100MB x 10=最大1GB)だがAuditLogger/StateManager.append_jsonl等のappend-onlyファイルにはローテーション機構がない。PA-311のfsync欠如と組み合わさった場合の挙動が未確認。",
+      "evidence_or_suspicion": "state_manager.py:233-256のappend_jsonlにrotation機構なし。MEMORY.mdの手動archive chore commitが運用回避を示唆。"
+    },
+    {
+      "area": "GitHub Actions CIの権限とシークレット管理体制",
+      "potential_issue": "parity.ymlにsecretsドル変数の使用がゼロ(本番credentialなしでCI動作は現状適切)。しかしfork経由PRからのsecretsアクセスリスク評価やCI write permission設定が未確認。将来のCI拡張時にsecretsを誤追加した場合のリスク管理体制が未確立。",
+      "evidence_or_suspicion": "parity.yml grepでsecrets参照=0件確認。将来のpull_request_target誤用リスクは文書化されていない。"
+    }
+  ],
+  "suggested_fix_feasibility": [
+    {
+      "finding_id": "DM-306",
+      "claim": "_RISK_ALERT_KINDSに1行追加でEmail経路即時復活",
+      "reality": "_RISK_ALERT_KINDSへの追加は1行で正確。ただしoanda_connection_lostのemail subject/body生成器(builderマップ)が未定義の場合にKeyErrorが発生する可能性がある。builder実装依存の追加確認が必要。"
+    },
+    {
+      "finding_id": "DE-311",
+      "claim": "暫定対策: InMemoryBackendにJSONL append-only fallbackを内蔵させる",
+      "reality": "save_*/load_*メソッド全件にJSONL書き込み/読み込みを追加しrehydrateする実装が必要。asyncio.Lockによるファイル書き込み保護も必要。estimate 5-8ファイル変更と複数テスト更新が現実的。1ファイル修正の難易度ではない。"
+    },
+    {
+      "finding_id": "QA-301",
+      "claim": "EFFECTIVE_WEIGHT_FLOORの引き上げかNone指標数による減衰で修正",
+      "reality": "FLOOR=0.70はv6.0.1でLONG 11件/balanced 10件の偽陽性を解消するために意図的に設定(runner.py:647-658コメント)。安易な引き上げは旧問題の再発リスクがある。QA-302とセットの設計変更が必要でゴールデンテスト更新コストも伴う。現実的な修正コストは2-3日以上。"
+    },
+    {
+      "finding_id": "RE-301",
+      "claim": "matching=[]時はentry_rollback(line 749-759)に合流させる",
+      "reality": "rollback合流単体は1-2行。ただしclaimed_trade_ids排他制御まで含めると複数StrategySlot間での状態共有設計変更が必要で5-10ファイル・複数テスト更新になる。修正範囲の記述が過少。"
+    },
+    {
+      "finding_id": "PA-311",
+      "claim": "f.flush(); os.fsync(f.fileno())の追加は1行の修正",
+      "reality": "2行追加(flush + fsync)が正確。DA-Bのclose()でflushが行われるという記述も誤り(close()はOSのpage cacheのflushを保証しない、fsyncが別途必要)。修正コストは低く実施推奨は正しい。"
+    }
+  ],
+  "overall_quality_assessment": "前回AUDIT-0525-002比: (1)改善: refuted 0件は顕著な精度向上。全81件が実コードで根拠確認。D4要件(定量表現)はおおむね遵守。(2)重大な質問題: QT-307/QT-317/DM-313の三重重複報告は7専門家が独立調査したはずのスコープ重複を示す品質欠陥。(3)見落とし: DE-301のhigh修正対象ファイルimport_atlas_strategy.pyが監査スコープ外。deploy/systemd/ログローテーション/CI権限等の運用インフラ層が今回も未監査継続。(4)バイアス傾向: upgraded 2件・downgraded 27件と格下げ方向が圧倒的。楽観バイアス是正(DE-311/DM-306 upgrade)は適切だが全体として高severity件数が0525-002比で大幅減少しており監査の見落とし増加vs成熟の判別が困難。(5)論述: 全3経路dead等の絶対表現が前回のKS dead過大評価パターンの再現。",
+  "summary": {
+    "logical_flaws_count": 5,
+    "bias_corrections_count": 4,
+    "missed_areas_count": 7
+  }
+}

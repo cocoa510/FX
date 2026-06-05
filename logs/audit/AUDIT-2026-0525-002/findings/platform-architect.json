@@ -1,0 +1,124 @@
+{
+  "agent": "platform-architect",
+  "session": "AUDIT-2026-0525-002",
+  "mode": "dry-run (調査のみ・修正なし)",
+  "findings": [
+    {
+      "id": "PA-101",
+      "severity": "high",
+      "area": "state-restore / strategy-contract",
+      "title": "PA-006 修正が実在しない戦略属性を対象にしており、再起動時のポジション内部状態復元が全戦略で機能していない（incomplete fix）",
+      "description": "PA-006 は再起動時の max_hold 早期/遅延発火を直すため _entry_bar_index/_bar_counter を OANDA openTime から逆算復元するよう修正した（strategy_slot.py:1287-1389）。しかしこの復元ブロック全体は `if hasattr(self.strategy, \"_in_position\")` でガードされている（strategy_slot.py:1287）。実態調査の結果: (1) ATLAS の Strategy 基底クラスは _in_position / _entry_bar_index / _bar_counter / _bars_in_position をいずれも定義していない（venv 実行で確認）。(2) imported/ 配下 60 戦略のうち _in_position を持つものは 0 件、_entry_bar_index/_bar_counter を使う戦略も 0 件。一方 _bars_in_position を使う戦略は 25 件、_position（エグジット判定の真の状態）を使う戦略も存在する（例 ATLAS-2026-0501-004:210-212,249-250,277,301）。つまり hasattr ガードは全戦略で常に False となり、復元ブロックは dead code。PA-006 は『存在しない属性経路』をより精密化しただけで、実際の max_hold 駆動変数 _bars_in_position と保有方向 _position は再起動後も FLAT/0 のまま放置される。結果として LIVE 再起動後、OANDA 上に実ポジションがあるのに戦略内部は『ノーポジ』と認識し、(a) max_hold/クロス系エグジットが永久に発火しない（過剰保有）、(b) 同方向の新規エントリー条件を満たすと二重エントリーする、というより重大な欠陥が残存する。_intended_direction だけは strategy_slot.py:1262 で無条件復元されるため _intended_direction 系戦略（0424-001 等）は救われるが、_position+_bars_in_position 系戦略（0501-004 等）は救われない。PA-006 のコミットメッセージ『真の entry を過ぎたポジションは復元直後に max_hold が正しく発火する』は当該戦略群では成立しない。",
+      "evidence": [
+        "trading_platform/core/unified_runner/strategy_slot.py:1287",
+        "trading_platform/core/unified_runner/strategy_slot.py:1288-1309",
+        "trading_platform/core/unified_runner/strategy_slot.py:1335-1389",
+        "trading_platform/strategies/imported/ATLAS-2026-0501-004/strategy.py:210-212",
+        "trading_platform/strategies/imported/ATLAS-2026-0501-004/strategy.py:249-250",
+        "trading_platform/strategies/imported/ATLAS-2026-0501-004/strategy.py:277",
+        "trading_platform/strategies/imported/ATLAS-2026-0501-004/strategy.py:301"
+      ],
+      "suggested_fix": "復元キーを実態（_position / _bars_in_position / _intended_direction）に合わせる。具体的には (1) StrategyState に保有開始バー時刻ないし bars_in_position を永続化する、(2) restore_positions で hasattr(_bars_in_position) なら openTime から経過バー数を逆算して _bars_in_position を復元、hasattr(_position) なら方向 enum を _position に復元、を _in_position 経路と併存させる。最低限、対象戦略の属性名を網羅した contract テスト（imported/ 全戦略に restore_positions を流して『復元後に _bars_in_position と保有方向が一致』を検証）を追加し、属性名前提のドリフトを構造的に検知する。PA-006 の _entry_bar_index 経路は将来の互換のため残してよいが dead code である旨を明記。",
+      "category": "incomplete_fix"
+    },
+    {
+      "id": "PA-102",
+      "severity": "high",
+      "area": "app-startup / health-check (UnifiedRunner 本番経路)",
+      "title": "UnifiedRunner の event_bus health prober が同期メソッド health_status() を await しており常に False を返す（本番で event_bus が常時 unhealthy）",
+      "description": "本日の DM-003 配線（commit 36c8d27）で UnifiedRunner.initialize に EventBus prober を追加した（runner.py:322-329）が、prober 本体が `return await _bus_ref.health_status()` となっている。InMemoryEventBus.health_status (memory_adapter.py:253) も RedisEventBus.health_status (redis_adapter.py:384) も同期 def で dict を返すため、dict を await すると TypeError が発生し、prober の except 節で False が返る。event_bus は CRITICAL_COMPONENTS（health_check.py:43）かつ register_prober(critical=True) のため、PROBER_UNHEALTHY_THRESHOLD=3 回の定期チェック（30 秒）で event_bus が unhealthy に確定し、_aggregate_system_status が必須コンポーネント unhealthy として system 全体 unhealthy を返し続ける。これは『二重実装』の弊害そのもので、main.py 側は同じ意図を正しく実装している（main.py:496-497 で同期呼び出し + status.get('healthy')）が、UnifiedRunner 側だけ誤って await を付けた。統合テスト test_health_check_integration.py:129 は runner の実 prober ではなく独自の ok prober を登録するため、この欠陥はテストで一切検知されない。",
+      "evidence": [
+        "trading_platform/core/unified_runner/runner.py:324-329",
+        "trading_platform/core/event_bus/memory_adapter.py:253",
+        "trading_platform/core/event_bus/redis_adapter.py:384",
+        "trading_platform/main.py:494-500",
+        "trading_platform/core/monitoring/health_check.py:43",
+        "trading_platform/core/monitoring/health_check.py:339"
+      ],
+      "suggested_fix": "runner.py:324-328 の prober を main.py:494-500 と同一形に修正する: `status = _bus_ref.health_status(); return bool(status.get('healthy', False))`（await を外す）。併せて health_check のグローバル prober 型 ProberCoro が同期戻り値を許容しない点も踏まえ、runner/main で共通の event_bus_prober ファクトリに集約して二重実装の再ドリフトを防ぐ。テストは runner.initialize 経由で登録された実 prober を呼び出して bool を返すことを直接検証する（独自 ok prober に差し替えない）。",
+      "category": "new"
+    },
+    {
+      "id": "PA-103",
+      "severity": "high",
+      "area": "app-startup (二重実装) / state-restore",
+      "title": "main.py（dev 経路）は ENV=production で live_mode=True になるがポジション復元を一切行わない（UnifiedRunner との二重実装ギャップ残存）",
+      "description": "main.py の TradingPlatform.initialize は `live_mode = self._settings.env == Environment.PRODUCTION`（main.py:231）で戦略を live_mode ロードし StrategyWorker/ExecutionCoordinator 経路で実行する。しかしこの経路には restore_positions に相当する処理が存在しない（main.py 全体で restore 呼び出し無し、grep 確認済）。UnifiedRunner（本番経路）は initialize で各 LIVE スロットに対し restore_positions を呼ぶ（runner.py:389-391）のと非対称。AUDIT-2026-0525-001 の総括でも『high 群根因は UnifiedRunner(本番)と main.py(dev)二重実装の運用インフラ配線漏れ』と記録されているが、main.py が ENV=production で live ロードを許す経路自体は残っている。万一 main.py を本番起動すると、OANDA 上の既存ポジションを認識しないまま戦略を走らせ、二重エントリー・無管理ポジションを生む。dev 専用なら ENV=production での live 発注経路を fail-closed で塞ぐべき。",
+      "evidence": [
+        "trading_platform/main.py:231-232",
+        "trading_platform/main.py:247-254",
+        "trading_platform/core/unified_runner/runner.py:389-391"
+      ],
+      "suggested_fix": "main.py を dev/デモ専用と位置づけるなら、ENV=production かつ Live broker 構成での起動を起動時に明示拒否（RuntimeError で fail-closed）するか、main.py を Paper/Shadow 限定にロックする。あるいは UnifiedRunner に一本化して main.py の戦略実行経路を撤去する。少なくとも『本番は run_unified.py/UnifiedRunner のみ』を README/起動ガードで強制し、main.py の live_mode 判定が実発注に到達しないことをテストで保証する。",
+      "category": "incomplete_fix"
+    },
+    {
+      "id": "PA-104",
+      "severity": "low",
+      "area": "event-bus (correlation_id / 因果連鎖)",
+      "title": "LIVE/PAPER 決済経路の exit SignalEvent が exit_correlation_id ではなく新規 uuid を採番しており、決済 OrderEvent の SIGNAL→ORDER 連鎖が切れる",
+      "description": "DM-009 は決済 FillEvent の correlation_id を entry の _current_entry_correlation_id（exit_correlation_id）に統一した（strategy_slot.py:1041）。一方、その直前で order を作る exit SignalEvent は LIVE（strategy_slot.py:999）・PAPER（strategy_slot.py:1074）ともに `correlation_id=str(uuid.uuid4())` で新規採番している。この exit SignalEvent 自体は Event Bus に publish されず order_manager.create_order_from_signal に渡るだけなので FillEvent 連鎖は壊れないが、order_manager が SignalEvent.correlation_id を引き継いで OrderEvent を publish する場合、決済 ORDER は entry とも FILL とも異なる cid を持ち、SIGNAL→ORDER→FILL の因果ツリーが決済側で分断される。DM-009 の目的（決済ログ・FillEvent の cid 統一）は達成されているが、OrderEvent まで含めた一貫性は未達。",
+      "evidence": [
+        "trading_platform/core/unified_runner/strategy_slot.py:999",
+        "trading_platform/core/unified_runner/strategy_slot.py:1074",
+        "trading_platform/core/unified_runner/strategy_slot.py:1041"
+      ],
+      "suggested_fix": "exit SignalEvent の correlation_id も exit_correlation_id（= self._current_entry_correlation_id or 採番済み値）に揃える。order_manager が OrderEvent を publish する経路で SignalEvent.correlation_id を引き継ぐ実装かを確認し、決済 ORDER も entry と同じ cid になるようにする。",
+      "category": "incomplete_fix"
+    },
+    {
+      "id": "PA-105",
+      "severity": "low",
+      "area": "event-bus (Redis フォールバック / 二重配信)",
+      "title": "RedisEventBus.publish の Redis publish 失敗フォールバックが dedup を経由しないため、部分成功時に二重配信の死角がある",
+      "description": "publish() で `self._redis.publish` が例外を投げると _dispatch_local にフォールバックする（redis_adapter.py:251-258）。_dispatch_local は dedup を一切適用せず _run_serialized_by_correlation に直行する（redis_adapter.py:260-265）。Redis publish が実際にはサーバに到達したがクライアント側でタイムアウト/接続断により例外になった『部分成功』ケースでは、(a) ローカルフォールバックで即時 1 回処理し、(b) 後刻 listener が Redis から同一イベントを受信して _dispatch（dedup 経由）で再処理を試みる。(b) は dedup により多くの場合 skip されるが、_dispatch_local 側は dedup 登録を行わないため『ローカル処理済み』が dedup LRU/Redis SETNX に記録されず、listener 受信時に新規（is_new=True）と判定されて二重処理されうる。SIGNAL/ORDER/FILL の二重配信は execution 側の冪等性（broker_fill_id 等）で多くは吸収されるが、Event Bus 不変条件としては死角。",
+      "evidence": [
+        "trading_platform/core/event_bus/redis_adapter.py:249-258",
+        "trading_platform/core/event_bus/redis_adapter.py:260-265",
+        "trading_platform/core/event_bus/redis_adapter.py:489-547"
+      ],
+      "suggested_fix": "_dispatch_local 経由のフォールバック配信時も compute_event_id でローカル dedup へ登録（check_and_add）してから配信し、後刻の listener 受信が dedup で skip されるようにする。あるいはフォールバック配信したイベントの event_id を記録して listener 側で突合する。冪等性が execution 層で担保されている前提を SHARED_CONTRACT もしくはコメントに明文化する。",
+      "category": "new"
+    },
+    {
+      "id": "PA-106",
+      "severity": "low",
+      "area": "logging / correlation_id (DM-009)",
+      "title": "_handle_entry の bind_contextvars + unbind_contextvars は外側スコープの correlation_id を非復元で消す（_handle_exit の bound_contextvars と非対称）",
+      "description": "DM-009 で _handle_entry は `structlog.contextvars.bind_contextvars(correlation_id=...)` を設定し finally で `unbind_contextvars(\"correlation_id\")` する（strategy_slot.py:558-573）。一方 _handle_exit は `with structlog.contextvars.bound_contextvars(...)` を使い、退出時に従前値を正しく復元する（strategy_slot.py:847-858）。bind/unbind 版は、呼び出し前に既に correlation_id が bind されていた場合（将来 on_bar 全体を cid スコープで包む等の変更が入った場合）、unbind が key を削除してしまい従前値を復元しない非対称がある。現状の呼び出し階層では entry 前に correlation_id が bind されていないため実害は出ていないが、_handle_exit と挙動が揃っておらず将来のネスト変更で contextvars リーク/欠落の温床になる。",
+      "evidence": [
+        "trading_platform/core/unified_runner/strategy_slot.py:558-573",
+        "trading_platform/core/unified_runner/strategy_slot.py:847-858"
+      ],
+      "suggested_fix": "_handle_entry も _handle_exit と同じ `with structlog.contextvars.bound_contextvars(correlation_id=...)` に統一し、bind/unbind の手動ペアを廃する。両経路を同一ヘルパーに集約して対称性を担保する。",
+      "category": "new"
+    },
+    {
+      "id": "PA-107",
+      "severity": "low",
+      "area": "shared-contract (PA-004 評価)",
+      "title": "PA-004 の SHARED_CONTRACT 追記は依存方向単方向を崩していないが、AST allowlist と sandbox_builtins 同期の二重管理リスクが明文化されたのみで強制機構がない",
+      "description": "PA-004（commit 73b4ac7）で atlas.common.sandbox_builtins.SANDBOX_BUILTINS を共有 API（SHARED_CONTRACT §2.0）に明記した扱いは妥当で、依存方向 fx_trading_system→atlas の単方向を崩していない（loader.py:663 は import のみ、atlas からの逆 import は無し）。契約違反を docs 同期で解決したこと自体は SHARED_CONTRACT §11『新しい共有シンボルが増えたとき更新』の正規手順に沿う。ただし §2.0 が課す『SANDBOX_BUILTINS 変更時は §3 Parity テスト対象に含める』義務は、ATLAS 側が SANDBOX_BUILTINS に危険シンボルを追加しても fx_trading_system 側で機械的に検知する gate が無く、運用者の遵守に依存する。loader.py の AST allowlist（_ALLOWED_MODULE_PREFIXES）と SANDBOX_BUILTINS の二重メンテにドリフトが生じうる（例: SANDBOX_BUILTINS に open が復活しても loader の exec 環境に自動で入る）。これは PA-004 を closed とする判断を覆すものではなく、残存リスクの可視化。",
+      "evidence": [
+        "docs/SHARED_CONTRACT.md:50-63",
+        "trading_platform/core/strategy_engine/loader.py:663-664",
+        "trading_platform/core/strategy_engine/loader.py:50-66"
+      ],
+      "suggested_fix": "tests/unit/test_strategy_loader_sandbox_builtins.py で SANDBOX_BUILTINS のキー集合をスナップショット固定し、危険シンボル（open/exec/eval/__import__/compile 等）が含まれないことを assert する回帰テストを追加（既存の場合は内容を確認）。ATLAS 側変更が混入したら fx_trading_system CI が落ちる強制機構にする。",
+      "category": "new"
+    },
+    {
+      "id": "PA-108",
+      "severity": "low",
+      "area": "strategy-loader (動的ロード安全性)",
+      "title": "_import_strategy_class は sys.modules を finally で必ず pop するが、複数 Strategy サブクラスが定義された strategy.py で『最初のクラス』選択がソース順でなく getmembers のアルファベット順依存",
+      "description": "_import_strategy_class は inspect.getmembers(module, inspect.isclass) で Strategy サブクラスを列挙し strategy_classes[0] を採用する（loader.py:675-692）。getmembers はクラス名のアルファベット昇順で返すため、strategy.py 内に複数の Strategy サブクラス（基底ヘルパー継承クラス + 本体等）がある場合、ソース上の意図と無関係にクラス名が辞書順で先のものが選ばれる。警告ログは出る（loader.py:686-690）が、選択基準が『名前の辞書順』であることは非自明で、ATLAS エクスポートが将来 mixin/基底を同梱すると silent に誤クラスをロードしうる。FTS-PA-09 の sys.modules pop（成功パスでも pop, loader.py:693-698）は正しく hot-reload の state 共有バグを塞いでいる点は確認済。",
+      "evidence": [
+        "trading_platform/core/strategy_engine/loader.py:675-692",
+        "trading_platform/core/strategy_engine/loader.py:693-698"
+      ],
+      "suggested_fix": "複数 Strategy サブクラス検出時は (a) metadata.json の strategy_class と一致するものを優先、(b) module.__dict__ の定義順（AST/`vars()` 挿入順）で『最後に定義された具象クラス』を選ぶ等、決定的かつ意図に沿う選択規則にする。現状の名前辞書順依存は WARN だけでなく LoadError で fail-closed にする選択肢も検討。",
+      "category": "new"
+    }
+  ]
+}

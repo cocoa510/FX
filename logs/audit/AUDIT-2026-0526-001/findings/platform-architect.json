@@ -1,0 +1,46 @@
+{
+  "agent": "platform-architect",
+  "summary": "Event Bus / Strategy Loader / アプリ基盤 / Pydanticモデル / ATLASブリッジ層を実コードで精査。INC-2026-0526-001 と AUDIT-2026-0525-001/002 の直近修正（restore_positions 幻ポジション fan-out 遮断 R1/R2、health_status の await-on-sync 是正 PA-102/DM-102、main.py production LIVE の fail-closed PA-103、稼働中定期照合、起動時 OANDA 整合チェック）はいずれも現コードで正しく配線・実装されていることを確認。メモリ既知問題『restore_positions instrument フォールバック非排他』は解消済み（instrument フォールバック採用廃止 + claimed_trade_ids 排他制御 + runner 側で共有集合を正しく注入）。退行・未配線は検出せず。残課題として、起動時 restore の position_mismatch アラートが兄弟 Live 戦略（同一 instrument を保有する正規タグ付トレード）を除外せず誤発報する非対称（定期照合側は live_strategy_ids で正しく除外）、汚染 state.json 由来の残留幻エクスポージャー edge、未配線 FSM（StrategyLifecycle）を low/medium で報告。",
+  "findings": [
+    {
+      "id": "PA-201",
+      "severity": "low",
+      "confidence": "high",
+      "area": "ポジション復元 / アラート整合性",
+      "title": "起動時 restore_positions の position_mismatch アラートが兄弟 Live 戦略の正規タグ付トレードを除外せず誤発報する（定期照合との非対称）",
+      "description": "StrategySlot.restore_positions の R1 アラート分岐（strategy_slot.py:1313-1322）は、自スロットに comment 一致トレードが無い場合、unmatched を『comment != 自分の strategy_id』のみで算出して position_mismatch RiskAlert（Email + 構造化ログ）を発出する。しかし同一 instrument に複数 Live 戦略を割り当てる本番構成（メモリ参照: #244 USD_JPY 6戦略 / #262 EUR_JPY 8戦略）では、兄弟 Live 戦略 B/C/D が正しく comment タグ付けして保有するトレードも自スロット A の unmatched に含まれ、手動建玉でも別タグ異常でもないのに position_mismatch として誤アラートされる。一方、稼働中の定期照合 _reconcile_live_positions は live_strategy_ids 集合で全 Live 戦略の comment を正しく除外しており（runner.py:899-904）、両経路でロジックが非対称。誤アラートは採用や exposure には影響しない（R1 は引き続き非採用）ため安全側だが、多数の偽 position_mismatch が起動毎に発生してアラート疲労を招き、真の不整合（手動建玉/別戦略タグ）を埋没させる観測性劣化のリスクがある。",
+      "evidence": [
+        "trading_platform/core/unified_runner/strategy_slot.py:1313-1322",
+        "trading_platform/core/unified_runner/runner.py:898-904"
+      ],
+      "suggested_fix": "restore_positions に全 Live 戦略の strategy_id 集合（呼出側 runner が保持）を渡し、unmatched を『どの Live 戦略の comment にもマッチしない』トレードのみに絞る。定期照合 _reconcile_live_positions の live_strategy_ids ロジックと対称化する。claimed_trade_ids と同様に runner.py:491-497 のループから live_strategy_ids を共有注入するのが最小変更。"
+    },
+    {
+      "id": "PA-202",
+      "severity": "low",
+      "confidence": "medium",
+      "area": "リスク状態同期 / エクスポージャー会計",
+      "title": "汚染された state.json（旧 fan-out バグ由来）に同一 trade_id が複数スロットで残存する場合、_sync_risk_state_from_slot が加算した残留幻エクスポージャーが起動時に解消されない edge",
+      "description": "_configure_slot は復元 state に open_trade_id があると _sync_risk_state_from_slot（runner.py:624-648）で total_exposure に open_units を加算する。これは通常 restore_positions で『マッチ採用→差分調整』または『stale→record_close で減算』により整合化される。しかし、旧 fan-out バグ（INC-2026-0526-001 以前）で複数スロットの state.json に同一 OANDA trade_id が書き込まれ save_all で永続化されたケース（contaminated state.json）では、再起動時に: (a) 真の所有スロット A は comment 一致で正規採用、(b) 兄弟スロット B はその trade_id を自 state.json に持つが comment 不一致のため matching 空 → elif state.open_trade_id 経路（strategy_slot.py:1414）→ _recover_stale_trade_pnl。当該 trade は依然 OPEN（A が保有）なので get_trade().state != 'CLOSED' となり record_close は呼ばれず（strategy_slot.py:1714-1720）、B の open_trade_id はクリアされるものの _sync_risk_state_from_slot で既に加算した B 分の幻 exposure は total_exposure から減算されない。結果として total_exposure に残留幻分が残り、exposure 上限（10万）への張り付き＝Live 新規拒否の再発につながりうる。発生条件は『INC 以前に汚染された state.json が現存し、かつ当該 trade が今も OPEN』に限定されるため現実発生確率は限定的。INC 修正後に生成される state.json では fan-out 自体が発生しないため新規汚染は起きない。",
+      "evidence": [
+        "trading_platform/core/unified_runner/runner.py:635-640",
+        "trading_platform/core/unified_runner/strategy_slot.py:1414-1421",
+        "trading_platform/core/unified_runner/strategy_slot.py:1714-1733"
+      ],
+      "suggested_fix": "stale 回収で trade が CLOSED でなかった（=実際には決済されていない）場合、_sync_risk_state_from_slot が加算した当該スロット分の exposure を total_exposure / state.exposure から打ち消す補正を入れる（record_close を呼べない経路でも exposure だけは整合させる）。または起動時 OANDA 整合チェック後に total_exposure を実建玉ベースで再計算（rebuild）するパスを設け、state.json 由来の累積誤差を起動毎にゼロリセットする。運用面では既存の contaminated state.json の有無を一度棚卸しすれば暫定回避可能。"
+    },
+    {
+      "id": "PA-203",
+      "severity": "low",
+      "confidence": "high",
+      "area": "Strategy Engine / 死蔵コード",
+      "title": "StrategyLifecycle FSM が実行経路のどこにもインスタンス化・配線されておらず未配線（テストのみ参照）",
+      "description": "trading_platform/core/strategy_engine/lifecycle.py の StrategyLifecycle / StrategyLifecycleState は状態遷移 FSM として定義されているが、trading_platform 配下のランタイムコード（UnifiedRunner / StrategySlot / StrategyWorker / main.py）から一切インスタンス化・import されていない。参照は自身の単体テスト test_phase3_platform.py のみ。実際の Live/Paper/Shadow の実行制御は ExecutionMode（strategy_slot.py:82）と _disabled フラグで行われ、本 FSM とは独立。CLAUDE.md のライフサイクル設計（IMPORTED→VALIDATING→PAPER_TRADING→DEGRADED/SUSPENDED/RETIRED）が実装と乖離した死蔵状態。安全性・正当性への直接影響は無いが、設計意図（戦略の昇格/降格を FSM で制御）が運用に反映されておらず、DEGRADED/SUSPENDED 等の状態遷移が監視・自動制御に使われていない死角。なお FSM には LIVE_TRADING 状態が無く、Live 運用を表現できない構造でもある。",
+      "evidence": [
+        "trading_platform/core/strategy_engine/lifecycle.py:19-50",
+        "trading_platform/core/strategy_engine/lifecycle.py:78"
+      ],
+      "suggested_fix": "(a) FSM を実際に配線して戦略の degraded/suspend 判定（StrategySlot._disabled, 連続エラー無効化, Circuit Breaker）を状態遷移に反映させ運用観測に使う、または (b) 設計上不要と判断するなら lifecycle.py を削除して『実装にある＝有効』の原則を守る、のいずれかに整理する。配線する場合は LIVE_TRADING 状態の追加も必要。"
+    }
+  ]
+}

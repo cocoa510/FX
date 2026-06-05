@@ -1,0 +1,78 @@
+{
+  "round": 1,
+  "session": "AUDIT-2026-0525-001",
+  "phase": "verification (meta-audit of report by 2nd expert team)",
+  "verifiers": ["platform-architect", "code-safety-reviewer", "risk-execution-engineer", "qa-tester", "quant-analyst"],
+  "corrections": [
+    {
+      "id": "CSR-001",
+      "report_severity": "medium",
+      "corrected_severity": "critical",
+      "direction": "under-rated",
+      "verdict": "report_wrong",
+      "proof": "RCE reproduced: with __builtins__=_SANDBOX_BUILTINS injected, `from atlas.backtest import event_simulator; event_simulator.os.getcwd()` succeeded and returned C:\\data\\works\\FX\\ATLAS. __import__ allowed in SANDBOX_BUILTINS (sandbox_builtins.py:29); module .os attr is real os, bypasses builtins dict. Stage3 is thread-based (sandbox_runner.py:82-85), no OS process/network isolation.",
+      "note": "Single most important finding. Original report's downgrade rationale ('runtime builtins restriction' + 'AI unlikely to write this') is wrong for security: builtins restriction does NOT stop the import path, and probabilistic argument is void under adversarial injection."
+    },
+    {
+      "id": "RE-001",
+      "report_severity": "medium",
+      "corrected_severity": "high",
+      "direction": "under-rated",
+      "verdict": "report_wrong",
+      "proof": "Live .env has OANDA_ENVIRONMENT=live and NO ENV var -> ptrc.py:86 guard (ENV==production) never fires in production. OandaCurrencyConverter never instantiated anywhere. Live EUR_USD strategy ATLAS-2026-0511-059 exists (1 USD-quote among 22 live configs). Real-money risk/exposure/margin computed with frozen USD_JPY=150 on a live non-JPY pair.",
+      "note": "Report's 'JPY-dominant so limited harm' missed the live EUR_USD pair AND the structurally non-functional guard."
+    },
+    {
+      "id": "CSR-002/QA-001",
+      "report_severity": "low (rejected)",
+      "corrected_severity": "medium",
+      "direction": "under-rated",
+      "verdict": "uncertain->medium",
+      "proof": "model_dump_json silently converts inf->null (data loss): a no-loss strategy's PF becomes null after round-trip, causing L1=PASS(inf escapes pf<0.8) but L2 Tier1=null=FAIL inconsistency. model_dump()+json.dumps() emits invalid 'Infinity' token. L1 PF sub-check confirmed bypassed by inf, though trades>=20 & sharpe>=0.3 still apply (not 'unconditional').",
+      "note": "Crash claim was correctly rejected, but inf/None asymmetry + silent null conversion is a real medium-grade inconsistency."
+    },
+    {
+      "id": "QT-003",
+      "report_severity": "high",
+      "corrected_severity": "medium",
+      "direction": "over-rated",
+      "verdict": "report_wrong",
+      "proof": "PTRC approval IS independently tested: test_signal_flow.py:99-141, test_phase3_risk_execution.py:125-134, test_ptrc_rejection.py:77-82 all assert result.approved is True without generate_signal dependency. The xfail only loses redundant coverage in one test, not all PTRC-approval coverage.",
+      "note": "Report's 'PTRC approval never validated in CI' was false."
+    },
+    {
+      "id": "QT-005",
+      "report_severity": "high",
+      "corrected_severity": "low",
+      "direction": "over-rated",
+      "verdict": "report_wrong",
+      "proof": "Exposure rejection IS covered: test_phase3_platform.py:141-174 (per_pair_exposure), test_ptrc_currency.py:66-83 + test_r6_risk_fixes.py:63-82 (total_exposure). Only test_ptrc_rejection.py's docstring is misleading.",
+      "note": "Report's 'exposure checks never verified' was over-report; only a docstring/coverage-locality issue remains (low)."
+    },
+    {
+      "id": "PTRC-bypass-claim",
+      "report_severity": "n/a (stated as sound)",
+      "corrected_severity": "low (new minor finding)",
+      "direction": "false-reassurance",
+      "verdict": "report_wrong",
+      "proof": "FLAT/close orders bypass PTRC on both LIVE (strategy_slot.py:824 close_trade) and PAPER (strategy_slot.py:1020 submit_with_guard, no evaluate). Misleading log '決済PTRC承認' (line 1014) printed though PTRC never ran. Benign (exposure-reducing only, gated on open_trade_id, cannot open/flip), but the categorical 'no bypass exists' was false; misleading audit log is a minor audit-integrity defect."
+    }
+  ],
+  "confirmed_correct": [
+    {"claim": "UnifiedRunner is sole production path", "verdict": "report_correct", "proof": "ScheduledTask FTS_LiveRunners -> start_unified_runner.ps1 -> run_unified.py; watchdog matches only *run_unified*; runbook & ADR 0004 classify main.py as dev/verification. No launcher starts main.py."},
+    {"claim": "DM-001 AuditLogger dead code (high)", "verdict": "report_correct", "note": "structlog WARNING does log PTRC rejections, but no structured AuditLogger/JSONL audit trail; CLAUDE.md violation real. ptrc.py:176 '# Audit Log記録' comment is misleading (only logger.warning runs)."},
+    {"claim": "DM-003 HealthChecker not in UnifiedRunner (high)", "verdict": "report_correct"},
+    {"claim": "DM-004 dashboard cannot monitor production (high)", "verdict": "report_correct"},
+    {"claim": "QT-001 skip evades governance false-green (high)", "verdict": "report_correct", "proof": "_VIOLATION_RE.search on '未インポート' = None confirmed on .venv python."},
+    {"claim": "QT-004 false-green signal test (high)", "verdict": "report_correct"},
+    {"claim": "QT-007 contract test covered by catch-all CI step (downgrade justified)", "verdict": "report_correct"},
+    {"claim": "PA-001 downgrade to low", "verdict": "report_correct", "note": "Outcome correct; rationale imprecise (latent dedup/serialization keyed on shared cid saved by timestamp granularity + reentrancy guard, not 'design intent')."},
+    {"claim": "RE-002 medium", "verdict": "report_correct", "note": "Top-of-medium; degrades to high if any strategy lacks broker SL or SL gaps through."},
+    {"claim": "RE-004 medium", "verdict": "report_correct", "note": "Fragile/high-adjacent; holds today via in-process flag checked twice on entry path, but no terminal gateway.halt() backstop in UnifiedRunner."},
+    {"claim": "Parity core indicators byte-identical (sound)", "verdict": "report_correct", "proof": "17/17 indicators max_abs_diff=0.000e+00, NaN positions match, on seed=42 n=500. Scoped to in-process builtins only (report scoped it correctly)."},
+    {"claim": "QA-002/QA-006 low (post-hoc, not in gate)", "verdict": "report_correct", "proof": "Import-traced: portfolio_analyzer is CLI-only (atlas portfolio-report); Calmar only in 'atlas compare' display. Neither feeds Gate/scorer/convergence/FTS-selection."}
+  ],
+  "revised_severity_distribution": {"critical": 1, "high": 6, "medium": 16, "low": 33},
+  "revised_high_findings": ["RE-001", "DM-001", "DM-003", "DM-004", "QT-001(+QT-002 dup)", "QT-004"],
+  "verification_value": "2nd team found report UNDER-rated the 2 most serious issues (CSR-001 RCE: critical, RE-001 live FX miscalc: high) and OVER-rated 2 test findings (QT-003, QT-005). Net: report direction-of-error was both ways; corrections material."
+}

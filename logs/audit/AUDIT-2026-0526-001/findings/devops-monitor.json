@@ -1,0 +1,110 @@
+{
+  "agent": "devops-monitor",
+  "summary": "監視・アラート・ロギング・デプロイ基盤の監査 (AUDIT-2026-0526-001)。DM-201〜DM-208 の計8件を検出。最重要は DM-204: UnifiedRunner（本番パス）で MetricsCollector が各モジュールに注入されず、KillSwitch/CircuitBreaker/PTRC 等の Prometheus カウンタが本番では一切インクリメントされない。これにより alerting_rules.yml の主要アラート（FxKillSwitchTriggered, FxCircuitBreakerTriggered, FxPtrcRejectSpike）が本番では永遠に発火しない。high 1件 / medium 2件 / low 5件。",
+  "findings": [
+    {
+      "id": "DM-201",
+      "severity": "medium",
+      "confidence": "confirmed",
+      "area": "health_check / settings",
+      "title": "redis_url の非空デフォルト値により Redis prober が常に critical=True で登録される",
+      "description": "settings.py の redis_url は `default=\"redis://localhost:6379/0\"` を持つ（非空）。main.py:763 の `if self._settings.redis_url:` ガードは常に True になるため、InMemoryEventBus 構成（staging/research 等）でも Redis prober が critical=True で登録される。Redis が未起動の環境ではシステム全体が unhealthy 扱いになり、正常稼働中でも監視アラートが誤発火する可能性がある。UnifiedRunner（runner.py）は Redis prober を登録しないため本番パスは影響外だが、main.py（dev/staging）パスで発生する。",
+      "evidence": [
+        "trading_platform/config/settings.py:53-54",
+        "trading_platform/main.py:763",
+        "trading_platform/main.py:777"
+      ],
+      "suggested_fix": "EventBus の実際の型で判定する: `if isinstance(self._event_bus, RedisEventBus):` として Redis prober を登録する。または redis_url のデフォルトを空文字列にして意図的な設定を強制する。"
+    },
+    {
+      "id": "DM-202",
+      "severity": "low",
+      "confidence": "confirmed",
+      "area": "settings / .env.example",
+      "title": "実ユーザーメールアドレスがコミット済みコードにハードコードされている（PII）",
+      "description": "settings.py:212 の `notify_email_to` フィールドと .env.example:50 の両方に実際のメールアドレス `510.cocoa@gmail.com` が記載されている。テンプレートファイル（.env.example）および Pydantic Settings のデフォルト値として個人情報がリポジトリに永続する。",
+      "evidence": [
+        "trading_platform/config/settings.py:211-212",
+        ".env.example:50"
+      ],
+      "suggested_fix": "settings.py のデフォルト値を `\"\"` または `\"your@email.com\"` に変更。.env.example も `NOTIFY_EMAIL_TO=your@email.com` とプレースホルダー表記に変更。"
+    },
+    {
+      "id": "DM-203",
+      "severity": "low",
+      "confidence": "confirmed",
+      "area": "settings / email_notifier",
+      "title": "smtp_password が SecretStr ではなく plain str で定義されている",
+      "description": "settings.py:248 の `smtp_password: str = Field(...)` は Pydantic の SecretStr ではなく通常の str。settings インスタンスを `model_dump()` でシリアライズした場合（ログ出力・デバッグ等）に SMTP パスワードが平文で露出するリスクがある。現時点では email_notifier.py がパスワードをログに記録する箇所は確認されていないが、将来の実装変更でリスクが顕在化する。",
+      "evidence": [
+        "trading_platform/config/settings.py:248",
+        "trading_platform/core/monitoring/email_notifier.py:941"
+      ],
+      "suggested_fix": "型を `SecretStr` に変更: `smtp_password: SecretStr = Field(...)` とし、email_notifier.py での使用箇所を `self._settings.smtp_password.get_secret_value()` に変更する。"
+    },
+    {
+      "id": "DM-204",
+      "severity": "high",
+      "confidence": "confirmed",
+      "area": "metrics / unified_runner",
+      "title": "UnifiedRunner（本番パス）で MetricsCollector がモジュールシングルトンに注入されず Prometheus カウンタが無効",
+      "description": "main.py:107-121 では FillProcessor, CircuitBreaker, PTRC, BarBuilder, CandleFetcher, StreamReceiver, StrategyLoader の各モジュールに対して `set_metrics_collector()` を呼び出し、モジュールレベルのシングルトン `_metrics` に MetricsCollector を注入している（DM-F-029 で確立されたパターン）。しかし runner.py（UnifiedRunner、本番パス）には同等の注入コードが存在しない。その結果、`scripts/run_unified.py` 経由で起動される本番環境では、以下の Prometheus カウンタが永遠にインクリメントされない:\n- `fx_kill_switch_triggered_total` (circuit_breaker/kill_switch モジュール)\n- `fx_circuit_breaker_triggered_total`\n- `fx_ptrc_reject_total`\n- `fx_fill_total`, `fx_bar_build_total` 等\nalert_rules.yml の FxKillSwitchTriggered, FxCircuitBreakerTriggered, FxPtrcRejectSpike は本番で永遠に発火しない。",
+      "evidence": [
+        "trading_platform/main.py:107-121",
+        "trading_platform/core/unified_runner/runner.py:380-382"
+      ],
+      "suggested_fix": "runner.py の `initialize()` メソッド内に main.py と同等の注入ブロックを追加する:\n```python\nfor _mod in (_fill_processor_mod, _cb_mod, _ptrc_mod, _bb_mod, _cf_mod, _sr_mod, _loader_mod):\n    _mod.set_metrics_collector(self._metrics)\n```\nただし runner.py が対象モジュールを import しているか確認の上、必要に応じて import を追加する。"
+    },
+    {
+      "id": "DM-205",
+      "severity": "low",
+      "confidence": "confirmed",
+      "area": "alerting / metrics",
+      "title": "登録済み Prometheus メトリクスに対応するアラートルールが存在しない",
+      "description": "metrics.py に登録されているが alerting_rules.yml にアラートルールが存在しないメトリクスが複数ある:\n- `fx_signal_silence_sec`: シグナル沈黙検知（LIVE_ORDER_SILENCE_THRESHOLD_SEC = 6h）\n- `fx_feature_store_compute_errors_total`: feature 計算エラー\n- `fx_backfill_failures_total`: バックフィル失敗\n- `fx_live_eligible_key_missing_total`: ライブ特徴量キー欠損\nこれらは運用上問題が発生しても自動アラートが届かない。",
+      "evidence": [
+        "deploy/prometheus/alerting_rules.yml:1-150",
+        "trading_platform/core/monitoring/metrics.py:1-450"
+      ],
+      "suggested_fix": "alerting_rules.yml に不足アラートを追加。例: `fx_signal_silence_sec > 21600` (6h閾値) で FxSignalSilence アラート、`rate(fx_feature_store_compute_errors_total[5m]) > 0` で FxFeatureStoreComputeError アラートを定義する。"
+    },
+    {
+      "id": "DM-206",
+      "severity": "low",
+      "confidence": "confirmed",
+      "area": "runbook / alerting",
+      "title": "alerting_rules.yml から参照されるランブック `position_reconciler_mismatch.md` が存在しない",
+      "description": "alerting_rules.yml:127 の FxPositionReconcilerMismatch アラートは `runbookUrl: docs/runbook/position_reconciler_mismatch.md` を参照している。email_notifier.py:655 も同ファイルへの参照が存在する。しかし docs/runbook/ ディレクトリを確認したところ当該ファイルは存在しない。アラート発火時にオペレーターが runbookUrl をクリックしても 404 になり、対応手順が参照できない。",
+      "evidence": [
+        "deploy/prometheus/alerting_rules.yml:127",
+        "trading_platform/core/monitoring/email_notifier.py:655"
+      ],
+      "suggested_fix": "docs/runbook/position_reconciler_mismatch.md を作成する。内容: PositionReconciler の不整合アラート受信時の確認コマンド（OANDA ポジション照合、State Store 比較）、手動修正手順、エスカレーション基準。"
+    },
+    {
+      "id": "DM-207",
+      "severity": "medium",
+      "confidence": "confirmed",
+      "area": "dashboard",
+      "title": "ダッシュボードの health 表示がコンポーネントレベルの異常を隠蔽する",
+      "description": "dashboard/app.py の `fetch_health()` が state-file モード（本番パス）で動作する際、lines 136-139 ではステートファイルの存在確認のみを行い `{\"status\": \"running\", \"data_source\": \"state_files\"}` を返す。HealthChecker の per-component 状態（oanda=unhealthy, event_bus=degraded 等）はステートファイルに書き出されていないため、ダッシュボードに反映されない。本番オペレーターがダッシュボードを見ると oanda 接続断でも「running」と表示される。",
+      "evidence": [
+        "trading_platform/dashboard/app.py:136-139"
+      ],
+      "suggested_fix": "UnifiedRunner の定期ヘルスチェック結果を `state/health_summary.json` に書き出し、dashboard/app.py の state-file モードでもそのファイルを読み込んでコンポーネントレベルの状態を表示する。または FastAPI ヘルスエンドポイント経由での取得に統一する。"
+    },
+    {
+      "id": "DM-208",
+      "severity": "low",
+      "confidence": "confirmed",
+      "area": "metrics / email_notifier",
+      "title": "metrics.py の kind ラベルコメントが INC-2026-0526-001 追加分を反映していない",
+      "description": "metrics.py:356-362 の `email_notifier_sent/failures/retries/throttled` カウンタ定義コメントには kind ラベルの有効値一覧が記載されているが、INC-2026-0526-001 で email_notifier.py:275-297 に追加された `position_mismatch`, `live_anomaly`, `position_reconcile_mismatch` の3種が漏れている。Grafana ダッシュボードでこれらの kind をフィルタリングする際に参照するドキュメントとコードが乖離する。実害は軽微だがメンテナンス性が低下する。",
+      "evidence": [
+        "trading_platform/core/monitoring/metrics.py:356-362",
+        "trading_platform/core/monitoring/email_notifier.py:275-297"
+      ],
+      "suggested_fix": "metrics.py のコメントに `position_mismatch`, `live_anomaly`, `position_reconcile_mismatch` を追記する。"
+    }
+  ]
+}

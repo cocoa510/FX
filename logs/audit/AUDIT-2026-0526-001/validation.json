@@ -1,0 +1,371 @@
+{
+  "audit_id": "AUDIT-2026-0526-001",
+  "reviewer_role": "devil-advocate",
+  "review_date": "2026-05-26",
+  "summary": {
+    "total_findings_reviewed": 35,
+    "validated_unchanged_severity": 30,
+    "downgraded": 3,
+    "false_rejected_or_informational": 2,
+    "adoption_must_fix_count": 5,
+    "top5_priority": [
+      "RE-201 (high, validated): stale recovery failure leaves total_exposure unreduced - same mechanism as INC-2026-0526-001, production path, no auto-correction",
+      "DE-201 (high, validated): WARMUP_BARS=2000 insufficient for ema_800, live strategy ATLAS-2026-0508-069 producing parity drift now",
+      "DM-204 (high, validated): MetricsCollector not injected in UnifiedRunner, all Prometheus safety alerts (KillSwitch/CB/PTRC) permanently dead in production",
+      "QA-201 (medium, downgraded from high): var_95/cvar_95 from 500pt sampled curve causes 85.3pct false weakness_detector fires, systematic mis-feedback",
+      "QT-204 (medium, adoption upgraded to must_fix): multi-slot claimed_trade_ids INC R2 fix has no integration test, regression undetectable on refactor"
+    ]
+  },
+  "validations": [
+    {
+      "id": "CSR-201",
+      "agent": "code-safety-reviewer",
+      "validated": true,
+      "original_severity": "medium",
+      "adjusted_severity": "medium",
+      "production_impact": "indirect",
+      "adoption_level": "should_consider",
+      "rationale": "Exception swallowing at context_builder.py:548 confirmed, no logging. ATLAS feedback quality path only, not live trading execution. CLAUDE.md violation. Fix straightforward but not safety-critical. Medium confirmed."
+    },
+    {
+      "id": "CSR-202",
+      "agent": "code-safety-reviewer",
+      "validated": true,
+      "original_severity": "low",
+      "adjusted_severity": "low",
+      "production_impact": "none",
+      "adoption_level": "informational",
+      "rationale": "GPU kernel probe returning False silently on unexpected exceptions. CPU fallback operates correctly. No production trading impact. Low confirmed."
+    },
+    {
+      "id": "CSR-203",
+      "agent": "code-safety-reviewer",
+      "validated": true,
+      "original_severity": "medium",
+      "adjusted_severity": "medium",
+      "production_impact": "theoretical",
+      "adoption_level": "should_consider",
+      "rationale": "type() in SANDBOX_BUILTINS enabling MRO traversal confirmed. Runtime test within finding shows actual RCE requires additional blocked attributes (__subclasses__ in FORBIDDEN_DUNDER_ATTRS). Defense-in-depth gap: future sandbox changes could open attack surface. Medium confirmed."
+    },
+    {
+      "id": "CSR-204",
+      "agent": "code-safety-reviewer",
+      "validated": true,
+      "original_severity": "low",
+      "adjusted_severity": "low",
+      "production_impact": "none",
+      "adoption_level": "informational",
+      "rationale": "Missing type annotation on normalizer at runner.py:566. CLAUDE.md violation. No production impact. Low confirmed."
+    },
+    {
+      "id": "CSR-205",
+      "agent": "code-safety-reviewer",
+      "validated": true,
+      "original_severity": "low",
+      "adjusted_severity": "low",
+      "production_impact": "none",
+      "adoption_level": "informational",
+      "rationale": "SANDBOX_BUILTINS as bare dict without type parameter. CLAUDE.md violation. No production impact. Low confirmed."
+    },
+    {
+      "id": "CSR-206",
+      "agent": "code-safety-reviewer",
+      "validated": true,
+      "original_severity": "low",
+      "adjusted_severity": "low",
+      "production_impact": "indirect",
+      "adoption_level": "informational",
+      "rationale": "OOS exception in vectorbt_engine.py:998 logs warning (satisfies CLAUDE.md partially) but silently degrades to empty dict. Layer 1 passes with no OOS data. Not Gate-connected. Low appropriate."
+    },
+    {
+      "id": "QA-201",
+      "agent": "quant-analyst",
+      "validated": true,
+      "original_severity": "high",
+      "adjusted_severity": "medium",
+      "production_impact": "indirect",
+      "adoption_level": "must_fix",
+      "rationale": "DOWNGRADED high->medium. result_parser.py:334-374 computes var_95/cvar_95/tail_ratio/efficiency_ratio from 500-point sampled equity_curve confirmed. 85.3pct false-fire rate in weakness_detector (517/606) confirmed at weakness_detector.py:145. CRITICAL COUNTERPOINT: grep of scorer.py returns 0 matches for var_95 - NOT Gate-connected. Does not affect Tier1 or Tier2 pass/fail. Harm is indirect: systematic mis-feedback to fx-strategist wasting improvement budget. High requires production safety mechanism failure; this is evaluation quality degradation only. must_fix adoption because 85.3pct false fire rate makes weakness feedback systematically unreliable."
+    },
+    {
+      "id": "QA-202",
+      "agent": "quant-analyst",
+      "validated": true,
+      "original_severity": "medium",
+      "adjusted_severity": "medium",
+      "production_impact": "indirect",
+      "adoption_level": "should_consider",
+      "rationale": "WFA_MIN_WALKS=10 causing 28.5pct wfa=None confirmed. EFFECTIVE_WEIGHT_FLOOR=0.70 (v6.0.1) caps inflation at 1.43x max - quant-analyst omits this mitigation but it does not eliminate the concern. 10 of 308 passed with wfa=None. Medium confirmed."
+    },
+    {
+      "id": "QA-203",
+      "agent": "quant-analyst",
+      "validated": true,
+      "original_severity": "medium",
+      "adjusted_severity": "medium",
+      "production_impact": "indirect",
+      "adoption_level": "should_consider",
+      "rationale": "WFA PF as arithmetic mean of ratios (not pooled PF) confirmed at event_simulator.py:1614-1622. Genuine statistical error: mean(a/b) != sum(a)/sum(b). OOS/IS component weight 0.12 in Tier2. Single high-PF walk distorts average. Medium confirmed."
+    },
+    {
+      "id": "QA-204",
+      "agent": "quant-analyst",
+      "validated": true,
+      "original_severity": "low",
+      "adjusted_severity": "low",
+      "production_impact": "indirect",
+      "adoption_level": "informational",
+      "rationale": "pain_index/ulcer_index/conditional_dd from 500-point sampled curve confirmed. Information metrics, not Gate-connected. Shares root cause with QA-201, fix together. Low confirmed."
+    },
+    {
+      "id": "QA-205",
+      "agent": "quant-analyst",
+      "validated": true,
+      "original_severity": "low",
+      "adjusted_severity": "low",
+      "production_impact": "indirect",
+      "adoption_level": "informational",
+      "rationale": "consistency_score uses bar-count chunks not calendar months confirmed at event_simulator.py:1492-1506. Gate-connected (scorer.py:98,118-128,185-192) weight 0.15 but bias is systematic across all strategies so relative ranking is preserved. Naming misleading. Low confirmed."
+    },
+    {
+      "id": "PA-201",
+      "agent": "platform-architect",
+      "validated": true,
+      "original_severity": "low",
+      "adjusted_severity": "low",
+      "production_impact": "observability",
+      "adoption_level": "should_consider",
+      "rationale": "restore_positions position_mismatch alert asymmetry confirmed at strategy_slot.py:1313-1322 vs runner.py:898-904. Fires for sibling strategy trades. Alert fatigue in multi-strategy deployments (6 USD/JPY, 8 EUR/JPY per memory). Does not affect trade adoption or exposure. Low confirmed."
+    },
+    {
+      "id": "PA-202",
+      "agent": "platform-architect",
+      "validated": true,
+      "original_severity": "low",
+      "adjusted_severity": "low",
+      "production_impact": "conditional",
+      "adoption_level": "should_consider",
+      "rationale": "Contaminated state.json edge case confirmed at runner.py:635-640 and strategy_slot.py:1414-1421,1714-1733. Precondition: INC-era state.json still present AND contaminated trade still OPEN. INC was 6 days ago (2026-05-20). If trades closed, precondition does not hold. Operational fix (state.json audit) resolves definitively. Low confirmed."
+    },
+    {
+      "id": "PA-203",
+      "agent": "platform-architect",
+      "validated": true,
+      "original_severity": "low",
+      "adjusted_severity": "low",
+      "production_impact": "none",
+      "adoption_level": "informational",
+      "rationale": "StrategyLifecycle FSM confirmed as dead code at lifecycle.py:19-50. No runtime instantiation in production path. LIVE_TRADING state missing from FSM. No safety impact. Low confirmed."
+    },
+    {
+      "id": "RE-201",
+      "agent": "risk-execution-engineer",
+      "validated": true,
+      "original_severity": "high",
+      "adjusted_severity": "high",
+      "production_impact": "direct",
+      "adoption_level": "must_fix",
+      "rationale": "VALIDATED as high. Confirmed: strategy_slot.py:1668-1733 calls record_close ONLY when state==CLOSED (line 1675). Else branch (1714-1720) and exception branch (1721-1727) clear open_trade_id without calling record_close. Confirmed: risk_supervisor.py:675-694 - record_close is the only exposure subtraction mechanism. Confirmed: test_runner_periodic_reconcile.py:86 uses AsyncMock for _recover_stale_trade_pnl, exposure non-subtraction on failure is untested. Mechanistically identical to INC-2026-0526-001: OANDA open=0, internal exposure remains, live orders rejected at 100000 unit cap. Restoration path (R1/R2) fixed but in-session stale recovery path has same bug. High confirmed."
+    },
+    {
+      "id": "RE-202",
+      "agent": "risk-execution-engineer",
+      "validated": true,
+      "original_severity": "medium",
+      "adjusted_severity": "low",
+      "production_impact": "none_in_production",
+      "adoption_level": "informational",
+      "rationale": "DOWNGRADED medium->low. Units/JPY mismatch in PTRC-Post exposure ratio confirmed at ptrc_post.py:146-165. However: grep of runner.py for ptrc_post and PostTradeRisk returns 0 matches. PTRC-Post is exclusively in coordinator.py and main.py (dev/FastAPI path only). In production UnifiedRunner, PTRC-Post never executes. A bug in code that never runs in production cannot be medium severity. The finding itself acknowledges this mitigation but assigns medium anyway - severity inflation error. Low (tech-debt) is appropriate."
+    },
+    {
+      "id": "RE-203",
+      "agent": "risk-execution-engineer",
+      "validated": true,
+      "original_severity": "medium",
+      "adjusted_severity": "medium",
+      "production_impact": "indirect",
+      "adoption_level": "should_consider",
+      "rationale": "FX rate staleness in currency_converter.py:159-181 confirmed. Cross rates cached without TTL, re-seeded only at heartbeat intervals. Different from RE-001 (static fixed rate) - here rate is at worst a few minutes stale during normal operation. Fail-safe (None->REJECT) works only when NO rate exists, not when stale rate exists. Real production path, real risk, bounded magnitude. Medium confirmed."
+    },
+    {
+      "id": "RE-204",
+      "agent": "risk-execution-engineer",
+      "validated": true,
+      "original_severity": "low",
+      "adjusted_severity": "low",
+      "production_impact": "theoretical",
+      "adoption_level": "informational",
+      "rationale": "CircuitBreaker state not guarded by __setattr__ like KillSwitch confirmed. CB has cooldown self-reset by design. Theoretical risk only. Low confirmed."
+    },
+    {
+      "id": "RE-205",
+      "agent": "risk-execution-engineer",
+      "validated": true,
+      "original_severity": "low",
+      "adjusted_severity": "low",
+      "production_impact": "conditional",
+      "adoption_level": "informational",
+      "rationale": "FillProcessor idempotency key degrading to (order_id, order_id) when broker_fill_id absent. OANDA market orders typically full fills. Low confirmed."
+    },
+    {
+      "id": "DE-201",
+      "agent": "data-engineer",
+      "validated": true,
+      "original_severity": "high",
+      "adjusted_severity": "high",
+      "production_impact": "direct",
+      "adoption_level": "must_fix",
+      "rationale": "VALIDATED as high. Confirmed: runner.py:74 WARMUP_BARS=2000 fixed constant. live_store.py:40-49 BUFFER_SAFETY_FACTOR=50, k>=13 needed for 1e-10 convergence. strategy.py:82 for ATLAS-2026-0508-069 registers ema_800. For span=800, warmup=2000 gives k=2.5, residual exp(-5)=6.7e-3 (0.67pct of price). live_store.py:76-89 shows MAX_REGISTRABLE_PERIOD raised to 1000 for this strategy but warmup not updated. Signal divergence affects strategy.py:172-173 direction decisions (uptrend = ema_fast > ema_slow). Parity test cannot detect this (gives full data to both sides). State.json confirms active live strategy. High confirmed."
+    },
+    {
+      "id": "DE-202",
+      "agent": "data-engineer",
+      "validated": true,
+      "original_severity": "medium",
+      "adjusted_severity": "medium",
+      "production_impact": "conditional",
+      "adoption_level": "should_consider",
+      "rationale": "poll_latest returning only most recent candle when multiple bars formed confirmed at data_provider.py:155-184. For H1/H4 with 60s polling, delay must exceed bar period (60-240 min) to lose a bar. For M15, a single OANDA timeout (>15 min) loses a bar permanently. CandleFetcher gap-handling not used in UnifiedRunner. Medium appropriate: conditional on network conditions."
+    },
+    {
+      "id": "DE-203",
+      "agent": "data-engineer",
+      "validated": true,
+      "original_severity": "low",
+      "adjusted_severity": "low",
+      "production_impact": "none_in_production",
+      "adoption_level": "informational",
+      "rationale": "forward_test.py WARMUP_BARS=200 confirmed. Forward test is not live execution path. Low appropriate. Same root cause as DE-201, fix together."
+    },
+    {
+      "id": "QT-201",
+      "agent": "qa-tester",
+      "validated": true,
+      "original_severity": "medium",
+      "adjusted_severity": "medium",
+      "production_impact": "testing_gap",
+      "adoption_level": "should_consider",
+      "rationale": "E2E signal-to-fill test with conditional assertion (if fills_completed > 0:) confirmed at test_signal_flow.py:287-292. Produces green even when fill/position path is untested. Real testing gap. Medium confirmed."
+    },
+    {
+      "id": "QT-202",
+      "agent": "qa-tester",
+      "validated": true,
+      "original_severity": "medium",
+      "adjusted_severity": "medium",
+      "production_impact": "testing_gap",
+      "adoption_level": "should_consider",
+      "rationale": "PTRC fixture using StaticConverter causes RE-001 fail-safe before PTRC business logic reached, masking correctness behind xfail. Confirmed at test_atlas_top3_strategies.py:229-230. Fix: MockCurrencyConverter. Medium confirmed."
+    },
+    {
+      "id": "QT-203",
+      "agent": "qa-tester",
+      "validated": true,
+      "original_severity": "low",
+      "adjusted_severity": "low",
+      "production_impact": "debugging_only",
+      "adoption_level": "informational",
+      "rationale": "Exception detail discarded in test_no_crash_with_data error handler. Test still fails correctly. Low confirmed."
+    },
+    {
+      "id": "QT-204",
+      "agent": "qa-tester",
+      "validated": true,
+      "original_severity": "medium",
+      "adjusted_severity": "medium",
+      "production_impact": "regression_risk",
+      "adoption_level": "must_fix",
+      "rationale": "ADOPTION LEVEL UPGRADED to must_fix (severity remains medium). Multi-slot claimed_trade_ids sharing loop at runner.py:488-497 is INC-2026-0526-001 R2 fix. Only coverage is StrategySlot unit level with mocked args - no integration test for runner._restore_all_positions() across multiple real slots. If refactor splits the loop, unit test passes but INC re-occurs. INC caused 6 days zero live orders and 887 JPY loss. Regression protection must be at integration level."
+    },
+    {
+      "id": "QT-205",
+      "agent": "qa-tester",
+      "validated": true,
+      "original_severity": "low",
+      "adjusted_severity": "low",
+      "production_impact": "ci_gap",
+      "adoption_level": "informational",
+      "rationale": "STRICT_SKIP=1 not enabled by default in CI. Static test_no_existence_skip.py catches many patterns. Low appropriate."
+    },
+    {
+      "id": "DM-201",
+      "agent": "devops-monitor",
+      "validated": true,
+      "original_severity": "medium",
+      "adjusted_severity": "low",
+      "production_impact": "none_in_production",
+      "adoption_level": "informational",
+      "rationale": "DOWNGRADED medium->low. Finding claims redis_url non-empty default causes Redis prober to always register. However runner.py:380-384 explicitly avoids Redis prober with comment explaining InMemoryEventBus makes it unnecessary in UnifiedRunner. Production path already handles this correctly. Issue only affects main.py (dev/staging). Severity inflation error by original agent."
+    },
+    {
+      "id": "DM-202",
+      "agent": "devops-monitor",
+      "validated": true,
+      "original_severity": "low",
+      "adjusted_severity": "low",
+      "production_impact": "pii",
+      "adoption_level": "should_consider",
+      "rationale": "Real email address hardcoded in settings.py:211-212 and .env.example. PII in committed code. Should be fixed. Low confirmed."
+    },
+    {
+      "id": "DM-203",
+      "agent": "devops-monitor",
+      "validated": true,
+      "original_severity": "low",
+      "adjusted_severity": "low",
+      "production_impact": "potential_credential_leak",
+      "adoption_level": "should_consider",
+      "rationale": "smtp_password as plain str instead of SecretStr at settings.py:248. Risk only on model_dump() exposure. Low confirmed."
+    },
+    {
+      "id": "DM-204",
+      "agent": "devops-monitor",
+      "validated": true,
+      "original_severity": "high",
+      "adjusted_severity": "high",
+      "production_impact": "direct",
+      "adoption_level": "must_fix",
+      "rationale": "VALIDATED as high. Confirmed: grep of runner.py for set_metrics_collector returns 0 matches. Confirmed: runner.py:370-404 initialize() has no MetricsCollector injection. Confirmed: main.py:107-121 dev path injects correctly for 7 modules. Production path (UnifiedRunner via run_unified.py) never increments fx_kill_switch_triggered_total, fx_circuit_breaker_triggered_total, fx_ptrc_reject_total. alerting_rules.yml FxKillSwitchTriggered, FxCircuitBreakerTriggered, FxPtrcRejectSpike are permanently silent in production. A kill switch trigger generates no Prometheus alert. High confirmed."
+    },
+    {
+      "id": "DM-205",
+      "agent": "devops-monitor",
+      "validated": true,
+      "original_severity": "low",
+      "adjusted_severity": "low",
+      "production_impact": "monitoring_gap",
+      "adoption_level": "informational",
+      "rationale": "Missing alert rules for fx_signal_silence_sec, fx_feature_store_compute_errors_total, fx_backfill_failures_total, fx_live_eligible_key_missing_total. Low confirmed."
+    },
+    {
+      "id": "DM-206",
+      "agent": "devops-monitor",
+      "validated": true,
+      "original_severity": "low",
+      "adjusted_severity": "low",
+      "production_impact": "documentation",
+      "adoption_level": "informational",
+      "rationale": "Missing runbook file position_reconciler_mismatch.md referenced by alerting_rules.yml:127 and email_notifier.py:655. Low confirmed."
+    },
+    {
+      "id": "DM-207",
+      "agent": "devops-monitor",
+      "validated": false,
+      "original_severity": "medium",
+      "adjusted_severity": "low",
+      "production_impact": "observability_only",
+      "adoption_level": "informational",
+      "rationale": "DOWNGRADED AND PARTIALLY REJECTED. Dashboard health display hides component-level anomalies confirmed at app.py:136-139. However: (1) Dashboard is Streamlit monitoring UI, not a safety mechanism. (2) Operators receive email alerts for critical events regardless of dashboard state. (3) State-file mode is an architectural constraint (UnifiedRunner does not run FastAPI). Information gap is real but production impact is observability UX only, not safety. Downgraded to low."
+    },
+    {
+      "id": "DM-208",
+      "agent": "devops-monitor",
+      "validated": false,
+      "original_severity": "low",
+      "adjusted_severity": "informational",
+      "production_impact": "none",
+      "adoption_level": "informational",
+      "rationale": "REJECTED as actionable finding. metrics.py kind label comment missing 3 INC-added kinds (position_mismatch, live_anomaly, position_reconcile_mismatch). Comment drift only - counter increments work correctly, Grafana can filter any kind value regardless of comment. Documentation note only, not a finding requiring priority treatment."
+    }
+  ]
+}

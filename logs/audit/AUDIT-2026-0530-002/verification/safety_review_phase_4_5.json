@@ -1,0 +1,389 @@
+{
+  "audit_id": "AUDIT-2026-0530-002",
+  "phase": "4.5",
+  "reviewer": "code-safety-reviewer",
+  "review_date": "2026-05-30",
+  "repos": {
+    "ATLAS": "C:/data/works/FX/ATLAS",
+    "FTS": "C:/data/works/FX/fx_trading_system"
+  },
+  "modifications_reviewed": [
+    "ATLAS: scripts/backfill_v6_2_0_soft_score.py (QA-501/503)",
+    "ATLAS: logs/flipped_v6_2_0_gids.txt (15 flip GID list)",
+    "ATLAS: strategies/*/backtest/result.json 15 files",
+    "FTS: email_notifier.py (PA-501)",
+    "FTS: broker_gateway.py + strategy_slot.py (RE-501)",
+    "FTS: email_notifier.py builders x2 (RE-502/PA-506)",
+    "FTS: docs/runbook/feature_staleness.md + alerting_rules.yml (DE-503)",
+    "FTS: alerting_rules.yml PromQL weekend mute (DE-504)",
+    "FTS: .github/workflows/parity.yml (QT-501)"
+  ],
+  "checks": {
+    "ATLAS_backfill_QA501_QA503": {
+      "modification": "scripts/backfill_v6_2_0_soft_score.py: QA-501/QA-503 invariant sync + --force + --gids-from + failed_conditions marker",
+      "checklist": {
+        "item1_production_reachability": {
+          "result": "N/A",
+          "detail": "Manual execution script; not reachable from any production callpath. grep verified: no import/exec in ATLAS repo production code. Production runner.py reads result.json only."
+        },
+        "item2_initialization_order": {
+          "result": "PASS",
+          "detail": "Atomic file write (_save_result_atomic) per file. No init order dependency. --force skip check placed after VERSION check; no interference with existing logic."
+        },
+        "item3_wiring_symmetry": {
+          "result": "N/A",
+          "detail": "ATLAS has no main.py/runner.py dual-implementation pattern. Standalone CLI."
+        },
+        "item4_external_system_consistency": {
+          "result": "PASS",
+          "detail": "Only result.json modified. No OANDA/Redis/PG side effects. _save_result_atomic protects original on write failure."
+        },
+        "item5_escape_hatch_side_effects": {
+          "result": "PASS",
+          "detail": "--force bypasses schema version skip check. Marker addition idempotent via (if marker not in failed_conditions). No side effects."
+        },
+        "item6_metrics_label_semantics": {
+          "result": "WARNING_ADVISORY",
+          "severity": "WARNING_ADVISORY",
+          "detail": "3 markers map to new_t2_passed/is_duplicate logic. T1+T2 simultaneous FAIL: new_t2_passed=False evaluated first so below_floor marker hides T1 failure. T1 reason remains in existing failed_conditions so actual harm is limited; semantically ambiguous."
+        },
+        "item7_backfill_plan": {
+          "result": "PASS",
+          "detail": "This fix IS the backfill implementation. logs/flipped_v6_2_0_gids.txt (15 items) used with --gids-from and --force. ATLAS-2026-0506-026 diff proves QA-501 (gate_check.passed true->false) and QA-503 (layer2.passed true->false) both correctly applied."
+        }
+      },
+      "special_observations": [
+        {
+          "id": "QA-501-503-EDGE-1",
+          "severity": "WARNING_ADVISORY",
+          "detail": "T1+T2 simultaneous FAIL (e.g. ATLAS-2026-0508-054): marker becomes backfill_v6_2_0_soft_score_below_floor but T1 Total Trades is already in failed_conditions. Increases cognitive load but no information loss."
+        }
+      ]
+    },
+    "FTS_PA501_email_notifier": {
+      "modification": "email_notifier.py: strategies_metadata or {} -> strategies_metadata if strategies_metadata is not None else {} (1 line + docstring)",
+      "checklist": {
+        "item1_production_reachability": {
+          "result": "PASS",
+          "detail": "EmailNotifier constructed at runner.py:516 / main.py:255 / main.py:995. All paths pass self._strategies_metadata (initialized as empty dict). After fix, empty dict passed still shares reference. grep verified."
+        },
+        "item2_initialization_order": {
+          "result": "PASS",
+          "detail": "_strategies_metadata initialized as {} at runner.py:192 / main.py:188 before EmailNotifier, then populated in slot setup (runner.py:731, main.py:691). is not None maintains reference sharing so later populate reflects. runner.py:512 comment documents intent."
+        },
+        "item3_wiring_symmetry": {
+          "result": "PASS",
+          "detail": "Both main.py (255/995) and runner.py (516) pass strategies_metadata=self._strategies_metadata symmetrically. No dual-implementation drift."
+        },
+        "item4_external_system_consistency": {
+          "result": "N/A",
+          "detail": "Only metadata dict reference sharing change. No external system side effects."
+        },
+        "item5_escape_hatch_side_effects": {
+          "result": "PASS",
+          "detail": "escape_hatch path (early EmailNotifier creation in main.py) is exactly the problematic path. After fix, escape_hatch path retains strategies_metadata reference so later populate reflects."
+        },
+        "item6_metrics_label_semantics": {
+          "result": "N/A",
+          "detail": "No metrics change."
+        },
+        "item7_backfill_plan": {
+          "result": "N/A",
+          "detail": "Runtime dict reference fix. No historical data backfill needed."
+        }
+      },
+      "special_observations": [
+        {
+          "id": "PA-501-REMAINING-OR-DICT",
+          "severity": "WARNING_ADVISORY",
+          "detail": "email_notifier.py: details = event.details or {} at lines 620,680,717,782,867,926,995,1055,1099 are local variables unrelated to PA-501. currency_converter.py:123 price_cache or {} also does not need external reference sharing by design. No other dangerous same-pattern instances detected."
+        }
+      ]
+    },
+    "FTS_RE501_broker_gateway_strategy_slot": {
+      "modification": "broker_gateway.get_trade: TradeNotFoundError/BrokerUnavailableError transparent raise + function-level import. strategy_slot._recover_stale_trade_pnl: transient_skip path added",
+      "checklist": {
+        "item1_production_reachability": {
+          "result": "WARNING_BLOCKING",
+          "severity": "WARNING_BLOCKING",
+          "detail": "broker_gateway.get_trade called from strategy_slot._recover_stale_trade_pnl (line 1907) and close_trade fallback (line 1212). strategy_slot reached from UnifiedRunner in production. Exception catches at strategy_slot:1223/1230/1943/1955. HOWEVER: stale_pnl_recovery_deferred_to_next_poll emits structlog WARNING only. No Prometheus counter. No alerting_rules.yml rule. Persistent transient state (OANDA down for hours) invisible to oncall monitoring."
+        },
+        "item2_initialization_order": {
+          "result": "PASS",
+          "detail": "Exception class addition and signature change only. No lifecycle start/stop order impact."
+        },
+        "item3_wiring_symmetry": {
+          "result": "WARNING_BLOCKING",
+          "severity": "WARNING_BLOCKING",
+          "detail": "_recover_stale_trade_pnl called only via UnifiedRunner (runner.py). main.py has no equivalent stale_pnl_recovery call (grep confirmed: no _recover_stale_trade_pnl reference in main.py). Deprecated but when live via escape_hatch: RE-501 transient_skip protection absent. INC-2026-0526 same-pattern risk persists on main.py path."
+        },
+        "item4_external_system_consistency": {
+          "result": "PASS",
+          "detail": "transient_skip=True skips both exposure clear (risk_supervisor.clear_exposure) and state clear (open_trade_id/open_entry_price/open_units=None), defers to next bar. Does not close OANDA trade. Correct design: OPEN trade exposure not erroneously cleared."
+        },
+        "item5_escape_hatch_side_effects": {
+          "result": "N/A",
+          "detail": "escape_hatch is main.py path concern; RE-501 fix is runner.py path. No side effects."
+        },
+        "item6_metrics_label_semantics": {
+          "result": "N/A",
+          "detail": "No metrics change."
+        },
+        "item7_backfill_plan": {
+          "result": "N/A",
+          "detail": "Runtime exception handling change only. No historical data backfill needed."
+        }
+      },
+      "special_observations": [
+        {
+          "id": "RE-501-CIRCULAR-IMPORT",
+          "severity": "WARNING_ADVISORY",
+          "detail": "broker_gateway.py get_trade uses function-level import for TradeNotFoundError. strategy_slot.py already has module-level import (line 29-31). Root fix: move TradeNotFoundError to broker_gateway.py or shared exceptions.py to break the circular import. Current approach is functionally correct but remains a design compromise."
+        },
+        {
+          "id": "RE-501-TRANSIENT-NO-ALERT",
+          "severity": "WARNING_BLOCKING",
+          "detail": "No Prometheus counter for persistent transient_skip scenario (OANDA down for hours). stale_pnl_recovery_deferred_to_next_poll and stale_pnl_recovery_transient_skip are structlog WARNING only. No alerting_rules.yml entry. Strategy stuck in OPEN state with PnL recovery suspended is invisible to oncall. Recommended: add fx_stale_pnl_transient_skip_total counter and FxStalePnlTransientSkipHigh alert to alerting_rules.yml."
+        },
+        {
+          "id": "RE-501-NO-RETRY-LIMIT",
+          "severity": "WARNING_ADVISORY",
+          "detail": "No max retry count for transient_skip. For M15 strategies during OANDA downtime: WARNING logged every 15 minutes. Potential high-frequency log pollution."
+        }
+      ]
+    },
+    "FTS_RE502_PA506_builders": {
+      "modification": "_LIVE_ANOMALY_LABELS: 2 entries added + escape_hatch / entry_rollback_orphan dedicated builders x2",
+      "checklist": {
+        "item1_production_reachability": {
+          "result": "PASS",
+          "detail": "_RISK_ALERT_KINDS[platform_escape_hatch_active]=escape_hatch (line 343) dispatches to _build_escape_hatch_message (line 464-471). _RISK_ALERT_KINDS[entry_rollback_orphan]=entry_rollback_orphan (line 349) dispatches to _build_entry_rollback_orphan_message (line 457-463). Both dispatch chains complete. main.py:549 confirmed to emit alert_type=platform_escape_hatch_active."
+        },
+        "item2_initialization_order": {
+          "result": "N/A",
+          "detail": "Method addition only. No lifecycle dependency."
+        },
+        "item3_wiring_symmetry": {
+          "result": "PASS",
+          "detail": "escape_hatch is main.py-path-specific alert. entry_rollback_orphan emitted from RE-402 path. Both go through shared EmailNotifier. No runner.py/main.py asymmetry."
+        },
+        "item4_external_system_consistency": {
+          "result": "N/A",
+          "detail": "Email body generation only. No external system side effects."
+        },
+        "item5_escape_hatch_side_effects": {
+          "result": "PASS",
+          "detail": "Dedicated builders document danger of escape hatch in email body but create no new bypass paths. Improves operator information quality."
+        },
+        "item6_metrics_label_semantics": {
+          "result": "PASS",
+          "detail": "New _LIVE_ANOMALY_LABELS entries platform_escape_hatch_active and entry_rollback_orphan correctly referenced from each builder. Subject, body, and alert_type semantics align."
+        },
+        "item7_backfill_plan": {
+          "result": "N/A",
+          "detail": "Runtime email body change only. No backfill needed."
+        }
+      },
+      "special_observations": []
+    },
+    "FTS_DE503_runbook": {
+      "modification": "docs/runbook/feature_staleness.md v1 to v3 full rewrite + alerting_rules.yml annotations update",
+      "checklist": {
+        "item1_production_reachability": {
+          "result": "N/A",
+          "detail": "Documentation change only."
+        },
+        "item2_initialization_order": {
+          "result": "N/A",
+          "detail": "Documentation change only."
+        },
+        "item3_wiring_symmetry": {
+          "result": "N/A",
+          "detail": "Documentation change only."
+        },
+        "item4_external_system_consistency": {
+          "result": "N/A",
+          "detail": "Documentation change only."
+        },
+        "item5_escape_hatch_side_effects": {
+          "result": "N/A",
+          "detail": "Documentation change only."
+        },
+        "item6_metrics_label_semantics": {
+          "result": "WARNING_ADVISORY",
+          "severity": "WARNING_ADVISORY",
+          "detail": "Annotations document that strategy_id label currently holds TF name (known drift from DE-403). Accurate documentation. Root fix (put actual strategy ID in label) remains ADVISORY tracked."
+        },
+        "item7_backfill_plan": {
+          "result": "N/A",
+          "detail": "Documentation change only. No backfill needed."
+        }
+      },
+      "special_observations": [
+        {
+          "id": "DE-503-STALENESS-SEMANTICS-ACCURACY",
+          "severity": "WARNING_INFO",
+          "detail": "Runbook staleness semantics (staleness_sec = max(0, now - (_last_primary_bar_time + TF_SECONDS[primary_tf]))) matches DE-403-post implementation. Pre/post DE-403 contrast is also beneficial for operators."
+        }
+      ]
+    },
+    "FTS_DE504_alerting_rules_weekend_mute": {
+      "modification": "alerting_rules.yml: FxFeatureStorestaleHigh expr: PromQL weekend mute embedded via day_of_week + hour",
+      "checklist": {
+        "item1_production_reachability": {
+          "result": "PASS",
+          "detail": "alerting_rules.yml loaded by Prometheus and directly affects production alerts. PromQL syntax valid: day_of_week() and hour() are standard Prometheus functions."
+        },
+        "item2_initialization_order": {
+          "result": "N/A",
+          "detail": "PromQL change only. No lifecycle dependency."
+        },
+        "item3_wiring_symmetry": {
+          "result": "N/A",
+          "detail": "Single alerting_rules.yml file. No main.py/runner.py concern."
+        },
+        "item4_external_system_consistency": {
+          "result": "N/A",
+          "detail": "Prometheus rule change only. No OANDA/Redis/PG side effects."
+        },
+        "item5_escape_hatch_side_effects": {
+          "result": "PASS",
+          "detail": "Mute conditions: (day_of_week != 6) AND (day_of_week != 0) AND NOT (day_of_week == 5 AND hour >= 22) only. Monday (day_of_week=1) through Friday 21:59 UTC not muted. No unintended weekday suppression."
+        },
+        "item6_metrics_label_semantics": {
+          "result": "N/A",
+          "detail": "No metrics label change."
+        },
+        "item7_backfill_plan": {
+          "result": "WARNING_BLOCKING",
+          "severity": "WARNING_BLOCKING",
+          "detail": "TASK REQUIREMENT: Document that UTC Mon 0:00-1:59 mute continuation (approx 2h) is a known accepted constraint -- NOT MET. OANDA opens Sunday 22:00 UTC but PromQL day_of_week()==0 mutes all of Sunday UTC (00:00-23:59). Alert suppression continues for 2h after OANDA opens (Sunday 22:00 to Monday 00:00 UTC). Comment stating OANDA open 22:00 is treated as Monday (day_of_week==1) is factually reversed: Sunday 22:00 UTC is still day_of_week=0. Runbook also states treated as Monday without documenting the 2h gap."
+        }
+      },
+      "special_observations": [
+        {
+          "id": "DE-504-SUNDAY-2200-MUTE-GAP",
+          "severity": "WARNING_BLOCKING",
+          "detail": "Alert remains MUTED for 2 hours after OANDA opens (Sunday 22:00 UTC to Monday 00:00 UTC). PromQL day_of_week(): 0=all of Sunday UTC, 1=Monday. Comment claiming Sunday 22:00 UTC is treated as Monday (day_of_week==1) is factually wrong. This is an acceptable design constraint but it is undocumented. Recommended fix: add to alerting_rules.yml comment and runbook that OANDA opens Sunday 22:00 UTC but alert suppression continues until Monday 00:00 UTC (2h post-open gap -- known constraint, accepted). Correct the erroneous treated-as-Monday comment."
+        }
+      ]
+    },
+    "FTS_QT501_parity_yml": {
+      "modification": ".github/workflows/parity.yml: contract path changed from tests/integration/contract to tests/contract",
+      "checklist": {
+        "item1_production_reachability": {
+          "result": "WARNING_BLOCKING",
+          "severity": "WARNING_BLOCKING",
+          "detail": "tests/contract/ contains test_oanda_broker_metrics_wired.py only. tests/integration/contract/test_strategy_contract.py (TestStrategyContract: AST strategy load and bar-processing contract) is NOT included in the dedicated contract gate. test_strategy_contract.py IS executed by catch-all unit test step (pytest tests/ --ignore=tests/live --ignore=tests/parity) but dedicated gate separation is only partially achieved. grep evidence: tests/contract/ -> test_oanda_broker_metrics_wired.py; tests/integration/contract/ -> test_strategy_contract.py with TestStrategyContract class confirmed."
+        },
+        "item2_initialization_order": {
+          "result": "N/A",
+          "detail": "CI workflow change only."
+        },
+        "item3_wiring_symmetry": {
+          "result": "N/A",
+          "detail": "GitHub Actions workflow is a single file."
+        },
+        "item4_external_system_consistency": {
+          "result": "N/A",
+          "detail": "CI workflow change only."
+        },
+        "item5_escape_hatch_side_effects": {
+          "result": "N/A",
+          "detail": "CI workflow change only."
+        },
+        "item6_metrics_label_semantics": {
+          "result": "N/A",
+          "detail": "CI workflow change only."
+        },
+        "item7_backfill_plan": {
+          "result": "N/A",
+          "detail": "CI workflow change only. No backfill needed."
+        }
+      },
+      "special_observations": [
+        {
+          "id": "QT-501-SPLIT-CONTRACT-DIRS",
+          "severity": "WARNING_BLOCKING",
+          "detail": "Contract tests split across 2 directories: tests/contract/ (oanda broker metrics wired AST) and tests/integration/contract/ (strategy load and bar-processing: TestStrategyContract). QT-501 fix only runs tests/contract/ in dedicated gate. tests/integration/contract/ runs only in catch-all unit step. Recommended: run both directories in parity.yml contract step, OR consolidate tests/integration/contract/ into tests/contract/."
+        }
+      ]
+    }
+  },
+  "summary": {
+    "overall_assessment": "CONDITIONAL_PASS",
+    "blocking_issues": [
+      {
+        "id": "RE-501-TRANSIENT-NO-ALERT",
+        "modification": "RE-501 (strategy_slot.py transient_skip)",
+        "severity": "WARNING_BLOCKING",
+        "checklist_item": 1,
+        "detail": "stale_pnl_recovery_deferred_to_next_poll is structlog WARNING only. No Prometheus counter, no alerting_rules.yml rule. Persistent transient state (OANDA down for hours) is invisible to oncall monitoring.",
+        "recommended_action": "Add fx_stale_pnl_transient_skip_total counter to strategy_slot.py and add FxStalePnlTransientSkipHigh alert rule to alerting_rules.yml."
+      },
+      {
+        "id": "RE-501-WIRING-MAIN-PY",
+        "modification": "RE-501 (broker_gateway.py + strategy_slot.py)",
+        "severity": "WARNING_BLOCKING",
+        "checklist_item": 3,
+        "detail": "main.py path has no _recover_stale_trade_pnl transient_skip protection. Deprecated but when running live via escape_hatch, INC-2026-0526 same-pattern exposure-clearing risk persists.",
+        "recommended_action": "Enforce main.py path deprecation (permanently remove PLATFORM_ALLOW_MAIN_PRODUCTION_LIVE) OR add equivalent transient skip protection to the main.py path."
+      },
+      {
+        "id": "DE-504-SUNDAY-2200-MUTE-GAP",
+        "modification": "DE-504 (alerting_rules.yml)",
+        "severity": "WARNING_BLOCKING",
+        "checklist_item": 7,
+        "detail": "2h mute window after OANDA opens (Sunday 22:00 to Monday 00:00 UTC) is undocumented. Comment stating Sunday 22:00 UTC is treated as Monday (day_of_week==1) is factually wrong (it is still day_of_week=0). Acceptable design constraint but must be documented.",
+        "recommended_action": "Add to alerting_rules.yml comment and runbook: alert suppression continues 2h after OANDA opens (Sunday 22:00 to Monday 00:00 UTC, known accepted constraint). Correct the erroneous treated-as-Monday comment."
+      },
+      {
+        "id": "QT-501-SPLIT-CONTRACT-DIRS",
+        "modification": "QT-501 (parity.yml)",
+        "severity": "WARNING_BLOCKING",
+        "checklist_item": 1,
+        "detail": "tests/integration/contract/test_strategy_contract.py (TestStrategyContract: AST strategy load and bar-processing) is not included in the dedicated contract gate after QT-501 fix. tests/contract/ contains only test_oanda_broker_metrics_wired.py.",
+        "recommended_action": "Run both contract directories in parity.yml contract step OR move tests/integration/contract/ tests to tests/contract/."
+      }
+    ],
+    "advisory_issues": [
+      {
+        "id": "RE-501-CIRCULAR-IMPORT",
+        "severity": "WARNING_ADVISORY",
+        "detail": "Function-level import of TradeNotFoundError in broker_gateway.py get_trade is a design compromise. Moving TradeNotFoundError to a shared exceptions module would break the circular import at the root."
+      },
+      {
+        "id": "PA-501-REMAINING-OR-DICT",
+        "severity": "WARNING_ADVISORY",
+        "detail": "email_notifier.py: details = event.details or {} is used for local variables and is unrelated to PA-501. No other dangerous same-pattern instances detected."
+      },
+      {
+        "id": "DE-503-LABEL-DRIFT",
+        "severity": "WARNING_ADVISORY",
+        "detail": "strategy_id label still stores TF name (known issue DE-403). Root fix remains ADVISORY tracked. Grafana strategy-level slicing remains impossible."
+      },
+      {
+        "id": "QA-501-503-T1-T2-MARKER-CONFLATION",
+        "severity": "WARNING_ADVISORY",
+        "detail": "T1+T2 simultaneous FAIL: below_floor marker hides T1 failure reason. T1 reason already in existing failed_conditions so actual harm is limited."
+      },
+      {
+        "id": "RE-501-NO-RETRY-LIMIT",
+        "severity": "WARNING_ADVISORY",
+        "detail": "No max retry count for transient_skip. For M15 strategies during OANDA downtime: WARNING logged every 15 minutes, potential high-frequency log pollution."
+      }
+    ],
+    "info_items": [
+      {
+        "id": "DE-503-STALENESS-DOCS-QUALITY",
+        "severity": "WARNING_INFO",
+        "detail": "Runbook staleness semantics explanation is accurate and high quality. The pre/post DE-403 contrast is beneficial for operator understanding."
+      }
+    ],
+    "blocking_count": 4,
+    "advisory_count": 5,
+    "info_count": 1,
+    "regression_test_readiness": "CONDITIONAL",
+    "regression_test_notes": "4 WARNING_BLOCKING issues exist. DE-504 (documentation gap) and QT-501 (partial contract coverage) do not directly affect regression test pass or fail. RE-501-TRANSIENT-NO-ALERT and RE-501-WIRING-MAIN-PY leave production monitoring blind spots but do not block regression test execution. If proceeding with regression tests while acknowledging these issues, track all 4 as next-phase fixes."
+  }
+}

@@ -1,0 +1,152 @@
+{
+  "audit_id": "AUDIT-2026-0530-002",
+  "phase": "3/4",
+  "agent": "risk-execution-engineer",
+  "commit_type": "[fix:bug]",
+  "committed": false,
+  "fixes": [
+    {
+      "id": "PA-501",
+      "severity": "high",
+      "post_fix_defect": true,
+      "title": "EmailNotifier.__init__ で strategies_metadata の参照が空 dict 渡しで切断される",
+      "root_cause": "strategies_metadata or {} の falsy 短絡で空 dict が右辺で新規生成されていた",
+      "fix_summary": "or {} を if strategies_metadata is not None else {} に変更し、空 dict であっても呼出元と同一インスタンスを共有する設計契約を満たす",
+      "files_modified": [
+        {
+          "path": "C:\\data\\works\\FX\\fx_trading_system\\trading_platform\\core\\monitoring\\email_notifier.py",
+          "lines_changed": "126-128 (修正前 3 行) → 126-138 (修正後 13 行 / コメント込)",
+          "diff_summary": "self._strategies_metadata = strategies_metadata or {} → strategies_metadata if strategies_metadata is not None else {} に変更。PA-501 経緯コメントを追記"
+        }
+      ],
+      "tests_added": [
+        {
+          "path": "C:\\data\\works\\FX\\fx_trading_system\\tests\\unit\\test_pa501_email_notifier_metadata_reference.py",
+          "test_count": 5,
+          "test_names": [
+            "test_empty_dict_preserves_reference",
+            "test_post_init_populate_reflects_on_notifier",
+            "test_none_creates_new_empty_dict",
+            "test_non_empty_dict_preserves_reference",
+            "test_helper_path_metadata_reflected_in_fill_message_lookup"
+          ],
+          "coverage": "id() 一致検証 / 後段 populate 反映 / None 後方互換 / 非空 dict 後方互換 / helper 経路 end-to-end シナリオ"
+        }
+      ],
+      "verification": "5/5 PASSED in 0.17s"
+    },
+    {
+      "id": "RE-501",
+      "severity": "high",
+      "post_fix_defect": true,
+      "title": "BrokerGateway.get_trade が TradeNotFoundError と BrokerUnavailableError を None で握りつぶし、RE-MISSED-401 修正の効果を gateway 層で無効化",
+      "root_cause": "broker_gateway.py:469-477 の except Exception → return None が permanent (TradeNotFoundError) と transient (BrokerUnavailableError) を区別せず、呼出側 (_recover_stale_trade_pnl) で transient でも clear_exposure を呼ぶ経路を許していた",
+      "fix_summary": "(1) BrokerGateway.get_trade で TradeNotFoundError / BrokerUnavailableError をそのまま raise (silent None drop 廃止)、(2) 予期しない Exception は BrokerUnavailableError にラップ、(3) _recover_stale_trade_pnl で transient_skip フラグを導入し transient 時は exposure クリア + state クリアをスキップ、(4) close_trade_zero_price フォールバック経路でも両例外を warning ログ + 補完不可扱いに",
+      "files_modified": [
+        {
+          "path": "C:\\data\\works\\FX\\fx_trading_system\\trading_platform\\core\\execution_engine\\broker_gateway.py",
+          "lines_changed": "469-477 (修正前 9 行) → 469-528 (修正後 60 行 / docstring + 例外分岐込)",
+          "diff_summary": "get_trade の except Exception を TradeNotFoundError / BrokerUnavailableError / Exception の 3 分岐に細分化。docstring に RE-501 経緯と Raises 仕様を明記。TradeNotFoundError は循環 import 回避のため関数内 import"
+        },
+        {
+          "path": "C:\\data\\works\\FX\\fx_trading_system\\trading_platform\\core\\unified_runner\\strategy_slot.py",
+          "lines_changed": "29-31 (import 1 行追加) / 1192-1230 (close_trade_zero_price フォールバック 17→39 行) / 1901-1950 (_recover_stale_trade_pnl の get_trade 呼出 + transient_skip 導入) / 1970-2010 (transient_skip 早期 return ガード追加)",
+          "diff_summary": "TradeNotFoundError を import、close_trade_zero_price フォールバックで両例外を warning + trade_detail=None 扱い、_recover_stale_trade_pnl で transient/permanent を別 except 節に分離。transient 時は exposure / state クリアをスキップして次バー再試行に委ねる"
+        }
+      ],
+      "tests_added": [
+        {
+          "path": "C:\\data\\works\\FX\\fx_trading_system\\tests\\fault\\test_re501_broker_gateway_exception_passthrough.py",
+          "test_count": 7,
+          "test_names": [
+            "test_get_trade_propagates_trade_not_found_error",
+            "test_get_trade_propagates_broker_unavailable_error",
+            "test_get_trade_wraps_unexpected_exception_as_broker_unavailable",
+            "test_get_trade_returns_trade_detail_on_success",
+            "test_get_trade_returns_none_when_broker_lacks_method",
+            "test_recover_stale_trade_pnl_skips_clear_on_transient_error",
+            "test_recover_stale_trade_pnl_clears_on_trade_not_found"
+          ],
+          "coverage": "(1) gateway 層の例外伝播 4 ケース + adapter 未実装ケース 1 / (2) _recover_stale_trade_pnl の transient/permanent 区別 2 ケース (RE-501 の本丸検証)"
+        }
+      ],
+      "verification": "7/7 PASSED in 0.09s。既存 test_re_missed_401 (12 テスト) も全 PASS で gateway 層の修正が adapter 層の RE-MISSED-401 修正と矛盾しないことを確認"
+    },
+    {
+      "id": "RE-502_PA-506_統合",
+      "severity": "medium",
+      "post_fix_defect": true,
+      "title": "EmailNotifier の _LIVE_ANOMALY_LABELS に entry_rollback_orphan / platform_escape_hatch_active 未登録 + 共用 builder で誤誘導本文",
+      "root_cause": "_LIVE_ANOMALY_LABELS 未登録で件名が汎用「Live 異常」フォールバック、_build_live_anomaly_message 共用で本文が INC-2026-0526-001 (幻エクスポージャー) 固定文言になっていた。devil-advocate B 統合判定で RE-502 を canonical、PA-506 は同一指摘",
+      "fix_summary": "(1) _LIVE_ANOMALY_LABELS に 2 entry を追加 (platform_escape_hatch_active / entry_rollback_orphan)、(2) _build_entry_rollback_orphan_message 専用 builder を新設 (OANDA Web UI 手動 close 手順 + trade_id / instrument / direction を本文に明示)、(3) _build_escape_hatch_message 専用 builder を新設 (PA-401/PA-103 二重リスク + UnifiedRunner 移行推奨を本文に明示)、(4) dispatcher を更新し共用 builder ではなく専用 builder にルーティング",
+      "files_modified": [
+        {
+          "path": "C:\\data\\works\\FX\\fx_trading_system\\trading_platform\\core\\monitoring\\email_notifier.py",
+          "lines_changed": "447-466 (dispatcher 2 分岐を専用 builder 呼出に切替) / 825-840 (_LIVE_ANOMALY_LABELS に 2 entry + 経緯コメント追記) / 901-1020 (_build_entry_rollback_orphan_message / _build_escape_hatch_message 2 専用 builder 新設、合計 約 120 行)",
+          "diff_summary": "_LIVE_ANOMALY_LABELS への 2 entry 追加 + dispatcher 切替 + 2 専用 builder 新設。本文に INC-2026-0526-001 固定文言が含まれない設計に変更"
+        }
+      ],
+      "tests_added": [
+        {
+          "path": "C:\\data\\works\\FX\\fx_trading_system\\tests\\integration\\test_pa412_escape_hatch_warning.py",
+          "added_test_count": 2,
+          "test_names": [
+            "test_escape_hatch_builder_uses_dedicated_subject_and_body",
+            "test_escape_hatch_dispatcher_routes_to_dedicated_builder"
+          ],
+          "coverage": "件名に escape hatch 文言が含まれること / 本文に PLATFORM_ALLOW_MAIN_PRODUCTION_LIVE + UnifiedRunner 推奨が含まれること / INC-2026-0526-001 固定文言が含まれないこと / _LIVE_ANOMALY_LABELS の登録確認"
+        },
+        {
+          "path": "C:\\data\\works\\FX\\fx_trading_system\\tests\\fault\\test_re402_entry_rollback_oanda_cleanup.py",
+          "added_test_count": 2,
+          "test_names": [
+            "test_entry_rollback_orphan_email_builder_uses_dedicated_subject_and_body",
+            "test_entry_rollback_orphan_label_registered_in_live_anomaly_labels"
+          ],
+          "coverage": "件名に orphan が含まれること / 本文に trade_id / instrument / direction が含まれること / OANDA Web UI 手動 close 手順が含まれること / INC-2026-0526-001 固定文言が含まれないこと"
+        }
+      ],
+      "verification": "PA-412 既存 4 + 新規 2 = 6 PASSED、RE-402 既存 5 + 新規 2 = 7 PASSED、合計 13 PASSED in 2.89s"
+    }
+  ],
+  "files_modified_total": 4,
+  "files_modified_paths": [
+    "C:\\data\\works\\FX\\fx_trading_system\\trading_platform\\core\\monitoring\\email_notifier.py",
+    "C:\\data\\works\\FX\\fx_trading_system\\trading_platform\\core\\execution_engine\\broker_gateway.py",
+    "C:\\data\\works\\FX\\fx_trading_system\\trading_platform\\core\\unified_runner\\strategy_slot.py",
+    "C:\\data\\works\\FX\\fx_trading_system\\tests\\integration\\test_pa412_escape_hatch_warning.py",
+    "C:\\data\\works\\FX\\fx_trading_system\\tests\\fault\\test_re402_entry_rollback_oanda_cleanup.py"
+  ],
+  "tests_added_total_new_files": 2,
+  "tests_added_paths": [
+    "C:\\data\\works\\FX\\fx_trading_system\\tests\\unit\\test_pa501_email_notifier_metadata_reference.py",
+    "C:\\data\\works\\FX\\fx_trading_system\\tests\\fault\\test_re501_broker_gateway_exception_passthrough.py"
+  ],
+  "regression_verification": {
+    "scope": "tests/unit/ + tests/fault/",
+    "result": "1334 passed in 13.49s",
+    "broken_tests": 0,
+    "newly_added_tests_passing": 16
+  },
+  "constraints_observed": {
+    "no_commit": true,
+    "fix_bug_type": true,
+    "no_existing_test_broken": true,
+    "claude_md_compliance": true,
+    "circular_import_avoided": "TradeNotFoundError は broker_gateway.py 関数内 import で循環依存を回避"
+  },
+  "design_notes": [
+    "RE-501 で _recover_stale_trade_pnl に導入した transient_skip フラグは次バー再試行設計。OANDA 障害継続中は同戦略で繰り返しスキップされるが、stale_pnl_recovery_deferred_to_next_poll ログで観測可能",
+    "RE-502 / PA-506 統合の専用 builder は subject に WARN/ プレフィックスをハードコードせず [<level>] 形式に変更 (旧 INC-2026-0526 builder の WARN/CRITICAL 重複表示を回避)",
+    "PA-501 の修正は 1 行変更だが、devil-advocate B から「テスト追加のみだと root cause 残存リスク」と警告されていた点を踏まえ、root cause 自体を修正",
+    "Devil-advocate 統合判定通り PA-506 と RE-502 は同一現象として 1 件で修正完了。今後の audit-loop で PA-506 を重複としてクローズ推奨"
+  ],
+  "deferred_findings": {
+    "RE-503": "should_consider - 全 OANDA REST メソッドへの _record_api_metric dead path 解消 (本ラウンド対象外)",
+    "RE-504": "should_consider - _attempt_orphan_close_after_rollback の累積 orphan 対策",
+    "RE-505": "should_consider - early_started_components リスト管理で rollback list 共有",
+    "RE-508": "should_consider - DESIGN-C-001 RE-305 / live_orders_silent 12h throttle 矛盾",
+    "RE-506_507_509_510": "informational - 次回 audit-loop で再評価",
+    "PA-502_503_504_505_507": "informational ～ should_consider - 次回 audit-loop で再評価"
+  }
+}

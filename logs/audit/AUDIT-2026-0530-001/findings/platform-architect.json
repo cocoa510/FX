@@ -1,0 +1,225 @@
+{
+  "agent": "platform-architect",
+  "scope": "FTS アーキテクチャ (commit 9998a7a 事後検証)",
+  "post_fix_verification": {
+    "PA-301_metrics_injection": "OK (本番経路) | concerns: AST 検証は『for ループの iter タプル内に _osg_mod が含まれ、かつ for body のどこかに .set_metrics_collector 呼び出しがある』のみを判定し、`_mod.set_metrics_collector(...)` という呼び方の保証はない。将来のリファクタで _osg_mod を for に残しつつ別の set_metrics_collector 呼び出しを別オブジェクトに対して入れた場合 (例: `self._metrics.set_metrics_collector(...)` のような誤書き)、false-positive で緑のまま実注入が壊れる構造的緩さがある。test_pa301_osg_metrics_injection.py:68-123 を参照。",
+    "PA-303_main_live_gate": "DEFECT — 本番フォールバック (Email/EventBus) が dead path | concerns: main.py initialize() 内で publish される `live_strategy_rejected_by_gate` RiskAlertEvent は (1) EventBus 未起動 (start() は initialize() の後で TradingPlatform.start() 内 line 1004 で実行) 、(2) EmailNotifier も未生成 (line 852 で生成、line 1083 で start()) のため、InMemoryEventBus.publish の `if not self._running: logger.warning(...); return` に該当し silently drop される。AuditLog のみが残り、EmailNotifier 通知パスは 0 件届く。AUDIT-2026-0529-003 C-01 で runner.py 側に対して講じた『EmailNotifier.start() を slot loop より前に移動』対策が main.py には未適用。actor='main_platform' は単なるログ識別で、動作分岐は無い。",
+    "PA-306_state_store_backend": "OK | concerns: PlatformSettings.state_backend を介して読込み、os.environ の二重読み込みは無い。Pydantic field の validation_alias 設定はないため env var は `STATE_BACKEND` だが case_insensitive=True で読まれる。明示分岐 + memory 警告 + 未知値 fail-loud は構造的に妥当。本番経路 (UnifiedRunner) は StateStore 非使用なので影響なし。"
+  },
+  "findings": [
+    {
+      "id": "PA-401",
+      "severity": "high",
+      "area": "main|event_bus",
+      "title": "main.py PA-303 修正の Email/EventBus 通知パスが dead — initialize() で publish するが EventBus 未起動 & EmailNotifier 未生成 (AUDIT-2026-0529-003 C-01 同型の再発)",
+      "description": "PA-303 修正で main.py initialize() に LIVE Gate 拒否時の `self._event_bus.publish(RiskAlertEvent(..., alert_type='live_strategy_rejected_by_gate'))` 経路 (main.py:492-506) を追加したが、当該 publish の時点で (1) EventBus は未起動 (InMemoryEventBus._running=False、start() は TradingPlatform.start() の line 1004 で実行)、(2) EmailNotifier は未生成 (line 852 で初期化、line 1083 で start subscribe)。InMemoryEventBus.publish は `if not self._running: logger.warning('Event Bus未起動状態でpublish'); return` (memory_adapter.py:94-96) で silently drop し、AuditLog のみが残る。これは AUDIT-2026-0529-003 C-01 で runner.py 側について発見・修正された全く同じ構造的死角の main.py での再発。PA-303 commit 自体に runner.py の修正パターンを移植していない。PLATFORM_ALLOW_MAIN_PRODUCTION_LIVE=1 のエスケープハッチ通過時 (運用上の最終手段とされている経路) に LIVE Gate 拒否があっても Email 通知は届かず、運用者は AuditLog を見るまで気付けない。なお RedisEventBus 経路 (env=PRODUCTION 想定) でも同様で、未起動状態の publish は実装によらず接続前のため発火不能。",
+      "evidence": [
+        "trading_platform/main.py:422 initialize() 関数開始",
+        "trading_platform/main.py:455-520 LIVE Gate 拒否時の publish (EventBus 未起動)",
+        "trading_platform/main.py:852-858 EmailNotifier 生成 (publish の後)",
+        "trading_platform/main.py:1001-1006 _event_bus.start() 呼出 (start() 内、initialize より後)",
+        "trading_platform/main.py:1083-1089 EmailNotifier.start() 呼出 (subscribe はここで)",
+        "trading_platform/core/event_bus/memory_adapter.py:94-96 未起動時の publish drop",
+        "trading_platform/core/monitoring/email_notifier.py:222-223 subscribe は start() 内",
+        "logs/audit/AUDIT-2026-0529-003/findings/c01_*.json (同型修正の前例)"
+      ],
+      "reproduction": "1. PLATFORM_ALLOW_MAIN_PRODUCTION_LIVE=1 を設定。2. ENV=production で `python -m trading_platform.main` を起動。3. strategies/imported/ 配下に Gate FAIL 戦略を 1 件配置 (live_eligible=false など)。4. EmailNotifier は notify_email_enabled=True で設定。5. 起動時 LIVE Gate 拒否で structlog に 'Event Bus未起動状態でpublish' WARN が出るが Email は届かない。AuditLog のみが logs/audit/ に記録される。",
+      "suggested_fix": "(A) main.py initialize() の構造を runner.py に倣って書き換える: i) Event Bus 起動順序を組み直して `_event_bus.start()` を slot 検証ループより前に呼ぶ、ii) EmailNotifier をその直後に生成 + start() で subscribe してから slot 検証ループへ進む。あるいは (B) load_strategy 個別ループを start() フェーズへ移動し、EmailNotifier subscribe 後に検証を行う。いずれにせよ AUDIT-2026-0529-003 C-01 で runner.py に施した『EmailNotifier を Gate 検証より前に subscribe させる』パターンを main.py にも適用すること。回帰防止は『EventBus.start() → EmailNotifier.start() → Gate publish の順序を保証する』構造テストを追加。",
+      "regression_of": "AUDIT-2026-0529-003 C-01 (runner.py 修正だけで main.py 側を更新し忘れた)",
+      "post_fix_defect": true
+    },
+    {
+      "id": "PA-402",
+      "severity": "medium",
+      "area": "main",
+      "title": "PA-303 main.py の Audit Log try/except が AuditLogger=None も catch するが、initialize() 経路では _audit_logger は line 141-143 で生成され必ず存在 — None ガードのコードは過剰防御で意図不明",
+      "description": "main.py:476-489 で `if self._audit_logger is not None:` ガードと `try/except` を二重に巻いている。`self._audit_logger` は __init__ (line 141-143) で必ず無条件生成され None になるパスがない。runner.py:563-575 では `_audit_logger` ローカル変数が `await AuditLogger(...)` の戻り値とほぼ等価で必ず非 None だが、それでもガード自体は不要。冗長コードのため将来 None 化される可能性を読み手に誤認させる。テスト test_pa303_main_live_gate_rejection.py:200 は `assert 'audit_logger.record' in source or '_audit_logger.record' in source` のみで本当に呼ばれるかは検証していない。",
+      "evidence": [
+        "trading_platform/main.py:141-143 _audit_logger 無条件生成",
+        "trading_platform/main.py:477-489 if/try でガード",
+        "tests/unit/test_pa303_main_live_gate_rejection.py:198-202 浅い文字列検証"
+      ],
+      "reproduction": "コードレビュー: main.py __init__ で audit_logger を None にする経路が存在しないことを確認。",
+      "suggested_fix": "ガードを削除し `await self._audit_logger.record(...)` を直書きする。try/except は AuditLogger 内部 (writer 障害) のために残してよいが、コメントで意図 (writer 失敗時のフォールバック) を明示。",
+      "regression_of": null,
+      "post_fix_defect": true
+    },
+    {
+      "id": "PA-403",
+      "severity": "medium",
+      "area": "main|state_store",
+      "title": "PA-306 修正の InMemoryBackend 警告ログが loud だが、CRITICAL レベル (line 708-714) と WARNING レベル (line 731-739) で同内容を二重出力 — alerting 側の重複・throttle と整合しない",
+      "description": "main.py:704-744 で state_backend 選択時に CRITICAL ログ (line 708-714 で常時) + memory 分岐内で WARNING ログ (line 731-739) の 2 段で同じ内容 (env, state_backend, ephemeral 性) を出力する。Prometheus alerting_rules では同じメトリクス源を 2 重に拾うリスクは低いが、structlog → Loki / journald 側で同一起動イベントが CRITICAL + WARNING の 2 行で重複 grep される。意図的なら片方 (memory 分岐の WARNING) は INFO で十分。なお CRITICAL は 「memory 選択は production では拒否される」という安全要件の構造的可視化として残す価値があるため、WARNING の方を消すのが妥当。",
+      "evidence": [
+        "trading_platform/main.py:708-714 CRITICAL 出力 (常時)",
+        "trading_platform/main.py:730-739 WARNING 出力 (memory 分岐内、内容重複)"
+      ],
+      "reproduction": "ENV=research で起動するだけで上記 2 行が両方記録される。",
+      "suggested_fix": "memory 分岐の WARNING を INFO に格下げ、または完全削除。CRITICAL 側だけで運用可視化要件を満たす。",
+      "regression_of": null,
+      "post_fix_defect": true
+    },
+    {
+      "id": "PA-404",
+      "severity": "low",
+      "area": "main",
+      "title": "PA-303 main.py で actor='main_platform' を設定するが、AuditLog/RiskAlertEvent の下流処理に actor 別の分岐が無い — 単なる識別ログ用",
+      "description": "main.py:481 で actor='main_platform' を AuditEntry に渡し、runner.py:567 では actor='unified_runner' を渡す。下流 (EmailNotifier、Prometheus、JsonlAuditWriter) でこの値を見て動作分岐する経路は無く、purely forensics 用途。これ自体は正しい (actor 区別は 「どの entry point が rejected したか」 を運用者が後追いできるようにする最小限のメタデータ)。ただし将来この actor 値を見て分岐したくなったとき、両 actor 文字列が単独で固定されている (定数化されていない) ため、命名のドリフトリスクがある。",
+      "evidence": [
+        "trading_platform/main.py:481 actor=\"main_platform\"",
+        "trading_platform/core/unified_runner/runner.py:567 actor=\"unified_runner\"",
+        "trading_platform/core/monitoring/audit_log.py: actor 別分岐なし (grep)"
+      ],
+      "reproduction": "コードレビュー: `grep -r 'main_platform\\|unified_runner' trading_platform/` で actor 文字列を参照する箇所が AuditEntry 生成のみであることを確認。",
+      "suggested_fix": "AuditCategory または専用 Enum (例: AuditActor.MAIN_PLATFORM / AuditActor.UNIFIED_RUNNER) を定義してハードコード文字列を排除。または現状を accept として運用ルール (この値は forensics 専用) を docstring に明文化。",
+      "regression_of": null,
+      "post_fix_defect": false
+    },
+    {
+      "id": "PA-405",
+      "severity": "medium",
+      "area": "runner|async",
+      "title": "runner.py _poll_cycle で OANDA account_info 失敗時に return すると _check_live_health_alerts (b1 live_orders_silent / b2 exposure_near_cap) が skip され、外部から見た live 沈黙の能動検知が OANDA 復旧まで遅延する",
+      "description": "runner.py:1559-1632 で account_info 取得失敗時に return するが、heartbeat 周期で呼ばれる `_check_live_health_alerts()` (line 1547) は account_info より前 (heartbeat 判定ブロック内 line 1522-1554) に既に実行済みなので、当該 poll cycle ではセーフ。しかし OANDA 接続復旧が遅れて 30 polls × N 分間連続失敗した場合、heartbeat 周期と poll cycle の絡みで `_track_live_order_submissions()` (line 1728) と `_check_live_health_alerts()` の参照する `_last_live_order_at` 計算は連続失敗中も時間経過に応じて silence_sec が拡大し、復旧時に大きな silence_sec で警告が出る。本来 OANDA 接続障害中は『注文不能だから silent も当然』だが、live_orders_silent は障害復旧後に重複発火する可能性がある (oanda_connection_degraded アラートと意味的重複)。RE-MISSED-302 / RE-305 で oanda_connection_degraded と live_orders_silent を別 kind に分けたが、復旧後に live_orders_silent が単独で出ると 『接続復活したのに 12時間 throttle で次の警告が出ない』 緩和 (43200s throttle) の副作用で、運用者が ' Live silence 解消の通知' を 12 時間遅延で見るリスクがある。",
+      "evidence": [
+        "trading_platform/core/unified_runner/runner.py:1515-1632 _poll_cycle",
+        "trading_platform/core/unified_runner/runner.py:1547 _check_live_health_alerts 呼出",
+        "trading_platform/core/unified_runner/runner.py:902-944 _check_live_health_alerts 内 (b1) silence_sec 判定",
+        "trading_platform/core/monitoring/email_notifier.py:349 'live_orders_silent': 43200.0 (12h throttle)"
+      ],
+      "reproduction": "シミュレーション: 起動 → 5 分の OANDA 障害 (poll 5回失敗、oanda_connection_degraded アラート発火) → 復旧 → 30 分後の heartbeat 周期で silence_sec > LIVE_ORDER_SILENCE_THRESHOLD_SEC (6h) は未到達。長時間 (>6h) の障害なら復旧直後の heartbeat で live_orders_silent も発火し、12h throttle で次の sound alert が止まる可能性。",
+      "suggested_fix": "_check_live_health_alerts 内 (b1) で `if self._consecutive_poll_errors > 0: return` (= OANDA 接続が degraded の間は live_orders_silent を skip) を追加。または `_last_live_order_at` を OANDA 復旧時にリセットするオプションを検討。",
+      "regression_of": null,
+      "post_fix_defect": false
+    },
+    {
+      "id": "PA-406",
+      "severity": "medium",
+      "area": "strategy_loader|async",
+      "title": "loader.py _import_strategy_class で sys.modules.pop(module_name) を finally で実行するが、戦略コード内のクラスが他モジュールから参照されている (例: globals 経由) と pop 後に未定義参照になる潜在リスク",
+      "description": "loader.py:649-698 の `_import_strategy_class` で finally に `sys.modules.pop(module_name, None)` を入れ、ホットリロード時の古いモジュール残留を防いでいる (FTS-PA-09)。これ自体は健全だが、戦略コード内で `class Foo: ...; bar = lambda: globals()['Foo']` のようなパターンや、`@dataclass` 由来の `__module__` 参照、`pickle.dumps(instance)` (allowlist で禁止されているが回避可能性) が走った場合、`Foo.__module__` で文字列だけ残った "atlas_strategy_xxx" を sys.modules で resolve できず AttributeError / KeyError になる。現状 ATLAS 戦略では globals() / pickle 経路は使われていないため実害なし。ただし将来の戦略コードで `import inspect; inspect.getsource(self.__class__)` のような introspection を使う場合、sys.modules 未登録のため `inspect.getsourcefile` が失敗する。",
+      "evidence": [
+        "trading_platform/core/strategy_engine/loader.py:649 module_name 生成",
+        "trading_platform/core/strategy_engine/loader.py:665 sys.modules[module_name] = module",
+        "trading_platform/core/strategy_engine/loader.py:693-698 finally で pop",
+        "loader.py の AST allowlist で inspect / pickle は禁止されているが、戦略 init() からの呼出は実行時"
+      ],
+      "reproduction": "戦略 strategy.py で `__module__` を参照するメソッド (例: `def describe(self): return self.__class__.__module__`) を持つクラスを定義し、ロード後に `loaded.strategy.describe()` を呼ぶと文字列 'atlas_strategy_xxx' は返るが、その文字列を `sys.modules` で resolve しようとするとフォールバック動作になる。",
+      "suggested_fix": "現状の挙動を accept (戦略コードでの inspect/globals 使用は AST allowlist で禁止済み)。ただし docstring に 『戦略コードは sys.modules / __module__ resolution に依存しないこと』を明記。回帰防止用に loader.py のテストへ 「pop 後に attr resolution が失敗しても other strategies のロードは続行する」ケースを追加。",
+      "regression_of": null,
+      "post_fix_defect": false
+    },
+    {
+      "id": "PA-407",
+      "severity": "high",
+      "area": "main",
+      "title": "main.py の二重実装 (UnifiedRunner との乖離) が 9998a7a 修正で減少どころか『重複コード化』により悪化 — PA-303 / PA-301 で同等パターンを 2 箇所で手書きしており、片方が更新されると他方が drift する死角が拡大",
+      "description": "AUDIT-2026-0529-001 PA-301/PA-303/PA-306 の修正は main.py と runner.py に同一パターン (set_metrics_collector ループ、live_strategy_rejected_by_gate 拒否ハンドリング、StateStore backend 選択) を**それぞれ追記**する形で行われた。本ラウンド PA-401 で発見された Event Bus 未起動経路は、まさにこの二重実装が招いた 『同型 finding が片方で対応されただけで他方は未対応のまま push される』 構造的負債の典型例。PA-307 (main.py 廃止 ADR) は次回送りだが、現状 main.py:128-132 / runner.py:407-411 の set_metrics_collector ループ、main.py:455-528 / runner.py:544-605 の Gate 拒否ハンドリング、main.py:699-744 / (UnifiedRunner では使わない) StateStore 構築の 3 箇所で意図的に 『同じことを 2 度書く』状態。今後の audit でも 『片方だけ修正されたバグ』 が高頻度で発見される確率が高い。",
+      "evidence": [
+        "trading_platform/main.py:128-132 と trading_platform/core/unified_runner/runner.py:407-411 (set_metrics_collector ループ重複)",
+        "trading_platform/main.py:455-528 と trading_platform/core/unified_runner/runner.py:544-605 (LIVE Gate 拒否ハンドリング重複)",
+        "AUDIT-2026-0529-001 commit message: 『main.py / runner.py の set_metrics_collector 注入ループに order_submission_guard 追加』 (両方に手書き)",
+        "PA-401 finding 自体が二重実装の証跡"
+      ],
+      "reproduction": "重複コードの存在は AST 比較で機械的に検出可能: ast.dump(main_node) と ast.dump(runner_node) の Subtree 類似度を計算すれば 80%+ 一致するブロックが多数。",
+      "suggested_fix": "(A) PA-307 を前倒し: main.py の TradingPlatform クラスを廃止し、FastAPI 用エンドポイントだけ残して UnifiedRunner を共有実装にする。または (B) 共通ユーティリティ `trading_platform/core/bootstrap/__init__.py` を新設し set_metrics_collector ループ / LIVE Gate ハンドリング / StateStore 選択を一箇所に集約。main.py と runner.py の両方がそこを import するだけにする。最低でも (C) 二重実装箇所に同期テスト (片方を変えたら他方も対応する CI チェック) を入れる。",
+      "regression_of": "PA-307 (ADR 未着手)",
+      "post_fix_defect": false
+    },
+    {
+      "id": "PA-408",
+      "severity": "medium",
+      "area": "async|event_bus",
+      "title": "memory_adapter.py InMemoryEventBus.publish は未起動時に return するだけで例外を投げない — caller 側は publish 失敗を検知不能、AuditLog のみ残るが Email/Prometheus は dead",
+      "description": "memory_adapter.py:94-96 で `if not self._running: logger.warning(...); return` のみ。例外は投げない。これは『起動前の publish が ValueError などで初期化フローを止めないようにする』設計だが、PA-401 で発見した main.py の問題のように 『initialize() で正規の publish が drop される』 静的バグの検知を結果として不能にしている。runner.py:577-592 / main.py:491-506 の `try/except Exception: logger.exception('event_bus_publish_failed')` は publish 自体が return で済んでしまうので例外を発火させない。すなわち publish が成功 / 失敗どちらでも except に行かず、外部からは 『publish 呼んだ、warning ログは出たが続行』 として観測される。",
+      "evidence": [
+        "trading_platform/core/event_bus/memory_adapter.py:94-96 silent return",
+        "trading_platform/main.py:491-506 try/except では publish 戻り値を見ない",
+        "trading_platform/core/unified_runner/runner.py:577-592 同上"
+      ],
+      "reproduction": "InMemoryEventBus() を作成、start() を呼ばずに publish(event)。logger.warning は出るが例外なし。caller の except 句は通らない。",
+      "suggested_fix": "(A) publish() が未起動状態時に専用例外 `EventBusNotStartedError` を投げる。caller 側の try/except は当該例外を捕捉して structured log に記録する。または (B) 各 caller (publish 前) で `if not self._event_bus._running: raise RuntimeError(...)` をガード追加。最低でも publish() が drop した時に inc_event_bus_publish_dropped_total メトリクスを加算し、alerting で検知可能にする。",
+      "regression_of": null,
+      "post_fix_defect": false
+    },
+    {
+      "id": "PA-409",
+      "severity": "low",
+      "area": "strategy_loader",
+      "title": "loader.py AST allowlist が 'collections.abc' を 'collections' プレフィクスで暗黙許可 — 構文上は意図と一致するが、将来 'collections.OrderedDict' のような明示的に避けたいケースも通る",
+      "description": "loader.py:97-110 の `_is_module_allowed` は `prefix + '.'` のドット接頭一致で判定する。allowlist には 'collections' と 'collections.abc' の両方が登録されているが、'collections' があれば 'collections.OrderedDict' も 'collections.deque' も全て allow される (本来 abc のみ許可したいと読める設計意図)。実際の戦略コードで `from collections import deque` を使うかどうかは ATLAS 側で生成パターン次第。今までは『使われていないので問題ない』状態だが、将来 ATLAS が deque などを生成し始めた場合、AST 検査をすり抜けて実行される。",
+      "evidence": [
+        "trading_platform/core/strategy_engine/loader.py:50-66 _ALLOWED_MODULE_PREFIXES に 'collections' と 'collections.abc' の両方",
+        "trading_platform/core/strategy_engine/loader.py:104-110 prefix + '.' 一致でドット接頭一致"
+      ],
+      "reproduction": "戦略 strategy.py に `from collections import deque` を入れ、_audit_strategy_imports に通すと violations 空でロード成功する。",
+      "suggested_fix": "'collections' の単独許可を削除し 'collections.abc' のみ allowlist に残す。または `_is_module_allowed` のドット接頭一致を 『完全一致 OR 明示的サブパッケージ列挙』 に限定 (i.e., 親パッケージ allow が子全てを暗黙 allow しないようにする)。",
+      "regression_of": null,
+      "post_fix_defect": false
+    },
+    {
+      "id": "PA-410",
+      "severity": "medium",
+      "area": "async|runner",
+      "title": "runner.py _poll_cycle の OANDA account_info 失敗 path で _track_live_order_submissions() と _maybe_reconcile_live_positions() が呼ばれず、Live 状態の更新タイミングが歯抜けになる",
+      "description": "runner.py:1517-1632 で account_info 取得失敗時に return (line 1632) する。この return で以下の post-processing が skip される: (i) `_track_live_order_submissions()` (line 1728)、(ii) state_manager.save_all (line 1722-1723)、(iii) instrument_slots ループ (line 1680-1723) で各 slot.on_bar 配信。これは設計上正しい (account_info 無しでは PTRC 評価ができないので on_bar しない) が、`_last_live_order_at` の追跡は OANDA 接続障害中も時計が進み続けるため、復旧時に大きな gap が観測される。さらに `_maybe_reconcile_live_positions()` は heartbeat 周期 (line 1551) の中で呼ばれるが、heartbeat 判定は account_info より前 (line 1522-1554) なので 1 周期分は実行される。これはセーフだが、heartbeat 後で account_info 失敗 → return すると state_manager 書込みなしのまま次 poll に進む。一時的な状態整合性に揺らぎが生じる。",
+      "evidence": [
+        "trading_platform/core/unified_runner/runner.py:1515-1632 _poll_cycle 全体",
+        "trading_platform/core/unified_runner/runner.py:1722-1723 state_manager.save_all (skip される)",
+        "trading_platform/core/unified_runner/runner.py:1728 _track_live_order_submissions (skip される)"
+      ],
+      "reproduction": "OANDA 障害中の poll cycle で state_manager の最終保存時刻が古いまま (heartbeat 周期 + 30 min) になることを実機ログで確認できる。",
+      "suggested_fix": "account_info 失敗時でも `_track_live_order_submissions()` は呼んで 'orders_submitted=前回値 → 増分 0' を確認する (=直近の Live 発注が 0 件と確定)、state_manager.save_all は呼ばずに次回 poll で再試行で OK。または account_info 失敗 path 直後に 『次回 reconcile を early-trigger する』 フラグを立てて、復旧時に最優先で照合を走らせる。",
+      "regression_of": null,
+      "post_fix_defect": false
+    },
+    {
+      "id": "PA-411",
+      "severity": "low",
+      "area": "pydantic|event_bus",
+      "title": "RiskAlertEvent details: dict[str, Any] でフィールド型が緩く、Pydantic 型バリデーション死角 — alert_type=str 文字列も Enum 化されておらず typo で silently drop される可能性",
+      "description": "runner.py:1275-1290 の `_ALERT_LEVEL_BY_TYPE` で alert_type 文字列をキーに AlertLevel をマッピング、未登録は WARNING にフォールバック。alert_type は str のまま (Enum 化されていない)。EmailNotifier 側の `_RISK_ALERT_KINDS` (email_notifier.py:275-326) も str dict マッピング。両側で str typo (例: 'live_order_silent' (s 抜け) を publish) すると、ALERT_LEVEL は WARNING (fallback) になり EmailNotifier 側は kind 不明で silently drop。Pydantic レベルでバリデーションが入っていない (= alert_type は任意 str を受ける)。",
+      "evidence": [
+        "trading_platform/core/unified_runner/runner.py:1275-1290 _ALERT_LEVEL_BY_TYPE (str dict)",
+        "trading_platform/core/monitoring/email_notifier.py:275-326 _RISK_ALERT_KINDS (str dict)",
+        "trading_platform/core/models/events.py: RiskAlertEvent.alert_type は str Field (Enum 化なし、grep 確認可)"
+      ],
+      "reproduction": "テストコードで `RiskAlertEvent(alert_type='live_order_silent', ...)` (typo) を作って publish。EmailNotifier の _on_risk_alert は kind=None でログ警告のみ出して return する (実装次第)。",
+      "suggested_fix": "alert_type を `RiskAlertType` Enum に昇格させ、Pydantic validator で enum 値以外を ValueError にする。両 dict のキーも Enum メンバ参照に置き換える。type checker (mypy) も typo を検知できるようになる。",
+      "regression_of": null,
+      "post_fix_defect": false
+    },
+    {
+      "id": "PA-412",
+      "severity": "high",
+      "area": "main|gate",
+      "title": "main.py が runner.py の LIVE Gate 修正と非対称 — PA-103 escape hatch 経由で起動された場合のみ通る main.py の Gate 経路で、復元失敗 (OANDA 既存ポジション無視) と Email 通知 dead path が二重に発生",
+      "description": "main.py:357-420 の `_assert_not_unsupported_production_live` で『main.py 経路の production LIVE 起動を fail-closed で拒否』しているが、PLATFORM_ALLOW_MAIN_PRODUCTION_LIVE=1 のエスケープハッチで通過可能。このエスケープハッチを使った場合、(1) PA-303 修正で LIVE Gate 拒否ハンドリングは追加された (main.py:455-528) が、PA-401 で発見したとおり EmailNotifier 通知は dead、(2) 元々 PA-103 の趣旨は『main.py は OANDA 既存ポジション復元 (restore_positions 相当) が未実装』であり、この問題は本コミットでも解消されていない。すなわちエスケープハッチ通過時には『Gate 拒否は AuditLog のみ残る + 既存ポジション無視で二重エントリーする』という二重リスクが顕在化する。PA-307 (main.py 廃止 ADR) の優先度を上げる根拠。",
+      "evidence": [
+        "trading_platform/main.py:357-420 _assert_not_unsupported_production_live (escape hatch)",
+        "trading_platform/main.py:386-401 escape hatch 通過時の CRITICAL ログのみ",
+        "PA-401 finding: Gate 拒否時の EmailNotifier 通知が dead",
+        "trading_platform/main.py: restore_positions 相当の OANDA 既存ポジション読込みなし (grep 確認)"
+      ],
+      "reproduction": "PLATFORM_ALLOW_MAIN_PRODUCTION_LIVE=1 + ENV=production + OANDA 既存ポジション有 + Gate FAIL 戦略を入れて起動。CRITICAL ログは出るが、既存ポジション認識なし & Email 通知届かない。",
+      "suggested_fix": "(A) escape hatch を撤廃し、main.py からは production LIVE を絶対起動できなくする (UnifiedRunner only)。または (B) escape hatch 通過時に EmailNotifier を最優先で起動して publish 順序を保証する fast-path を実装。最終的には PA-307 (main.py 廃止) を前倒し。",
+      "regression_of": "PA-103, PA-303",
+      "post_fix_defect": true
+    },
+    {
+      "id": "PA-413",
+      "severity": "low",
+      "area": "async|strategy_loader",
+      "title": "test_pa301_osg_metrics_injection.py の AST 検証が 『for ループ内で _osg_mod が iter tuple に含まれ、かつ body 内のどこかで set_metrics_collector が呼ばれる』ことだけを確認 — 実際に _osg_mod.set_metrics_collector(...) が呼ばれているかは未検証",
+      "description": "tests/unit/test_pa301_osg_metrics_injection.py:78-95 の `test_main_injects_osg_metrics_in_for_loop` は (1) for の iter が Tuple、(2) Tuple に `_osg_mod` Name が含まれる、(3) for body 内に attr.attr=='set_metrics_collector' な Call が 1 つでもある、を確認する。しかし for body 内の set_metrics_collector が `_mod.set_metrics_collector(self._metrics)` であることや、ループ変数 (_mod) を receiver にしていることは未検証。将来のリファクタで for body の意図が変わった (例: `for _mod in (_fp_mod, _osg_mod): something_else.set_metrics_collector(_mod)`) ような誤書き直しでも、テストは緑のまま実本番では set_metrics_collector が誤ったオブジェクトに対して呼ばれてしまう。これは PR テスト指標としては OK だが、構造的担保とは言いがたい。",
+      "evidence": [
+        "tests/unit/test_pa301_osg_metrics_injection.py:78-95 AST 検証ロジック",
+        "tests/unit/test_pa301_osg_metrics_injection.py:99-123 同型を runner.py に対しても適用"
+      ],
+      "reproduction": "main.py の for ループ body を `_other_mod.set_metrics_collector(_mod)` に書き換える (ループ変数 _mod を引数として渡す誤書き)。実本番は壊れるがテストは PASS する。",
+      "suggested_fix": "AST 検証を `func.value.id == '_mod'` または attr.value が for ループ変数の Name であることまで判定するように強化。または別途、main.py / runner.py を実際に initialize() させて `_osg_mod._metrics is not None` を runtime で確認する統合テストを追加。",
+      "regression_of": null,
+      "post_fix_defect": true
+    }
+  ]
+}

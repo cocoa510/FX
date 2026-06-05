@@ -1,0 +1,396 @@
+{
+  "verifier": "data-engineer-team2",
+  "scope": "AUDIT-2026-0529-001 / data-engineer findings DE-301〜DE-311 の独立再検証",
+  "audit_commit": "2803be57b058b8a963f9224185195ffeeb73d71c",
+  "verified_at": "2026-05-29",
+  "summary": {
+    "total": 11,
+    "agree_with_team1": 4,
+    "agree_with_severity_adjustment": 0,
+    "disagree_severity_lower": 2,
+    "disagree_severity_higher": 0,
+    "disagree_other": 5,
+    "key_corrections": [
+      "DE-311 (team1: medium→high upgrade): **不適切な upgrade**。本番 production 経路 (scripts/run_unified.py) は StateStore を一切使用せず StateManager (JSONL/state.json + os.replace アトミック書込) で永続化している。InMemoryBackend の StateStore は main.py 経路 (FastAPI 起動、production deployment 非推奨) のみで使われ、かつ settings.py:402-425 の model_validator が production+memory を起動拒否する fail-loud ガードを実装している。INC-2026-0527-001 との同型性主張は経路を取り違えており成立しない。team1 評価を medium に差し戻し (むしろ low 寄り)。",
+      "DE-301 (team1: high 維持): **severity を medium に引き下げ提案**。22 件の live execution_mode 戦略を全数調査した結果、最大 period は SMA50 (ATLAS-2026-0506-005) のみで、384 を超える戦略は 1 件もない。ema_800 戦略 ATLAS-2026-0508-069 は runner_config.execution_mode='paper' のままで Live 昇格していない (metadata.live_eligible=true だが runner_config を手動編集しない限り Live 経路に乗らない)。爆発リスクは将来的構造リスクとして実在するが「Live 昇格可能な状態」という主張は現状の運用設定で誤り。実際に動いている Live 戦略の Parity ドリフトはゼロ。",
+      "DE-303 (team1: high 維持): **high 維持に同意するが SPoF 主張を一部修正**。account_info の連続失敗 (consecutive_poll_errors>=5) で WARN ログは出るため『何もしていない判定不能』は過大評価。ただし poll_latest 単独の連続失敗は確かに集計外で、HealthChecker (oanda_connection_lost) は別系統 (HEARTBEAT 監視) で main.py 経路のみ機能、UnifiedRunner には未配線。実質的に health_check の冗長経路は run_unified.py 経路で機能していない。high 妥当。",
+      "DE-306 (team1: medium 維持): **シナリオ次第で過大評価**。検証計算により finding が示す『金曜 23:00→月曜 0:00 H1 シナリオ』は実は PASS する (raw=49h, weekend=48h, effective=1h <= 5400s)。FAIL するのは『金曜 21:00 last → 日曜 22:00 next』のような OANDA Sun open 跨ぎシナリオで、effective=3h > 1.5h。週末跨ぎの一部シナリオでは確かに誤発火するが、毎週月曜朝の全戦略 alert fatigue は誇張。medium→medium-low が妥当。"
+    ]
+  },
+  "verifications": [
+    {
+      "finding_id": "DE-301",
+      "team1_verdict": "validated",
+      "team1_severity": "high (maintained)",
+      "team2_verdict": "validated_with_severity_dispute",
+      "team2_severity": "medium (proposed)",
+      "evidence_check": {
+        "runner.py:71-80 (WARMUP_CONVERGENCE_FACTOR=13, MAX_WARMUP_BARS=5000)": "confirmed",
+        "runner.py:1357-1384 (_warmup_bars_for クランプ)": "confirmed",
+        "strategy.py:66,82 (ema_slow_period=800, register ema_800)": "confirmed",
+        "live_store.py:49,89 (BUFFER_SAFETY_FACTOR=50, MAX_REGISTRABLE_PERIOD=1000)": "confirmed",
+        "test_de201_dynamic_warmup.py:84-92 (残差 3.7e-6 コメント)": "confirmed"
+      },
+      "reproduction_check": {
+        "結論": "EWM 残差計算は正しい (((800-1)/(800+1))^5000 ≈ exp(-2*5000/801) ≈ exp(-12.48) ≈ 3.79e-6)。テストでも実証済み。",
+        "live_eligible_状態の確認": "ATLAS-2026-0508-069/runner_config.json:10 execution_mode='paper' で確認。metadata.json:20 live_eligible=true だが runner 経路では runner_config が支配的。loader.py:357-367 は metadata.live_eligible=false でも paper モードなら許容する。"
+      },
+      "phantom_exposure_check": {
+        "Live 昇格可能性": "理論的には runner_config.json を 'live' に書き換えれば Live 化可能。ただし import_atlas_strategy.py:556-561 が API レイヤで execution_mode='live' に require_gate_pass=True を強制し、scripts/import_atlas_strategy.py:800-815 で CLI でも同様。新規 import 経路では Gate PASS 必須。既存 paper 戦略を手動 'live' 化するシナリオが残るが、運用フロー上は明示的人手介入が必要。",
+        "実 Live 戦略 22 件の period 分布": "ATLAS-2026-0511-059 (bb=20,atr=14,adx=14,rsi=14), ATLAS-2026-0505-335 (rsi=14,atr=14), ATLAS-2026-0504-228/236/060/169/241/117/098/060/060 (atr=14), ATLAS-2026-0505-392 (bb=20,atr=14), ATLAS-2026-0505-423/241/374/424/368/367 (sma=20,atr=14), ATLAS-2026-0505-324/338 (rsi=14,atr=14), ATLAS-2026-0506-005 (sma=50,atr=14), ATLAS-2026-0506-033/0507-038/0507-049/0507-050 (atr=14), ATLAS-2026-0504-117. **最大 period = 50 (ATLAS-2026-0506-005)**、すべて 384 << よりはるかに小さい。"
+      },
+      "rationale": "数値ドリフトは事実だが、影響範囲は『将来 period>384 戦略を Live 投入する場合』の予防ガードに留まる。現在の Live 22 戦略 (period<=50) では Parity 影響ゼロ。high と評価するには『現に Live 戦略が影響を受ける』証拠が必要だが、コードベース全体で当該条件を満たす Live 戦略は不在。MAX_REGISTRABLE_PERIOD=1000 と MAX_WARMUP_BARS=5000 の設計不整合は medium レベルの構造改善対象。",
+      "additional_findings": [
+        "live_store.py:282-291 (MAX_REGISTRABLE_PERIOD=1000) は register() 時に ValueError を出すが、これは ema_800 のような既存 paper 戦略の登録は許可している (800 <= 1000)。「period > 384 の戦略を register 可能だが warmup 収束保証なし」の不整合は team1 指摘の通り存在する。",
+        "ただしハード上限は ATLAS-2026-0508-069 互換性のための意図的緩和 (live_store.py:82-89 参照)。設計判断としては『period>384 戦略は paper でのみ運用、Live 昇格時に追加 gate 必要』が暗黙の運用前提。これを暗黙でなくコードで強制する gate がないことが真の指摘。",
+        "suggested_fix (c) 「live_eligible 判定時に max_registered_period > 384 をハードブロック」が最小侵襲で正しい方向性 (a)/(b) は既存 ATLAS-2026-0508-069 を破壊するため非推奨。"
+      ],
+      "duplicate_of": null
+    },
+    {
+      "finding_id": "DE-302",
+      "team1_verdict": "downgraded",
+      "team1_severity": "medium → low",
+      "team2_verdict": "agree",
+      "team2_severity": "low",
+      "evidence_check": {
+        "live_store.py:216-249 (_allocate_auxiliary_tf, NaT 充填)": "confirmed",
+        "live_store.py:240-249 (NaT 埋めパス、コメントで safety 注記)": "confirmed",
+        "live_store.py:664-680 (_align_aux_to_primary が primary_ts 使用)": "confirmed"
+      },
+      "reproduction_check": {
+        "ATLAS Strategy IF 規約": "ATLAS-2026-0508-069/strategy.py:79-83 initialize() 内で register 確認。Strategy IF (atlas.common.models.Strategy) の initialize は『FeatureStore の準備時に 1 回だけ呼ばれる』契約。imported/ 全戦略を確認した限り generate_signal() 中での register 呼び出しは存在しない。",
+        "再現性": "理論的に NaT 埋め後の merge_asof で undefined behavior は発生するが、現行 ATLAS 戦略 (60+ 件) の運用パターンでは発火経路なし。"
+      },
+      "rationale": "team1 評価に同意。silent NaT 充填は防御コード設計として悪手 (suggested_fix (a) fail-fast が正解) だが、現行戦略生成パターンでは到達不能。lowが妥当。fail-fast 化はテストコスト低の defensive 改善。",
+      "additional_findings": [
+        "Strategy ABC 自体は initialize() 後の register 呼び出しを明示禁止していないため、将来 ATLAS が動的 aux TF 戦略テンプレートを追加する場合に発火経路が生じる。FTS-DE-R9-001 の「register と書くだけで動く」目標との設計テンション。"
+      ],
+      "duplicate_of": null
+    },
+    {
+      "finding_id": "DE-303",
+      "team1_verdict": "validated",
+      "team1_severity": "high (maintained)",
+      "team2_verdict": "validated_with_caveat",
+      "team2_severity": "high (maintained with note)",
+      "evidence_check": {
+        "data_provider.py:154-162 (例外 → logger.exception → return None)": "confirmed",
+        "data_provider.py:134-191 (retry/metrics なし)": "confirmed",
+        "runner.py:1518-1534 (account_info のみカウント)": "confirmed",
+        "client.py:33 (ORDER_TIMEOUT_SEC=10.0)": "confirmed",
+        "client.py:181-188 (candle と order が同一セッション・同一タイムアウト)": "confirmed",
+        "client.py:728-786 (get_candles に retry なし)": "confirmed"
+      },
+      "reproduction_check": {
+        "再現性": "コードから自明。poll_latest 例外時 logger.exception 以外何も起きない。",
+        "観測経路完全死の検証": {
+          "Prometheus": "inc_poll_latest_error 未定義、未配線で confirmed dead",
+          "Email/AuditLog": "RiskAlert 発行コードなし、確認済み confirmed dead",
+          "HealthChecker": "health_check.py:417 で oanda_connection_lost を RiskAlertEvent publish するが、これは HEARTBEAT 監視経路 (main.py の OANDAStreamReceiver) のみで、scripts/run_unified.py 経路では HealthChecker の oanda prober は設定されていない可能性 (要追跡)。runner.py:411 に '`UnifiedRunner は Redis を直接使用しない' とある通り、HealthChecker の OANDA prober も明示的に配線されているかは別途要検証。",
+          "account_info 連続失敗 fallback": "runner.py:1521-1533 で account_info の連続失敗は WARN 出るが、poll_latest 単独の連続失敗は集計外。account_info は別 API endpoint なのでこちら経路が生きていれば部分カバー可能だが、OANDA 全体障害時は両方倒れる。"
+        }
+      },
+      "rationale": "高評価維持。poll_latest 単独経路の観測完全死は事実。client.py:33 の ORDER_TIMEOUT_SEC=10.0 共用は M-DATA-1 同型の小さなアンチパターン (取引と市場データを同 timeout で扱う)。週末や regional 障害時に長時間 silent 化する深刻リスク。",
+      "additional_findings": [
+        "DE-304 (gap drop) と相補的: poll_latest 例外で publish に到達しない経路 (DE-303) と、poll_latest 成功時に中間バーを drop する経路 (DE-304) はそれぞれ別ベクタで EWM ドリフトを誘発する。",
+        "suggested_fix の market data 専用セッション + 専用タイムアウト (30秒) は妥当だが、aiohttp 設計上 instance 分離コストあり。最低限 candle 用に別途 ClientTimeout(total=30) を _ensure_session 内で分岐する案で代替可能。"
+      ],
+      "duplicate_of": null
+    },
+    {
+      "finding_id": "DE-304",
+      "team1_verdict": "validated",
+      "team1_severity": "medium (maintained)",
+      "team2_verdict": "agree",
+      "team2_severity": "medium",
+      "evidence_check": {
+        "data_provider.py:155 (count=3 固定)": "confirmed",
+        "data_provider.py:168 (raw_candles[-1] のみ抽出)": "confirmed",
+        "runner.py:1572-1585 (poll_latest 直接利用、backfill 呼び出しなし)": "confirmed (runner._run_once の loop で poll_latest を直接呼ぶのみ)",
+        "candle_fetcher.py:416-450 (backfill_missing 実装は存在、UnifiedRunner から未配線)": "confirmed"
+      },
+      "reproduction_check": {
+        "実 silent drop シナリオ": "ATLAS-2026-0508-069 H1 戦略を想定すると 1 H1 bar = 3600s。poll_interval=60s で OANDA candles count=3 を呼ぶ。3 H1 bars = 10800s 内に複数バー進む状況は『プロセス再起動直後の数分間』『OANDA API が前回 poll から数時間応答しなかった後の復帰時』のみ。実運用での具体 impact は低めだが、UnifiedRunner の起動時 warmup (runner._warmup_all) は count=5000 まで取るので別経路。",
+        "影響度": "H1/H4 戦略主体の現行構成では発生確率低。M1/M5 戦略 + poll_interval=60 で初めて顕在化。"
+      },
+      "rationale": "team1 評価に同意。medium 妥当。suggested_fix (a) list 返却が最も clean。(c) 動的 count は OANDA 5000 上限内で安全。",
+      "duplicate_of": null
+    },
+    {
+      "finding_id": "DE-305",
+      "team1_verdict": "downgraded",
+      "team1_severity": "medium → low",
+      "team2_verdict": "agree",
+      "team2_severity": "low",
+      "evidence_check": {
+        "runner.py:1357-1384 (_warmup_bars_for は slot 全体の max を取る)": "confirmed",
+        "runner.py:1395-1397 (primary に warmup_count を渡す)": "confirmed",
+        "runner.py:1420-1426 (aux に同 warmup_count を渡す)": "confirmed",
+        "live_store.py:449-458 (_max_registered_period は全 TF 横断 max)": "confirmed"
+      },
+      "reproduction_check": {
+        "Parity 直接影響": "なし (過剰 fetch のため EWM 収束は満たされる)",
+        "OANDA quota 圧迫": "起動時のみ。MAX_REQUESTS_PER_SECOND=30 (client.py:32) と semaphore で制御。",
+        "実 Live 戦略の影響": "現在 Live 22 戦略は全て single primary TF (H1/H4/M15) で aux TF を使う MTF 戦略は確認できず。MTF allocation 経路は paper 戦略でのみ稼働。"
+      },
+      "rationale": "team1 評価に同意。Parity 非劣化のため緊急度低。TF 別 warmup の構造的改善は worthwhile だが low。",
+      "duplicate_of": null
+    },
+    {
+      "finding_id": "DE-306",
+      "team1_verdict": "validated",
+      "team1_severity": "medium (maintained)",
+      "team2_verdict": "validated_with_partial_dispute",
+      "team2_severity": "medium-low (proposed: low or borderline medium)",
+      "evidence_check": {
+        "quality_engine.py:669-735 (_check_gap)": "confirmed",
+        "quality_engine.py:737-761 (_count_weekend_seconds、00:00 UTC 起点で日単位カウント)": "confirmed"
+      },
+      "reproduction_check": {
+        "team1 が示すシナリオ (金曜 23:00 UTC → 月曜 00:00 UTC)": "team2 が python 計算で実機検証: raw_gap=49h, weekend_seconds=48h, effective_gap=1h <= max_gap=1.5h → **PASS**。team1 主張の『effective_gap≈16h → FAIL』は計算誤り。",
+        "team1 が示す別シナリオ (raw=216000s, weekend=158400s, effective=57600s)": "team2 検算: 216000s=60h, weekend=158400s=44h, eff=72000-158400 がそもそも非整合。team1 数値は手計算ミス。",
+        "実際に FAIL するシナリオ": "金曜 21:00 UTC last → 日曜 22:00 UTC next (OANDA Sun open H1 bar): raw=49h, weekend=46h (土曜 21h + 日曜 22h + ... 計算済), eff=3h > 1.5h → FAIL。これは現実的シナリオで毎週日曜 OANDA 再開時に発火する可能性あり。",
+        "実際の OANDA H1 bar 配信タイミング": "OANDA は通常金曜 22:00 NY close (=UTC 21:00 winter / 22:00 summer) に最終 H1 bar、日曜 22:00 (Sydney open) に最初 H1 bar を出す。これだと raw=48-49h, weekend=46h, effective=2-3h で FAIL するシナリオは確かにある。",
+        "DE-002 で drop はされない": "confirmed (data_provider/candle_fetcher 双方で forced_publish)",
+        "CRITICAL RiskAlert 誤発火頻度": "毎週末ではなく『OANDA H1 配信の特定タイミング』に依存。冬時間 vs 夏時間で UTC offset 変動。週 1 回 RiskAlert 発火の可能性は実在。"
+      },
+      "rationale": "team1 の核心指摘 (週末跨ぎ gap 計算が粗い) は事実。ただし示された再現コードの具体数値は誤算 (team2 検証で別シナリオでのみ FAIL)。alert fatigue リスクは限定的 (週1〜0回)。medium はやや過大評価、low 寄り medium が適切。",
+      "additional_findings": [
+        "DST (Daylight Saving Time) 跨ぎでさらに 1-2h ずれる可能性。米国 DST 切替日 (3 月第 2 日曜、11 月第 1 日曜) に Sydney open が UTC 21:00→22:00 シフト。実装はこの DST 考慮もしていない。",
+        "tests/fault/test_weekend_gap.py:113 で 50h gap (金 22 → 月 0) を意図的シミュレートしているが、これは BarBuilder 経路の空バー emit 抑止テストで、DataQualityEngine._check_gap は未テスト。tests に gap weekend エッジテスト未整備。"
+      ],
+      "duplicate_of": null
+    },
+    {
+      "finding_id": "DE-307",
+      "team1_verdict": "validated",
+      "team1_severity": "low (maintained)",
+      "team2_verdict": "agree",
+      "team2_severity": "low",
+      "evidence_check": {
+        "live_store.py:38-49 (BUFFER_SAFETY_FACTOR=50)": "confirmed",
+        "live_store.py:438-447 (docstring SAFETY_FACTOR=5 と記載) ": "confirmed (live_store.py:447 で `SAFETY_FACTOR=5 はこれを確保する経験値` と記述)",
+        "test_feature_store_parity_buffer_trim.py:340-345": "confirmed (`SAFETY_FACTOR=5 → 500 に拡張されるはず` という古いコメント)"
+      },
+      "reproduction_check": {
+        "実行可能性": "コードgrepで確認済み。",
+        "影響": "ドキュメント不整合のみ、Parity/挙動への実害なし。"
+      },
+      "rationale": "low 妥当。",
+      "duplicate_of": null
+    },
+    {
+      "finding_id": "DE-308",
+      "team1_verdict": "validated",
+      "team1_severity": "low (maintained)",
+      "team2_verdict": "agree",
+      "team2_severity": "low",
+      "evidence_check": {
+        "quality_engine.py:35-53 (_DEFAULT_PIP_SIZE_BY_INSTRUMENT)": "confirmed",
+        "quality_engine.py:137-141 (default_pip_size=0.0001)": "confirmed",
+        "quality_engine.py:541-549 (pip_based threshold 算出)": "confirmed",
+        "spread_check_mode='disabled' が既定": "confirmed (quality_engine.py:118-121)"
+      },
+      "reproduction_check": {
+        "実発火条件": "DataQualityConfig(spread_check_mode='pip_based') を明示指定 + SGD_JPY/TRY_JPY/ZAR_JPY/HKD_JPY/MXN_JPY のいずれかを取引する必要あり。現在 Live 22 戦略は全て主要ペア (USD_JPY/EUR_USD/GBP_USD 等) で SGD_JPY 等は不在。本番影響ゼロ。",
+        "潜在地雷": "確実に存在する。pip_based 切替時 + マイナー JPY ペア追加時に発火。"
+      },
+      "rationale": "low 妥当。fail-safe 切替の improvement は worth doing だが緊急度低。",
+      "duplicate_of": null
+    },
+    {
+      "finding_id": "DE-309",
+      "team1_verdict": "validated",
+      "team1_severity": "low (maintained)",
+      "team2_verdict": "agree",
+      "team2_severity": "low",
+      "evidence_check": {
+        "live_store.py:196-204 (cache フィールド定義)": "confirmed",
+        "live_store.py:258-329 (register に cache 削除なし)": "confirmed (register 関数全文を確認、_aux_raw_cache.pop が存在しない)",
+        "_aux_raw_cache の使用箇所": "live_store.py:200,202,559,581,607,608,613 で参照、すべて write/lookup のみで invalidation API なし"
+      },
+      "reproduction_check": {
+        "現状の使用パターン": "Strategy.initialize() で一度だけ register、unregister API 自体が存在しないため発火経路なし",
+        "将来拡張時のフットガン": "確実に存在"
+      },
+      "rationale": "low 妥当。team1 評価に同意。",
+      "duplicate_of": null
+    },
+    {
+      "finding_id": "DE-310",
+      "team1_verdict": "validated",
+      "team1_severity": "low (maintained)",
+      "team2_verdict": "agree",
+      "team2_severity": "low",
+      "evidence_check": {
+        "main.py:45-47 (BarBuilder/CandleFetcher/StreamReceiver の import)": "confirmed",
+        "scripts/run_unified.py:38 (UnifiedRunner のみ import)": "confirmed",
+        "runner.py:51 (SharedDataProvider のみ import、CandleFetcher/StreamReceiver の参照なし)": "confirmed",
+        "stream_receiver.py:46-51 (HEARTBEAT_TIMEOUT 定義)": "confirmed",
+        "stream_receiver.py:506-538 (last_bar_time 経由 backfill)": "confirmed (state_store 経由)",
+        "candle_fetcher.py:317 (save_last_bar_time)": "confirmed",
+        "BarBuilder/CandleFetcher/OANDAStreamReceiver の生成箇所": "main.py:549/566/713, forward_test.py:184/205 のみ。run_unified.py 経路では生成されない (grep 全数確認)"
+      },
+      "reproduction_check": {
+        "production 経路": "scripts/run_unified.py → UnifiedRunner → SharedDataProvider.poll_latest のみ。stream/bar_builder/candle_fetcher の機能 (HEARTBEAT/backfill_missing/state_store.save_last_bar_time) は全て dead path",
+        "save_last_bar_time の到達不能": "production の run_unified.py 経路では candle_fetcher 経由の save_last_bar_time が呼ばれず、StateStore.save_last_bar_time も実質 dead",
+        "fault test の状態": "tests/fault/test_oanda_reconnect_backfill.py / test_weekend_gap.py が dead path をテスト。本番非到達"
+      },
+      "rationale": "low 妥当。team1 評価に同意。DE-101 同型の二重実装問題は構造的負債。これと DE-311 の二つを合わせて考えると『production 経路で機能しているのは StateManager のみ、StateStore + Redis + CandleFetcher + StreamReceiver の Stage B 群は全て dead path』という大きな未配線像が浮かぶ。",
+      "additional_findings": [
+        "DE-311 の AioRedisBackend 未実装が解決しても、現在の run_unified.py 経路には StateStore 自体が配線されていない (StateManager 経由の JSONL 永続化のみ) ため、Redis 実装の効果が限定的。両方を同時にリファクタする必要あり。"
+      ],
+      "duplicate_of": null
+    },
+    {
+      "finding_id": "DE-311",
+      "team1_verdict": "upgraded",
+      "team1_severity": "medium → high",
+      "team2_verdict": "disagree_with_upgrade",
+      "team2_severity": "medium (revert to original)",
+      "evidence_check": {
+        "redis_store.py:18-22 docstring 「本番用 Redis バックエンド (AioRedisBackend) は未実装」": "confirmed",
+        "redis_store.py:70-107 InMemoryBackend 実装": "confirmed",
+        "redis_store.py:134-135 backend default = InMemoryBackend": "confirmed (`__init__` で backend=None なら InMemoryBackend を生成)",
+        "stream_receiver.py:506-538 last_bar_time 不在 → warmup backfill": "confirmed"
+      },
+      "reproduction_check": {
+        "team1 が主張する『1 週間 production 稼働 → 再起動 → load_all_positions が空』シナリオ": "**production 経路では発火しない**。理由:",
+        "理由 1: settings.py:402-425 _enforce_production_state_backend": "production 環境では state_backend='memory' を起動時 ValueError で拒否。",
+        "理由 2: state_backend='redis' を選択した場合": "main.py:613-619 で「Stage A 未実装」として RuntimeError を明示送出。つまり production 環境では起動できない (fail-loud)。",
+        "理由 3: production deployment 経路": "scripts/run_unified.py → UnifiedRunner であり、UnifiedRunner.runner.py を全数 grep した結果 **StateStore のインスタンス化なし、redis_store.py への参照なし**。永続化は state_manager.py (JSONL + state.json + os.replace アトミック書込) で実装済 (state_manager.py:99-124 でアトミック書込確認)。プロセス再起動後は load_strategy_state で .state.json から復元される (runner.py:694-695)。",
+        "理由 4: main.py 経路 (FastAPI)": "main.py:620 で StateStore() を生成、ExecutionCoordinator に注入されるが、main.py 経路自体が production deployment ではない (CLAUDE.md: '> 本番 deployment は scripts/run_unified.py'。本 main.py は CHECKER の手動テスト等の用途) と推定。"
+      },
+      "production_path_analysis": {
+        "run_unified.py の永続化責務": "StateManager (jsonl + state.json) を使用、StateStore は配線なし",
+        "永続化される情報": "strategy.state (bars_processed, pnl, open_trade_id 等), last_reset_date, JSONL bar events",
+        "失われる情報の比較": {
+          "team1 主張 (StateStore InMemory 経由)": "positions, orders, account_risk_state (KS は仕様で再起動 False)",
+          "実 production 経路 (StateManager 経由)": "実は StateManager 経由でも strategy 単位の state は永続化される (open_trade_id, bars_in_position 等)。プロセス再起動でも slot.state から復元可能。orders は別経路 (OANDA pending) で参照可能。",
+          "結論": "INC-2026-0527-001 (paper 建玉混入 + 復元失敗) は別件 (strategy_slot.restore_positions の is_live ガード欠如) で、commit 873ae89 で fix 済。AioRedisBackend 未実装 ≠ INC-2026-0527-001 再発リスク"
+        },
+        "INC-2026-0527-001 同型性の検証": "INC-2026-0527-001 の根因は『paper 建玉が live supervisor に混入する _sync_risk_state_from_slot の is_live ガード欠如』(MEMORY.md記録)。Redis InMemoryBackend とは別経路の問題。team1 が両者を『状態消滅』で同型と判定したのは経路を取り違えた誤認"
+      },
+      "rationale": "AioRedisBackend が未実装である事実は否定しない (Stage B として進捗管理対象)。ただし『本番 production 経路で唯一の backend』『INC-2026-0527-001 同型』という high upgrade の根拠は、production 経路 = run_unified.py = StateStore 未配線 = StateManager 使用、という構造を見落としている。team1 が high 評価で参照した HEARTBEAT/backfill 機能 (stream_receiver.py:506-538) もすべて main.py 経路の dead path (DE-310 で確認済)。両 finding を合わせると『StateStore + Redis + stream_receiver + candle_fetcher 群は production 経路で誰にも参照されない』が正しい構造像で、これは medium 程度の構造負債だが運用上のクリティカル issue ではない。original medium 評価を維持すべき。",
+      "additional_findings": [
+        "true risk = 『将来 run_unified.py に StateStore を配線する場合、AioRedisBackend がないと production で起動できない (settings validator が memory を拒否)』というデッドロック構造。Stage B (AioRedisBackend 実装) は確かに必要だが、urgent ではなく Stage B 計画通りの medium priority。",
+        "暫定対策 (JSONL append-only fallback) は既に StateManager が JSONL を実装している (state_manager.py:233-256) ため重複。",
+        "verify_re.json の RE 系で確認すべき: RE-001 SCAN ベース復元が run_unified.py で実際に呼ばれているか (load_all_orders/positions の呼出経路)。"
+      ],
+      "duplicate_of": null
+    }
+  ],
+  "blind_spots_check": {
+    "FeatureStore 境界条件 (起動/stop/restart 時のキャッシュ整合)": {
+      "起動時 warmup": "確認済。runner._warmup_all で primary/aux 別々に fetch、slot.warmup() で feature_store.update_bar を sequentially 呼ぶ。",
+      "stop 時": "feature_store はインメモリのため stop で消滅。次回起動時の warmup で再構築。",
+      "restart 時の state": "StateManager の state.json から strategy 単位状態を復元、bar 列は新規 warmup で再構築。FeatureStore EWM 状態の連続性は warmup で再収束させる設計。",
+      "潜在問題": "DE-301 のドリフトはこの restart 時の warmup で発生。高 period 戦略が 5000 本クランプで完全収束しない初期数千バー期間で乖離。"
+    },
+    "Parity test が踏まない経路": [
+      "DE-301: warmup クランプ後の初期値ドリフト (parity test は ATLAS BT も同じ count で start するため非対称シナリオ未カバー)",
+      "QT-303 (cluster_c で指摘): start_bar=50 からの比較で 0〜49 の warmup 期間ドリフト未検証",
+      "DE-302: register 後の update_bar 順序が ATLAS と異なるシナリオ (Strategy IF 規約により実発生せず)",
+      "DE-304: gap drop シナリオ (parity test は全データを 1 本ずつ feed するため gap 発生しない)"
+    ],
+    "Redis 接続失敗時のフォールバック完全性": {
+      "現状": "production 経路で Redis は未配線 (run_unified.py)。Redis 失敗 = StateManager (JSONL) 経路は影響なし",
+      "main.py 経路": "StateStore InMemoryBackend のため Redis 接続失敗自体が発生しない (InMemory なので I/O なし)",
+      "settings.skip_state_recovery": "PLATFORM_SKIP_STATE_RECOVERY=1 で復元スキップの escape hatch あり (settings.py:179-189)",
+      "結論": "Redis フォールバックは現状『Redis を使っていない』ため当面の問題なし。Stage B 実装時に AioRedisBackend の resilience を別途検証要"
+    },
+    "candle gap / timezone (DST/UTC) handling": {
+      "_count_weekend_seconds": "00:00 UTC 起点 day-based、DST 考慮なし (DE-306 で指摘)",
+      "DST 切替日の影響": "3 月第 2 日曜 / 11 月第 1 日曜の Sydney open UTC offset 変動で gap 計算がさらにずれる可能性。test 未整備",
+      "OANDA candles API timezone": "Accept-Datetime-Format: RFC3339 (client.py:185) で UTC 強制、ここは clean",
+      "bar_time のタイムゾーン": "parse_iso_to_utc (data_provider.py:212) で UTC normalize 確認"
+    },
+    "他に発見した潜在問題 (DE 新規)": [
+      {
+        "id": "DE-NEW-301",
+        "severity": "low",
+        "title": "MAX_REQUESTS_PER_SECOND=30 が candle と order で共用されており、warmup 中の大量 fetch で order 送信が遅延する可能性",
+        "evidence": "client.py:32,165 (Semaphore(30) を _ensure_session/submit_order/get_candles/get_open_positions すべてで共用)",
+        "rationale": "_warmup_all で複数 instrument × 5000 bars を並行 fetch する場合、Semaphore 取得待ちで submit_order が tail latency 悪化"
+      },
+      {
+        "id": "DE-NEW-302",
+        "severity": "low",
+        "title": "DE-310 dead path 状態の stream_receiver._is_weekend_utc / HEARTBEAT_TIMEOUT_WEEKEND_SEC=300 が production で未使用",
+        "evidence": "stream_receiver.py:46-51, main.py:713 のみ生成",
+        "rationale": "DE-310 派生。M-DATA-3 (PR16) の週末 timeout 緩和実装が production 非到達。改善目的の PR が dead path に届かない構造"
+      },
+      {
+        "id": "DE-NEW-303",
+        "severity": "medium",
+        "title": "live_eligible=true 戦略が runner_config.json:execution_mode=paper のまま放置 (ATLAS-2026-0508-069)、Live 昇格時の period gate 不在",
+        "evidence": "ATLAS-2026-0508-069/metadata.json:20 live_eligible=true / runner_config.json:10 execution_mode='paper'",
+        "rationale": "metadata.live_eligible と runner_config.execution_mode が乖離。手動で runner_config を 'live' に書き換えると DE-301 ドリフトが顕在化。loader/runner で period × eligible のクロスチェックなし。DE-301 で suggested_fix (c) を実装すれば解決"
+      }
+    ]
+  },
+  "agreements_with_team1": {
+    "fully_agree": ["DE-302 (low)", "DE-305 (low)", "DE-307 (low)", "DE-308 (low)", "DE-309 (low)", "DE-310 (low)"],
+    "agree_with_caveat": ["DE-303 (high 維持、ただし account_info 連続失敗ログの存在で『完全に無音』ではないと注記)", "DE-304 (medium)", "DE-306 (medium だが計算誤りあり、実発火頻度はやや低い)"]
+  },
+  "disagreements_with_team1": {
+    "DE-301": {
+      "team1": "high (Live 昇格可能な戦略が period 800)",
+      "team2": "medium (実 Live 戦略 22 件は全て period<=50、ema_800 は paper 専用)",
+      "core_disagreement": "Live 影響範囲の評価。team1 は『将来昇格可能性』を high と評価、team2 は『現状実害ゼロ + 構造リスクは medium』と評価"
+    },
+    "DE-311": {
+      "team1": "high (Redis InMemory のみ、INC-2026-0527-001 同型)",
+      "team2": "medium (production 経路は StateStore 未配線、StateManager が永続化を担当。INC-2026-0527-001 とは別経路問題)",
+      "core_disagreement": "production 経路の解析。team1 は『StateStore がプロセス再起動で全消滅』を main 経路と仮定、team2 は『scripts/run_unified.py 経路では StateStore 自体が未配線、StateManager (state.json + JSONL) が代替担当』を確認"
+    }
+  },
+  "post_severity_breakdown": {
+    "high": 1,
+    "medium": 4,
+    "low": 6,
+    "note": "team1 集計 high=2/medium=3/low=6 から DE-301 high→medium、DE-311 high→medium に修正"
+  },
+  "verification_methodology": {
+    "files_inspected": [
+      "trading_platform/data/state_store/redis_store.py (full)",
+      "trading_platform/data/feature_store/live_store.py (full)",
+      "trading_platform/data/quality/quality_engine.py (offsets 1-200, 500-780)",
+      "trading_platform/data/market_data/stream_receiver.py (40-150, 490-570)",
+      "trading_platform/data/market_data/candle_fetcher.py (300-450)",
+      "trading_platform/broker/oanda_adapter/client.py (1-250, 680-792)",
+      "trading_platform/core/unified_runner/runner.py (1-120, 1340-1650)",
+      "trading_platform/core/unified_runner/state_manager.py (full)",
+      "trading_platform/core/unified_runner/data_provider.py (full)",
+      "trading_platform/core/strategy_engine/loader.py (260-410)",
+      "trading_platform/core/monitoring/health_check.py (395-460)",
+      "trading_platform/core/monitoring/email_notifier.py (265-330)",
+      "trading_platform/config/settings.py (full)",
+      "trading_platform/main.py (1-100, 580-680)",
+      "scripts/run_unified.py (full)",
+      "scripts/import_atlas_strategy.py (full)",
+      "trading_platform/strategies/imported/ATLAS-2026-0508-069/* (strategy.py, runner_config.json, config.json, metadata.json)",
+      "trading_platform/strategies/imported/ATLAS-2026-0511-059..0506-005 等 22 件 Live 戦略の period パラメータ",
+      "tests/unit/test_de201_dynamic_warmup.py (full)",
+      "tests/parity/test_feature_store_parity_buffer_trim.py (320-380)",
+      "tests/fault/test_weekend_gap.py (full)"
+    ],
+    "grep_searches": [
+      "state_backend|AioRedis|StateStore\\( in trading_platform/",
+      "StateStore|state_store|state_manager|StateManager in trading_platform/core/unified_runner",
+      "CandleFetcher\\(|OANDAStreamReceiver\\(|BarBuilder\\( in trading_platform/",
+      "execution_mode|is_live|live_eligible|paper in imported/ATLAS-2026-0508-069",
+      "save_last_bar_time|load_last_bar_time in trading_platform/",
+      "_aux_raw_cache in live_store.py",
+      "poll_latest_error|inc_poll_latest|consecutive_poll_errors in trading_platform/",
+      "RiskAlert|alert_type.*candle|alert_type.*poll in data_provider.py",
+      "oanda_connection_lost|oanda_api_health in trading_platform/core/monitoring",
+      "_RISK_ALERT_KINDS in email_notifier.py"
+    ],
+    "active_experiments": [
+      "DE-306: python 実行で _count_weekend_seconds の再計算 → team1 主張シナリオは PASS, 別シナリオでは FAIL",
+      "Live 戦略 22 件の period 走査 → bash + for ループで grep。最大 period=50 (SMA50 in ATLAS-2026-0506-005)"
+    ]
+  }
+}

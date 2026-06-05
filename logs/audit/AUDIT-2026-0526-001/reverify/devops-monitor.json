@@ -1,0 +1,91 @@
+{
+  "verifier": "devops-monitor",
+  "verified_at": "2026-05-26",
+  "summary": "DM-201〜DM-208 の8件を実コード照合で検証。DM-204（high）が最重要。主張の一部（FxKillSwitchTriggered が本番で発火しないという点）は誤りで、GlobalRiskSupervisor へのインスタンス注入によりkill_switch_triggered_totalは本番で正常にインクリメントされる。一方 FxCircuitBreakerTriggered・FxPtrcRejectSpike が本番でdead pathである点は正確。DM-208のkindリスト漏れはlive_anomaly集約を正確に反映していない。その他DM-201〜DM-203, DM-205〜DM-207はすべて正確。severity調整: DM-204はhighを維持（FxCircuitBreakerTriggered/FxPtrcRejectSpikeがdead pathである事実は重大）、DM-207はmedium→lowに引き下げ（read-only dashboardの表示不足であり運用への影響は限定的）、DM-208はlow維持（コードコメントdrift、実害なし）。",
+  "verifications": [
+    {
+      "id": "DM-201",
+      "claim": "settings.py の redis_url デフォルト 'redis://localhost:6379/0' により main.py:763 の if ガードが常にTrueになりRedis prober が常に登録される",
+      "claim_accuracy": "正確",
+      "severity_verdict": "medium 維持",
+      "current_code_quote": "settings.py:53-54: `redis_url: str = Field(default=\"redis://localhost:6379/0\", ...)` / main.py:763: `if self._settings.redis_url:` → 常にTrue",
+      "verdict": "confirmed",
+      "notes": "redis_urlのデフォルト値が非空文字列であるため、if ガードは InMemoryEventBus 構成でも常にTrueになる。main.py:777 で critical=True で登録される事実も確認済み。runner.py はRedis prober を登録しないため本番パス（UnifiedRunner）は影響外という第1チームの説明も正確。medium は適切。"
+    },
+    {
+      "id": "DM-202",
+      "claim": "settings.py:211-212 と .env.example:50 に実メールアドレス 510.cocoa@gmail.com がハードコードされている",
+      "claim_accuracy": "正確",
+      "severity_verdict": "low 維持",
+      "current_code_quote": "settings.py:211-212: `notify_email_to: str = Field(default=\"510.cocoa@gmail.com\", ...)` / .env.example:50: `NOTIFY_EMAIL_TO=510.cocoa@gmail.com`",
+      "verdict": "confirmed",
+      "notes": "両ファイルとも実アドレスが存在することをコードで確認。PII だが秘密鍵ではないためlow相当。"
+    },
+    {
+      "id": "DM-203",
+      "claim": "settings.py:248 の smtp_password が SecretStr ではなく plain str で定義されている",
+      "claim_accuracy": "正確",
+      "severity_verdict": "low 維持",
+      "current_code_quote": "settings.py:248: `smtp_password: str = Field(default=\"\", ...)` / email_notifier.py:941: `password = self._settings.smtp_password`（SecretStr.get_secret_value() 不要な形で参照）",
+      "verdict": "confirmed",
+      "notes": "現時点では model_dump() 経由でのログ漏洩は確認されないが、将来実装変更で顕在化するリスクが存在する。lowは適切。"
+    },
+    {
+      "id": "DM-204",
+      "claim": "runner.py（UnifiedRunner、本番パス）で set_metrics_collector() が全く呼ばれず、fx_kill_switch_triggered_total / fx_circuit_breaker_triggered_total / fx_ptrc_reject_total 等が本番でインクリメント不能。FxKillSwitchTriggered・FxCircuitBreakerTriggered・FxPtrcRejectSpike が本番で永遠に発火しない",
+      "claim_accuracy": "部分的に誤り（FxKillSwitchTriggered の部分が不正確）",
+      "severity_verdict": "high 維持（FxCircuitBreakerTriggered・FxPtrcRejectSpike がdead pathである事実が依然として重大）",
+      "current_code_quote": "runner.py には set_metrics_collector の呼び出しが0件（grep で確認済み）。ただし GlobalRiskSupervisor には metrics=self._metrics をインスタンス引数で注入（runner.py:1087-1093）し、risk_supervisor.py:1122-1123 で self._metrics.inc_kill_switch_triggered(reason=reason) が呼ばれるため FxKillSwitchTriggered は本番でも発火する。一方 circuit_breaker.py:27 の module-level `_metrics: MetricsCollector | None = None` はrunner.pyが circuit_breaker モジュールを一切 import せず set_metrics_collector を呼ばないためNoneのまま → circuit_breaker.py:408-409 の `if _metrics is not None: _metrics.inc_circuit_breaker_triggered()` は永遠にノーオップ。ptrc.py:40 の `_metrics: MetricsCollector | None = None` も同様。runner.py は _ptrc_module.set_risk_alert_emitter / set_audit_logger は呼ぶが set_metrics_collector は呼ばない（runner.py:41-46, 366, 373 確認）。",
+      "verdict": "adjusted",
+      "notes": "FxKillSwitchTriggered（fx_kill_switch_triggered_total）については第1チームの主張は誤り。GlobalRiskSupervisor（risk_supervisor.py）はインスタンス注入でmetrics受け取り済みで本番でも正常にカウントされる。しかし FxCircuitBreakerTriggered（fx_circuit_breaker_triggered_total）と FxPtrcRejectSpike（fx_ptrc_reject_total）は本番でdead pathであり、これは重大。したがってhigh severity自体は維持すべき。修正内容: runner.py の initialize() 内で ptrc モジュールと circuit_breaker モジュールに set_metrics_collector を呼ぶブロックを追加する必要がある。ただし circuit_breaker.py のモジュール自体が runner.py に import されていないため、import追加も必要。また DM-204 が列挙した fx_fill_total は実際には fx_fills_total であり（metrics.py:89）、inc_fill() の呼び出し元は存在しないため（grep 結果0件）、この点も不正確。"
+    },
+    {
+      "id": "DM-205",
+      "claim": "fx_signal_silence_sec / fx_feature_store_compute_errors_total / fx_backfill_failures_total / fx_live_eligible_key_missing_total に対応するアラートルールが alerting_rules.yml に存在しない",
+      "claim_accuracy": "正確",
+      "severity_verdict": "low 維持",
+      "current_code_quote": "metrics.py:266, 286, 319, 394 で各メトリクス定義を確認。alerting_rules.yml に対応するアラート定義は grep で0件。",
+      "verdict": "confirmed",
+      "notes": "4メトリクスとも alerting_rules.yml 未定義を確認。運用上の自動検知漏れだが本番トレード処理には直接影響しないためlow相当。"
+    },
+    {
+      "id": "DM-206",
+      "claim": "alerting_rules.yml:127 の FxPositionReconcilerMismatch アラートが参照する docs/runbook/position_reconciler_mismatch.md が存在しない",
+      "claim_accuracy": "正確",
+      "severity_verdict": "low 維持",
+      "current_code_quote": "alerting_rules.yml:127: `runbookUrl: docs/runbook/position_reconciler_mismatch.md` / docs/runbook/ 一覧に当該ファイルなし（position_mismatch.md は存在するが別ファイル）。email_notifier.py:655 でも同ファイルへの参照を確認。",
+      "verdict": "confirmed",
+      "notes": "ファイル不在を直接確認。アラート発火時の運用手順が参照できない。低影響だがlowは適切。"
+    },
+    {
+      "id": "DM-207",
+      "claim": "dashboard/app.py の state-file モードで fetch_health() が lines 136-139 で state ファイル存在確認のみ行いコンポーネントレベルの異常を隠蔽する",
+      "claim_accuracy": "正確（コードの事実として）",
+      "severity_verdict": "low に引き下げ推奨（devil-advocate の調整が妥当）",
+      "current_code_quote": "app.py:136-139: `if STATE_DIR.exists() and list(STATE_DIR.glob('*.state.json')): return {\"status\": \"running\", \"data_source\": \"state_files\"}` — HealthChecker の per-component 状態は返さない。runner.py / state_manager.py にも health_summary.json への書き出しコードなし（grep 0件）。",
+      "verdict": "adjusted",
+      "notes": "コードの事実（ステートファイル存在確認のみ）は正確。しかし severity=medium は過大評価。ダッシュボードは read-only で監視補助ツールであり、oanda断線等は HealthChecker・EmailNotifier・アラートルールの独立した検知経路が存在する（oanda prober が critical=True で登録済み）。ダッシュボードが running を表示しても実際の検知・アラート発火は別経路で行われるため運用への直接被害は限定的。devil-advocate の low 引き下げ判断は妥当。"
+    },
+    {
+      "id": "DM-208",
+      "claim": "metrics.py:356-362 の kind ラベルコメントが email_notifier.py:275-297 追加の position_mismatch / live_anomaly / position_reconcile_mismatch の3種を漏れている",
+      "claim_accuracy": "実質正確だが記述が微妙にずれている",
+      "severity_verdict": "low 維持（devil-advocate の却下は過剰。コメントdriftはメンテナンス上の問題として記録すべき）",
+      "current_code_quote": "metrics.py:356-363 コメントのkind列挙: fill / kill_switch / kill_switch_cancel_failed / position_reconciler / unrealized_warning。email_notifier.py:275-297 _RISK_ALERT_KINDS に追加されたkind値: 'position_mismatch'（line 284）、'live_anomaly'（lines 290-296、account_position_mismatch / live_orders_silent / exposure_near_cap / position_reconcile_mismatch の4アラートを集約）。実際のkind値は position_mismatch と live_anomaly の2種（DM-208が言う3種ではなく、position_reconcile_mismatch は live_anomaly に集約されているため独立したkind値ではない）。",
+      "verdict": "adjusted",
+      "notes": "DM-208がposition_reconcile_mismatchを独立したkindとして数えているが、実際はlive_anomaly kindに集約されている（email_notifier.py:294-296）。コメントに漏れているkindはposition_mismatch と live_anomaly の2種。DM-208の列挙は微妙にずれているが本質（コメントdriftが存在する）は正確。low維持。devil-advocateの「却下」は適切でなく、low severity のコメントdriftとして記録すべき。"
+    }
+  ],
+  "summary_counts": {
+    "total": 8,
+    "confirmed": 5,
+    "adjusted": 3,
+    "refuted": 0,
+    "severity_changes": [
+      {"id": "DM-204", "from": "high", "to": "high（理由の一部訂正: FxKillSwitchTriggeredはGRS経由で本番でも発火する。FxCircuitBreakerTriggered/FxPtrcRejectSpikeはdead pathであり重大）"},
+      {"id": "DM-207", "from": "medium", "to": "low（devil-advocateの調整を支持: ダッシュボードのread-only性質と独立検知経路の存在）"},
+      {"id": "DM-208", "from": "low", "to": "low維持（devil-advocateの却下は過剰、コメントdriftとして低severity維持）"}
+    ]
+  },
+  "key_errors_found": "DM-204: FxKillSwitchTriggeredはGlobalRiskSupervisorのインスタンス注入経由で本番でも発火する（first-team主張が誤り）。DM-204: 引用のfx_fill_totalは実際はfx_fills_totalで呼び出し元も存在しない。DM-208: position_reconcile_mismatchはkind値ではなく live_anomaly に集約されており独立したkindは存在しない。"
+}

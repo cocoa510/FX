@@ -1,0 +1,53 @@
+{
+  "round": 1,
+  "session": "AUDIT-2026-0525-001",
+  "phase": "Phase 4 fix implementation (dry-run解除、修正実施)",
+  "date": "2026-05-25",
+  "commit_status": "NOT committed — ユーザーレビュー待ち (commit/push は確認後)",
+  "fixes": [
+    {
+      "id": "CSR-001",
+      "severity": "critical",
+      "repo": "ATLAS",
+      "files": ["atlas/validator/syntax_checker.py", "tests/validator/test_builtins_escape.py"],
+      "summary": "サンドボックス RCE 二重防御。Defense1: ALLOWED_ATLAS_SUBMODULES で atlas import を安全サブモジュール限定。Defense2: import 済みモジュール経由の連鎖属性中間ノードの禁止モジュール検出。",
+      "verification": "RCE 実再現で遮断確認、既存1649戦略で誤検出0、validatorテスト17件(+5新規)、golden gate+sandbox 77件 PASS、lint clean",
+      "prevention": "5 新規テスト(攻撃遮断/正規import通過/ローカル属性誤検出なし)"
+    },
+    {
+      "id": "RE-001",
+      "severity": "high",
+      "repo": "FTS",
+      "files": ["trading_platform/core/risk_engine/ptrc.py", "tests/risk_engine/test_ptrc_currency.py"],
+      "summary": "Live + StaticCurrencyConverter で account 通貨と異なる quote の注文を fail-safe REJECT (OANDA_ENVIRONMENT==live 判定)。JPYペアは換算不要で維持。PR3 の ENV==production RuntimeError は温存。",
+      "verification": "新規3テスト + PTRC回帰52件 + PR3構造テスト維持、ptrc.py lint clean",
+      "prevention": "live非JPY REJECT / liveJPY通過 / 非live維持 の3テスト"
+    },
+    {
+      "id": "QT-001/002/004/009",
+      "severity": "high",
+      "repo": "FTS",
+      "files": ["tests/integration/test_no_existence_skip.py", "tests/integration/test_xfail_scenario_signals.py", "tests/integration/test_strategy_metadata_consistency.py", "tests/integration/test_atlas_top3_strategies.py"],
+      "summary": "QT-001: existence-skip 検出器に未インポート等6パターン追加。QT-001 の回避skipを動的列挙に置換+番兵テスト。QT-002: 存在チェックskipを合成Gate通過戦略フィクスチャに置換。QT-004: test_generates_at_least_one_signal をリネーム+実質アサーション(全バー処理+シグナル型妥当性)。QT-009: 新パターン自己検証テスト。",
+      "verification": "89件 PASS (29 integration + 60 top3)、新規コード lint clean",
+      "prevention": "番兵テスト test_all_implemented_scenarios_are_imported / パターン自己検証"
+    },
+    {
+      "id": "DM-001/002/003 + B-001",
+      "severity": "high",
+      "repo": "FTS",
+      "files": ["trading_platform/core/unified_runner/runner.py", "trading_platform/core/unified_runner/risk_supervisor.py", "trading_platform/core/risk_engine/ptrc.py", "trading_platform/core/monitoring/health_check.py", "tests/unit/test_dm00*.py"],
+      "summary": "DM-003: HealthChecker を UnifiedRunner に組込(OANDA prober critical + EventBus 条件付、Redis は InMemory のため非登録)、start/stop をライフサイクル配線。DM-001: AuditLogger を DI で PTRC 拒否・KS 発動経路に配線(logs/audit/ JSONL)。DM-002: staleness critical で 'unhealthy' 昇格。B-001(code-safety発見): risk_supervisor の datetime.now(datetime.UTC) AttributeError を timezone.utc に修正(KS発動時に同期伝播し _dispatch_alert を阻害していた)。",
+      "verification": "DMテスト56件 + KS監査回帰3件、FTS unit+risk 874件 PASS、parity 60件 + integration 78件 PASS、トレード挙動不変(記録追加のみ)",
+      "prevention": "B-001 回帰テスト test_dm001_ks_audit_log.py(audit注入時に同期例外なくrecord検証)、code-safety-reviewer の Phase4 diff レビュー実施"
+    }
+  ],
+  "code_safety_review": {
+    "reviewer": "code-safety-reviewer",
+    "verdict": "CSR-001 safe / QT safe / RE-001 concern(B-001) / DM concern(B-001) → B-001 修正済み",
+    "blocker_found_and_fixed": "B-001 (datetime.UTC) — テストすり抜けを diff レビューで捕捉、修正+回帰テスト追加"
+  },
+  "deferred_to_next_round": [
+    "CSR-005 (validator timeout化), CSR-001残り低リスク, PA-004/006, RE-002(未実現損益PTRC), RE-004(KS gateway halt), DE-002(品質FAILバードロップ), QT-006/007/011, DM-002残, DM-006(watchdog alert), DM-007(print), DM-009(correlation_id log), medium 15件 + low群"
+  ]
+}

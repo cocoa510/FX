@@ -1,0 +1,151 @@
+{
+  "agent": "code-safety-reviewer",
+  "scope": "ATLAS calc layer (commit 15d62e62 post-fix + new)",
+  "audit_date": "2026-05-30",
+  "scanned_paths": [
+    "atlas/utils/path_safety.py",
+    "atlas/main.py",
+    "atlas/backtest/runner.py",
+    "atlas/analyzer/metrics.py",
+    "atlas/feedback/context_builder.py",
+    "atlas/config/defaults.py",
+    "atlas/common/sandbox_builtins.py",
+    "atlas/validator/sandbox_runner.py",
+    "atlas/validator/syntax_checker.py",
+    "tests/golden/test_qa301_soft_score_floor.py",
+    "docs/spec_change_log.md"
+  ],
+  "post_fix_verification": {
+    "commit_05ae8595_QA301": "CONCERNS: (1) EFFECTIVE_WEIGHT_FLOOR=0.90 hardcoded as local variable; not in defaults.py (CSR-401). (2) 250+ result.json files remain at metrics_schema_version=6.1.0; backfill_v6_2_0_soft_score.py not created (CSR-402). (3) test_three_none_with_top3_valid_now_fails method name contradicts content (CSR-403). Golden tests 5 items / numeric values / METRICS_SCHEMA_VERSION correctly updated.",
+    "commit_15d62e62_CSR": "CONCERNS: (1) validate_instrument / validate_timeframe not called in 5 CLI commands: context, explore-priority, data fetch, data fetch-secondary, data check (CSR-404). (2) 7 locations in main.py build Path(strategies)/generation_id CWD-relative, bypassing _strategies_dir absolute logic (CSR-405). CSR-306 fix in context_builder.py:548 correctly applied. CSR-302 parent_id fix at main.py:L147 correctly applied. CSR-303 generation_id validation correctly applied in validate/backtest/metrics/score/evaluate."
+  },
+  "findings": [
+    {
+      "id": "CSR-401",
+      "severity": "medium",
+      "area": "atlas/backtest/runner.py",
+      "title": "EFFECTIVE_WEIGHT_FLOOR=0.90 hardcoded as local variable; not managed in defaults.py",
+      "description": "QA-301 introduced EFFECTIVE_WEIGHT_FLOOR=0.90 as local variable in _compute_soft_score_redistributed (L686), violating CLAUDE.md magic-number prohibition and the defaults.py Final constant rule. Future [change:tuning] changes may be missed. DRY violation with GATE_TIER2_SOFT_SCORE_MIN which is correctly in defaults.py.",
+      "evidence": [
+        "atlas/backtest/runner.py:686 - EFFECTIVE_WEIGHT_FLOOR: float = 0.90 (local variable)",
+        "atlas/config/defaults.py:216 - GATE_TIER2_SOFT_SCORE_MIN: Final[float] = 0.70 (correctly in defaults)"
+      ],
+      "reproduction": "Read runner.py L686; no matching constant in defaults.py.",
+      "suggested_fix": "Add GATE_TIER2_EFFECTIVE_WEIGHT_FLOOR: Final[float] = 0.90 to defaults.py, import and reference in runner.py, add assert GATE_TIER2_EFFECTIVE_WEIGHT_FLOOR > GATE_TIER2_SOFT_SCORE_MIN.",
+      "regression_of": null,
+      "post_fix_defect": true
+    },
+    {
+      "id": "CSR-402",
+      "severity": "high",
+      "area": "strategies/ (historical result.json files)",
+      "title": "QA-301 [change:spec] backfill not performed: 250+ strategies retain old FLOOR=0.70 soft_score",
+      "description": "spec_change_log.md L27 explicitly states backfill is deferred. 250+ result.json files have metrics_schema_version=6.1.0; zero have 6.2.0. scripts/backfill_v6_2_0_soft_score.py does not exist. Strategies computed with FLOOR=0.70 may have false-positive Tier2 PASS results for 3-4 None indicator scenarios. Violates CLAUDE.md [change:spec] step 6.",
+      "evidence": [
+        "docs/spec_change_log.md:27 - backfill deferred note",
+        "strategies/*/backtest/result.json: 250+ files at 6.1.0 (grep confirmed)",
+        "strategies/*/backtest/result.json: 0 files at 6.2.0 (grep confirmed)",
+        "ls scripts/: backfill_v6_2_0_soft_score.py not found"
+      ],
+      "reproduction": "backfill_v6_2_0_soft_score.py does not exist. Re-computing with FLOOR=0.90 expected to flip some overall_passed True->False.",
+      "suggested_fix": "Create scripts/backfill_v6_2_0_soft_score.py. Recompute gate_check.soft_score with FLOOR=0.90. Update metrics_schema_version to 6.2.0. Run audit_schema_drift.py to confirm version_outdated=0. Remove newly-failed strategies from FTS candidates immediately.",
+      "regression_of": null,
+      "post_fix_defect": true
+    },
+    {
+      "id": "CSR-403",
+      "severity": "low",
+      "area": "tests/golden/test_qa301_soft_score_floor.py",
+      "title": "Method name test_three_none_with_top3_valid_now_fails contradicts test content which verifies PASS",
+      "description": "Method at L77 is named test_three_none_with_top3_valid_now_fails but asserts result >= 0.70 (verifying PASS). Name implies FAIL is expected. Future maintainers may be misled into assuming FAIL and incorrectly modify the behavior.",
+      "evidence": [
+        "test_qa301_soft_score_floor.py:77 - def test_three_none_with_top3_valid_now_fails",
+        "test_qa301_soft_score_floor.py:100-101 - assert result >= 0.70 (verifies PASS)"
+      ],
+      "reproduction": "Reading the method name implies the 3-None scenario should FAIL; test body verifies it PASSes.",
+      "suggested_fix": "Rename to test_three_none_with_top3_valid_still_passes. Update docstring to clarify this scenario must PASS.",
+      "regression_of": null,
+      "post_fix_defect": true
+    },
+    {
+      "id": "CSR-404",
+      "severity": "medium",
+      "area": "atlas/main.py",
+      "title": "validate_instrument / validate_timeframe not applied in 5 CLI commands; path traversal gap from CSR-MISSED-004 fix",
+      "description": "commit 15d62e62 added validate_instrument / validate_timeframe to path_safety.py but main.py does not import them. Five commands accept instrument/timeframe without validation: (1) context L619, (2) explore-priority L739-740, (3) data fetch L780, (4) data fetch-secondary L792, (5) data check L828. The context command passes instrument to build_generation_context which calls get_parquet_path for path construction - highest risk. CSR-MISSED-004 fix was not applied to all CLI entry points.",
+      "evidence": [
+        "atlas/main.py:32 - only validate_generation_id imported; validate_instrument/validate_timeframe absent",
+        "atlas/main.py:619-660 - context command: no validate before build_generation_context",
+        "atlas/main.py:739-753 - explore-priority: no validate",
+        "atlas/main.py:780-788 - data fetch: no validate",
+        "atlas/main.py:792-815 - data fetch-secondary: no validate",
+        "atlas/main.py:828-835 - data check: no validate",
+        "atlas/utils/path_safety.py:56-81 - validate_instrument defined but zero call sites"
+      ],
+      "reproduction": "grep -rn validate_instrument atlas/ returns only definition in path_safety.py; zero calls in main.py.",
+      "suggested_fix": "Import validate_instrument and validate_timeframe in main.py. Apply try/except ValueError guard at top of all 5 commands. Follow validate_generation_id pattern at L187-190.",
+      "regression_of": null,
+      "post_fix_defect": true
+    },
+    {
+      "id": "CSR-405",
+      "severity": "low",
+      "area": "atlas/main.py",
+      "title": "main.py builds strategies/ paths 7 times as CWD-relative, bypassing runner.py::_strategies_dir absolute-path logic",
+      "description": "runner.py._strategies_dir() resolves paths via _ATLAS_ROOT (absolute-first). main.py has 7 locations constructing Path('strategies')/generation_id directly (CWD-relative), bypassing the absolute-path logic. When called from a different CWD, runner.py succeeds but main.py may fail. Structural DRY violation with limited current impact.",
+      "evidence": [
+        "atlas/main.py:97 - Path(strategies)/generation_id/metrics (CWD-relative)",
+        "atlas/main.py:114 - Path(strategies)/generation_id/scoring (CWD-relative)",
+        "atlas/main.py:135 - Path(strategies)/generation_id/metadata.json (CWD-relative)",
+        "atlas/main.py:195 - Path(strategies)/generation_id (CWD-relative)",
+        "atlas/main.py:278 - Path(strategies)/generation_id/validation (CWD-relative)",
+        "atlas/main.py:342 - Path(strategies)/generation_id/config.json (CWD-relative)",
+        "atlas/main.py:365 - Path(strategies)/generation_id/metadata.json (CWD-relative)",
+        "atlas/backtest/runner.py:88-103 - _ATLAS_ROOT absolute-path-first _strategies_dir"
+      ],
+      "reproduction": "Run python -m atlas.main metrics ATLAS-... from outside ATLAS root. main.py raises FileNotFoundError while runner.py resolves correctly.",
+      "suggested_fix": "Add public strategies_dir(generation_id)->Path to atlas/utils/path_safety.py with same absolute-path-first logic. Unify all 7 locations in main.py. Implementable as [refactor].",
+      "regression_of": null,
+      "post_fix_defect": false
+    },
+    {
+      "id": "CSR-406",
+      "severity": "low",
+      "area": "atlas/utils/path_safety.py",
+      "title": "validate_generation_id 80-char limit is a magic number embedded in regex; not managed as Final constant in defaults.py",
+      "description": "_GENERATION_ID_RE = r'^[A-Za-z0-9_-]{1,80}' uses 80 as an undocumented magic number inside the regex, not in defaults.py. Violates CLAUDE.md magic-number prohibition. Future ID scheme changes may silently conflict.",
+      "evidence": [
+        "atlas/utils/path_safety.py:18 - _GENERATION_ID_RE = re.compile(r'^[A-Za-z0-9_-]{1,80}') (80 is magic number)"
+      ],
+      "reproduction": "Pass 81-char generation_id; ValueError raised but constraint rationale unreadable from code.",
+      "suggested_fix": "Add GENERATION_ID_MAX_LENGTH: Final[int] = 80 to defaults.py. Reference it in path_safety.py when building the regex.",
+      "regression_of": null,
+      "post_fix_defect": true
+    }
+  ],
+  "warnings": [
+    {
+      "type": "convention_violation",
+      "severity": "WARNING_ADVISORY",
+      "rule": "test name accuracy",
+      "location": "tests/golden/test_qa301_soft_score_floor.py:L77",
+      "detail": "test_three_none_with_top3_valid_now_fails name implies FAIL but body verifies PASS. Recorded as CSR-403."
+    },
+    {
+      "type": "schema_drift_risk",
+      "severity": "WARNING_BLOCKING",
+      "rule": "QA-301 backfill not executed",
+      "location": "strategies/*/backtest/result.json (250+ files at 6.1.0)",
+      "detail": "250+ result.json files at 6.1.0; zero at 6.2.0. Strategies with false-positive PASS under old FLOOR=0.70 may currently be in FTS. Recommend pausing FTS new strategy intake until backfill completes. Recorded as CSR-402."
+    }
+  ],
+  "summary": {
+    "total_findings": 6,
+    "critical": 0,
+    "high": 1,
+    "medium": 2,
+    "low": 3,
+    "post_fix_defects": 5,
+    "most_urgent": "CSR-402: QA-301 backfill not executed. 250+ overall_passed values computed under old FLOOR=0.70. Create and run scripts/backfill_v6_2_0_soft_score.py urgently."
+  }
+}

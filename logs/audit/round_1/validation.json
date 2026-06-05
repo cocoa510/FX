@@ -1,0 +1,25 @@
+{
+  "round": 1,
+  "session": "AUDIT-2026-0525-001",
+  "validators": ["devil-advocate x3 (ATLAS / FTS-core / FTS-ops-data-test)"],
+  "verdict_summary": {
+    "raw_findings": 61,
+    "validated_true": 50,
+    "validated_false": 1,
+    "downgraded": 10,
+    "duplicates": ["CSR-002==QA-001", "QT-002==QT-001(root)", "QT-009==QT-001(root)"],
+    "severity_after_validation": {"critical": 0, "high": 8, "medium": 15, "low": 35}
+  },
+  "high_findings_after_validation": [
+    {"id": "DM-001", "impact": "production", "title": "AuditLogger が本番(UnifiedRunner)で未使用 dead code — PTRC拒否が監査証跡に残らない"},
+    {"id": "DM-003", "impact": "production", "title": "HealthChecker が UnifiedRunner に未組込 — 本番で active probe 不稼働"},
+    {"id": "DM-004", "impact": "production", "title": "Dashboard が localhost:8000(main.py)固定 — 本番 UnifiedRunner を監視不能"},
+    {"id": "QT-001", "impact": "dev/CI", "title": "pytest.skip('未インポート') が STRICT_SKIP と existence-skip 検出器を両方回避（偽緑）"},
+    {"id": "QT-003", "impact": "dev/CI", "title": "PTRC統合テストが永続xfailで正常承認フローを一度も検証していない"},
+    {"id": "QT-004", "impact": "dev/CI", "title": "test_generates_at_least_one_signal が signal=0 でも warn のみで PASS"},
+    {"id": "QT-005", "impact": "dev/CI", "title": "total_exposure/per_pair_exposure リジェクト統合テストが docstring に反し未実装"}
+  ],
+  "cross_cutting_theme": "本番エントリポイント (scripts/run_unified.py -> UnifiedRunner) と dev/FastAPI 経路 (main.py -> ExecutionCoordinator) の二重実装に起因する欠落が高 severity 群の過半を占める。HealthChecker / Dashboard 接続 / AuditLogger 配線 / Kill Switch の gateway halt / Currency Converter 注入 は main.py 側にのみ存在し、実運用される UnifiedRunner には未配線。",
+  "medium_findings_after_validation": ["CSR-001", "CSR-005", "PA-004", "PA-006", "RE-001", "RE-002", "RE-004", "DE-002", "QT-006", "QT-007", "QT-011", "DM-002", "DM-006", "DM-007", "DM-009"],
+  "convergence": "threshold=critical の収束条件では critical=0 のため converged_clean。ただし high 8件 (うち production 3件) は要対応として report に明記。"
+}

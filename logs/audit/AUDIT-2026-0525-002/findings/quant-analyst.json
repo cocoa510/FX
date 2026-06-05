@@ -1,0 +1,137 @@
+{
+  "agent": "quant-analyst",
+  "session": "AUDIT-2026-0525-002",
+  "scope": "ATLAS evaluation metrics / Gate logic / statistical soundness (dry-run, no fixes)",
+  "findings": [
+    {
+      "id": "QA-101",
+      "severity": "low",
+      "area": "scripts/apply_gate_to_results.py",
+      "title": "inf->None 統一の波及漏れ: L1-only 遡及 Gate スクリプトが無敗戦略を FAIL に反転",
+      "description": "コミット 0450a7c6 で L1 _run_vectorbt_portfolio が gross_loss==0 時に float inf ではなく None を返すよう変更。コミットは Gate 結果は不変と主張するが、これは runtime overall_passed (Tier1 は L2 PF 参照、L2 は元から None) についてのみ正しく、L1 PF を直接読む遡及 Gate スクリプト apply_gate_to_results.py は検証対象外。build_gate_check は layer1.get profit_factor を読み PF 条件を pf is not None and pf>=PF_MIN で評価する。旧 inf では inf>=PF_MIN が True PASS だったが None では False となり PF 条件が FAIL に反転。負けトレード皆無=PF最良の L1-only 戦略が遡及 Gate で PF 不合格に落ちる挙動変化。実害は無敗 L1-only という稀ケース限定で本スクリプトは runtime Gate でなく遡及分析ツールのため low。ただしコミットの無回帰主張 golden 82件 が本経路を未カバーな点が incomplete。",
+      "evidence": [
+        "atlas/backtest/vectorbt_engine.py:738-743",
+        "scripts/apply_gate_to_results.py:59",
+        "scripts/apply_gate_to_results.py:70-73"
+      ],
+      "suggested_fix": "apply_gate_to_results.py の PF 条件を runtime Tier1 と同一セマンティクス 無敗=測定不能で PF サブチェック skip 他条件で判定 に揃えるか、本スクリプトを遡及分析専用と明記しコミット無回帰検証の対象範囲に含める。runtime Gate には影響しない。",
+      "category": "incomplete_fix"
+    },
+    {
+      "id": "QA-102",
+      "severity": "medium",
+      "area": "atlas/backtest/runner.py (Tier1) / event_simulator.py (L2 PF)",
+      "title": "無敗 gross_loss==0 戦略が Tier1 Profit Factor で恒久 FAIL する逆転境界",
+      "description": "L2 _compute_metrics は gross_loss==0 時 profit_factor=None を返す event_simulator.py:1377-1381 無敗=統計不能。Tier1 PF 条件は _t1_cond Profit Factor layer2.profit_factor >= 1.0 だが _t1_cond は value is None のとき無条件 passed=False reason 値が算出されていません runner.py:781-785。結果 PF 最良 損失ゼロ 戦略が Tier1 PF で必ず FAIL し overall_passed=False。PF 境界条件として逆説的 最良値->不合格。本件は今回の inf->None コミットが導入したのでなく L2 側に元々存在したが、L1 も None 統一で 無敗=全層 None の一貫状態になり Tier1 でこの逆転が確実に顕在化する。完全無敗 >=50 trades は実戦で極稀だが合成データ 短期間BT 特定 fixture で発生しうる。None を 測定不能でスキップ とするか 無敗=PF閾値満たす扱い とするかの設計判断が未確定。",
+      "evidence": [
+        "atlas/backtest/event_simulator.py:1374-1381",
+        "atlas/backtest/runner.py:781-785",
+        "atlas/backtest/runner.py:799"
+      ],
+      "suggested_fix": "無敗ケースの PF=None を Tier1 でどう扱うか change:spec で明文化。案A gross_loss==0 かつ total_trades>0 かつ gross_profit>0 のとき PF>=閾値で PASS 扱い。案B PF 条件のみ skip し他 6 条件で判定。golden gate 更新 schema bump 要。Tier1 計算ロジック変更のため Immutable Gate Protection Protocol に従う。",
+      "category": "new"
+    },
+    {
+      "id": "QA-103",
+      "severity": "medium",
+      "area": "atlas/backtest/event_simulator.py (WFA)",
+      "title": "QA-003 の accept 根拠が不完全: OOS 窓重複は look-ahead 以外に Gate 接続メトリクスへ pseudo-replication を持ち込む",
+      "description": "WFA は step_months=1 oos_months=6 defaults.py:302-303 のスライディングウィンドウで隣接 walk の OOS 窓が 5/6=83% 重複 event_simulator.py:1710-1733 walk_start += step_bars。_aggregate_wfa_walks は重複 OOS サンプルを単純平均し efficiency_ratio oos_profit_factor strategy_drift を算出 event_simulator.py:1565-1618。これら3指標は Tier2 soft_score に直接寄与 WFA Efficiency 0.10 Strategy Drift 0.08 OOS/IS PF Ratio 0.12=oos_profit_factor 経由 =Gate 接続。AUDIT-2026-0525-001 の disposition low_findings_disposition_2026_0525.md:26 は QA-003 accept 時 look-ahead 状態漏洩は無し FeatureStore 再初期化済 を根拠としたが、これは独立性問題のうち look-ahead leakage のみで、本質的欠陥である pseudo-replication 同一 OOS バーが最大6 walk で重複カウントされ有効サンプル数が n_walks より激減 OOS 安定性が過大評価 を扱っていない。重複サンプル平均は分散を過小評価し強健性メトリクスを楽観方向にバイアス。accept 根拠が論点を取り違えており low->medium に格上げ再評価を要する。",
+      "evidence": [
+        "atlas/config/defaults.py:302-303",
+        "atlas/backtest/event_simulator.py:1706-1733",
+        "atlas/backtest/event_simulator.py:1565-1618",
+        "docs/audits/low_findings_disposition_2026_0525.md:26"
+      ],
+      "suggested_fix": "短期 disposition の accept 根拠を look-ahead 無し から pseudo-replication により Gate 接続メトリクスが楽観バイアス へ訂正し影響範囲 Tier2 寄与0.30分 を明記。中期 change:spec 集計を non-overlapping walk subset step を oos に一致させる間引き or block-bootstrap で有効自由度補正 に変更、または oos_profit_factor を walk 平均でなく OOS プール全体の gross_profit/gross_loss で再定義 ratio-of-means。WFA_MIN_WALKS>=10 との両立は IS/OOS 比やデータ期間の再設計要。golden 更新 schema bump 必須。",
+      "category": "new"
+    },
+    {
+      "id": "QA-104",
+      "severity": "low",
+      "area": "atlas/backtest/event_simulator.py (_aggregate_wfa_walks)",
+      "title": "WFA OOS PF を比率の算術平均 mean-of-ratios で集計しており分布が歪む",
+      "description": "_aggregate_wfa_walks は oos_profit_factor を np.mean oos_pfs で算出 event_simulator.py:1606,1613。PF は gross_profit/gross_loss の比率であり比率の算術平均は分母が小さい walk に過大重みを与え外れ値に脆弱で、プール全体の真の PF Sum gross_profit / Sum gross_loss ratio-of-means と一致しない。is_profit_factor も同様 1607,1614。この oos_profit_factor は OOS/IS PF Ratio Tier2 weight 0.12 に流れ Gate に影響。QA-103 の窓重複と複合し歪みが増幅。mean_oos_sharpe 等の Sharpe 平均は概ね加法スケールのため PF ほど深刻でない。",
+      "evidence": [
+        "atlas/backtest/event_simulator.py:1606-1607",
+        "atlas/backtest/event_simulator.py:1613-1614",
+        "atlas/backtest/result_parser.py:248-255"
+      ],
+      "suggested_fix": "OOS/IS PF を各 walk の gross_profit/gross_loss を保持しプール合算 ratio-of-means で再算出、または中央値併記で外れ値耐性確認。Gate 接続のため change:spec golden 更新 schema bump。QA-103 と同一の WFA 再設計でまとめて対処が効率的。",
+      "category": "new"
+    },
+    {
+      "id": "QA-105",
+      "severity": "low",
+      "area": "atlas/analyzer/portfolio_analyzer.py",
+      "title": "QA-002 再確認: MaxDD の幾何 cumprod とリターン加法定義の基底不整合 後処理限定 accept 妥当",
+      "description": "_individual_max_drawdown_pct は np.cumprod 1.0+returns で幾何 複利 equity を作り MaxDD 算出 portfolio_analyzer.py:117-124 一方、日次リターンは pnl_series/ec0 固定初期残高で割る加法 単利定義 で生成 line 279 portfolio_total_return_pct も returns.sum 加法集計 line 328。単利リターン系列に複利 cumprod を適用するのは内部不整合で MaxDD と total_return が異なる複利前提を持つ。import-trace で本モジュールは main.py の portfolio-report サブコマンド main.py:866,914-924 からのみ呼ばれ Gate scorer convergence FTS 選定に非接続を再確認。AUDIT-2026-0525-001 の accept 後処理レポート専用 は妥当。ただし基底不整合は実在しレポート利用者が MaxDD を誤読しうるため記録。",
+      "evidence": [
+        "atlas/analyzer/portfolio_analyzer.py:117-124",
+        "atlas/analyzer/portfolio_analyzer.py:279",
+        "atlas/analyzer/portfolio_analyzer.py:328",
+        "atlas/main.py:866",
+        "atlas/main.py:914-924"
+      ],
+      "suggested_fix": "リターン定義を統一: 案A 加法に揃え equity=ec0 1+cumsum returns で MaxDD 計算、案B 複利に揃え returns を対前点比に再定義し total_return も複利化。後処理専用で Gate 影響なし低優先。実装時は warnings に基底定義を明記。",
+      "category": "new"
+    },
+    {
+      "id": "QA-106",
+      "severity": "low",
+      "area": "atlas/backtest/event_simulator.py (_compute_metrics)",
+      "title": "QA-006 再確認: Calmar が算術年率/MaxDD で CAGR 非準拠 Gate 非接続 accept 妥当だが乖離は実在",
+      "description": "calmar=annualized_ret/state.max_drawdown event_simulator.py:1475 annualized_ret=mean_ret*bars_per_year line 1445 は per-bar 平均リターンの算術年率化で、標準 Calmar 分子の CAGR 幾何年率 ではない。ボラ高系列ほど算術平均>=幾何平均のため Calmar 過大評価。さらに同モジュールの recovery_factor は実現 total_return_pct ベース 1480-1482 で、Calmar 算術年率 と recovery_factor 実現累積 の年率化基底が混在し横並び解釈不能。grep 確認の通り Calmar は Tier1 Tier2 のいずれにも未使用 Gate 表に Calmar なし scorer core 6 指標にも非含で Gate 影響なし。AUDIT-2026-0525-001 の accept は妥当。ただし atlas-evaluate の指標解釈や FTS Composite で Calmar 参照時は過大評価に留意。",
+      "evidence": [
+        "atlas/backtest/event_simulator.py:1445",
+        "atlas/backtest/event_simulator.py:1473-1477",
+        "atlas/backtest/event_simulator.py:1480-1482"
+      ],
+      "suggested_fix": "Calmar 分子を CAGR equity_last/equity_0 の bars_per_year/n_bars 乗 -1 に変更し recovery_factor と基底統一 change:spec golden の Calmar 期待値更新 schema bump。Gate 非接続で低優先だが CSR-009 MC Sharpe ddof QA-002 portfolio MaxDD と合わせ将来の基底統一 change:spec で一括処理が妥当。",
+      "category": "new"
+    },
+    {
+      "id": "QA-107",
+      "severity": "low",
+      "area": "atlas/analyzer/comparator.py",
+      "title": "QA-005 再確認: metrics_schema_version 非照合での親比 pct_change 算出 表示専用 accept 妥当",
+      "description": "compare_two は COMPARISON_METRICS 各指標の diff pct_change を無条件算出 comparator.py:99-121。metrics_schema_version 異同チェックが無く、スキーマ非互換世代間 例 4.6.0 fill_rate 再定義 5.0.0 major bump でも改善率を計算し 親比 X パーセント 改善 を表示しうる。これはエージェント指示書 Q4 schema version 不一致のまま親比改善報告の禁止 に抵触する経路。ただし comparator は atlas compare 表示専用で Gate convergence scorer 非接続、None 値はスキップ line 103 でクラッシュなし。L2 PF 参照のため今回の L1 inf->None の影響も受けない。accept は妥当だが、収束判定 improvement_rate を comparator 出力から二次利用する場合は呼び出し側でスキーマ照合の担保が必要。",
+      "evidence": [
+        "atlas/analyzer/comparator.py:99-113",
+        "atlas/analyzer/comparator.py:17-34"
+      ],
+      "suggested_fix": "compare_two に schema_version を渡し不一致時は pct_change=None warning フラグ。表示専用で低優先だが improvement_rate 二次利用箇所では呼び出し側照合を必須化する運用ルールを docs に追記。",
+      "category": "new"
+    },
+    {
+      "id": "QA-108",
+      "severity": "low",
+      "area": "atlas/analyzer/comparator.py",
+      "title": "ユーザー可視文字列リテラルの文字化け UTF-8 破損",
+      "description": "comparator.py 2 箇所で日本語文字列が文字化け: line 48 records 空時の error メッセージ先頭が置換文字、line 207 docstring 冒頭が破損。前者は atlas compare の JSON 出力に乗りユーザー表示される。機能影響なしだが UTF-8 整合性劣化で、他ファイル混入の兆候がないか確認推奨。本監査主題 評価指標 Gate 統計 外のため info low。",
+      "evidence": [
+        "atlas/analyzer/comparator.py:48",
+        "atlas/analyzer/comparator.py:207"
+      ],
+      "suggested_fix": "該当文字列を正しい UTF-8 で書き直し、リポジトリ全体に同種破損 U+FFFD が無いか grep 確認。",
+      "category": "new"
+    },
+    {
+      "id": "QA-109",
+      "severity": "info",
+      "area": "atlas/backtest/vectorbt_engine.py / event_simulator.py / runner.py / scorer.py",
+      "title": "確認 L1 inf->None 統一は core 集計 Gate 3層スコアリングに新規不整合を持ち込まない",
+      "description": "Mission 1 主眼 inf->None 統一が 26 指標集計 Gate 3層スコアへ None 伝播クラッシュや誤判定を生むか を実読確認した結果、新規不整合なし 正の確認 回帰なし。根拠 1 PerformanceMetrics は L2 PF 参照で L1 PF 未使用 result_parser.py:72。2 Tier1 Tier2 Gate は layer2.profit_factor 参照、L1 PF は L1/L2 drift 警告のみ runner.py:1416-1424 で drift は l1_pf l2_pf 両 not None ガード済 None 時 drift=None で警告 skip。旧 inf では abs inf-l2 /inf=nan/1.0 の不定値だったため None 化はむしろ改善。3 scorer の _normalize_pf は L2 PF を None-safe 処理 scorer.py:50-54。4 L1 内部 PF サブチェックは pf is not None and pf<MIN vectorbt_engine.py:953,981 で None を安全通過 param sensitivity は Sharpe ベースで PF 非依存。5 golden fixture に Infinity inf 文字列なし METRICS_SCHEMA_VERSION は 6.0.0 据え置き fix:bug 適正。コミット 07f15dd7 CSR-007 CSR-008 QA-007 も評価指標 Gate の数値ロジック不変で回帰なし。",
+      "evidence": [
+        "atlas/backtest/result_parser.py:72",
+        "atlas/backtest/runner.py:1416-1424",
+        "atlas/analyzer/scorer.py:50-54",
+        "atlas/backtest/vectorbt_engine.py:953",
+        "atlas/backtest/vectorbt_engine.py:981",
+        "atlas/config/defaults.py:59"
+      ],
+      "suggested_fix": "対処不要 確認所見。QA-101 auxiliary script の波及 のみフォロー。",
+      "category": "regression"
+    }
+  ]
+}

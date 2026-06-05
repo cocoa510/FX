@@ -1,0 +1,113 @@
+{
+  "audit_id": "AUDIT-2026-0525-002",
+  "review_date": "2026-05-26",
+  "reviewer": "code-safety-reviewer (claude-sonnet-4-6)",
+  "overall_verdict": "approve_with_notes",
+  "commit_ready": true,
+  "blockers": [],
+  "pre_commit_advisory_actions": [
+    "ADVISORY-1: runner.py PlatformSettings() 二重インスタンス化 -> 次セッションで self._settings 化推奨",
+    "ADVISORY-2: main.py _ptrc_mod2 を _ptrc_mod に命名統一推奨",
+    "ADVISORY-3: ATLAS diff に混入の backfill_strategy_tags.json を別コミットに分離推奨"
+  ],
+  "per_fix": {
+    "CSR-101": {
+      "repo": "ATLAS",
+      "verdict": "approve",
+      "new_bugs": "NONE",
+      "intent_alignment": "PASS",
+      "key_findings": [
+        "_check_forbidden_builtin_names が AST.Name ノード経由の FORBIDDEN_BUILTINS 束縛(デフォルト引数・クラス変数・代入・lambda)を遮断。RCE 経路を正確に閉鎖。",
+        "call_func_node_ids = {id(node.func) ...} でノード同一性を判定し _check_forbidden_calls との二重報告を回避。",
+        "import 文は ast.Import/ImportFrom ノードであり ast.Name を生成しない。正当戦略の誤検知なし(テスト確認済み)。",
+        "4 攻撃パターン + eval 一般化 + 誤検知防止の 6 テストケース。ATLAS 内部のみ変更。依存方向違反なし。"
+      ]
+    },
+    "PA-102_DM-102": {
+      "repo": "FTS",
+      "verdict": "approve",
+      "new_bugs": "NONE",
+      "intent_alignment": "PASS",
+      "key_findings": [
+        "await _bus_ref.health_status() -> status = _bus_ref.health_status(); return bool(status.get(\"healthy\", False)) に修正。同期 dict を await する TypeError を解消。",
+        "main.py L494-500 の既存パターンと完全一致。",
+        "test_real_event_bus_prober_returns_healthy が実 prober closure を直接捕捉して True を検証する最強の回帰テスト。"
+      ]
+    },
+    "PA-101": {
+      "repo": "FTS",
+      "verdict": "approve",
+      "new_bugs": "NONE_CRITICAL",
+      "intent_alignment": "PASS",
+      "key_findings": [
+        "_restore_strategy_internal_state で 4 分類(direction/bars_in_pos/cooldown/entry_index)を hasattr 個別ガードで復元。phantom 属性生成を排除。",
+        "cooldown None 時フォールバック 10_000(cooldown 経過済み扱い)は安全方向。0 件時 logger.warning で可視化。サイレント失敗なし。",
+        "_compute_bars_elapsed_since_open を共通ヘルパとして抽出。_compute_restored_entry_bar_index は残存し委譲構造として機能。"
+      ],
+      "advisory": "_in_position への bool=True 復元は旧実装互換(現 0 件)。将来の型不整合リスク(WARNING_ADVISORY)。"
+    },
+    "DE-101": {
+      "repo": "FTS",
+      "verdict": "approve",
+      "new_bugs": "NONE_CRITICAL",
+      "intent_alignment": "PASS",
+      "key_findings": [
+        "SharedDataProvider に DataQualityEngine を DI し poll_latest の確定バー取得後に _validate_confirmed_bar を呼ぶ。UnifiedRunner 経路の dead path を解消。",
+        "DE-002: FAIL でも latest を drop せず return し Parity 維持(L669 以降不変)。",
+        "warmup は対象外(DE-102 インターリーブ更新防止)。",
+        "main.py で bar/tick を別インスタンス生成。truth_source に基づく単一 emitter への注入で DE-102 状態混線を構造的回避。",
+        "_publish_quality_alert の except Exception はバー配信継続のための意図的 catch。ログ記録あり(CLAUDE.md 準拠)。"
+      ]
+    },
+    "RE-101": {
+      "repo": "FTS",
+      "verdict": "approve_with_notes",
+      "new_bugs": "NONE_CRITICAL",
+      "intent_alignment": "PASS",
+      "key_findings": [
+        "OandaCurrencyConverter(fallback=None) を runner.py / main.py の両経路で実体化・PTRC 注入。旧 StaticCurrencyConverter 自動注入 + RE-001 永続 REJECT を解消。",
+        "JPY passthrough: convert() は from_currency == to_currency なら amount をそのまま返す(L165)。JPY クォートペアの動作を破壊していない。",
+        "fail-safe: convert() が None を返すと PTRC が fail-safe REJECT + RiskAlert。固定レートで誤評価するより可視化して止める設計。",
+        "_fire_risk_alert は asyncio.get_running_loop() でループ確認後 create_task で fire-and-forget。同期 evaluate() からの正当な設計。",
+        "set_risk_alert_emitter は REJECT 後アラートのみ担う。REJECT/APPROVE ロジック無変更。PTRC 非通過注文が Broker に渡らない原則を維持。",
+        "runner.py と main.py は排他的経路(同一プロセス共存なし)のため _ptrc_module.set_risk_alert_emitter の競合なし。",
+        "update_rate の rate != rate は Pythonic な NaN 判定として正しい。",
+        "_seed_fx_cross_rates の candles[-1][\"close\"] は raw dict アクセス。broker.get_candles の既存仕様に合致。BLE001 で例外キャッチ+ログ。"
+      ],
+      "advisory_items": [
+        "runner.py L324: _settings_for_ccy = PlatformSettings() は initialize() 内の二度目のインスタンス化(WARNING_ADVISORY)。",
+        "main.py L396: _ptrc_mod2 は L111 の _ptrc_mod と同一モジュールシングルトン。実害なし(命名統一推奨、WARNING_ADVISORY)。",
+        "main.py L88-90: OandaCurrencyConverter の遅延 import はスタイル不一致のみ(WARNING_INFO)。"
+      ]
+    }
+  },
+  "warnings": [
+    {
+      "type": "WARNING_ADVISORY",
+      "fix_ref": "PA-101",
+      "title": "_in_position への bool=True 復元は将来の型不整合リスク(現 0 件)"
+    },
+    {
+      "type": "WARNING_ADVISORY",
+      "fix_ref": "RE-101",
+      "title": "runner.py L324 PlatformSettings() 二重インスタンス化"
+    },
+    {
+      "type": "WARNING_ADVISORY",
+      "fix_ref": "RE-101",
+      "title": "main.py _ptrc_mod2 命名統一推奨(同一シングルトン、実害なし)"
+    },
+    {
+      "type": "WARNING_INFO",
+      "fix_ref": "CSR-101",
+      "title": "ATLAS diff に logs/backfill_strategy_tags.json の無関係変更が混入、別コミット推奨"
+    }
+  ],
+  "security_review": {
+    "csr101_rce_path_closed": true,
+    "ptrc_non_bypass_confirmed": true,
+    "hard_limits_untouched": true,
+    "fts_to_atlas_dependency_direction_ok": true,
+    "no_credentials_in_diff": true
+  }
+}

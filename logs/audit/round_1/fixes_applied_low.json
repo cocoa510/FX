@@ -1,0 +1,21 @@
+{
+  "session": "AUDIT-2026-0525-001",
+  "phase": "low severity fixes (Phase 4)",
+  "date": "2026-05-25",
+  "summary": "low 33件を fix / accept(by-design 根拠付き) に振り分けて処理。CSR-002/QA-001 は検証で medium に格上げされていた取りこぼしを回収。",
+  "atlas": {
+    "fixed": ["CSR-002/QA-001 (medium, L1 PF inf→None)", "CSR-007 (複数Strategyクラス却下)", "CSR-008 (dunder遮断強化)", "QA-007 (soft_scoreコメント訂正)"],
+    "accepted": ["CSR-003", "CSR-004", "CSR-006", "CSR-009", "CSR-010", "QA-002", "QA-003", "QA-004", "QA-005", "QA-006"],
+    "accept_rationale_doc": "ATLAS/docs/audits/low_findings_disposition_2026_0525.md",
+    "commits": ["0450a7c6 (CSR-002)", "07f15dd7 (low batch)"]
+  },
+  "fts": {
+    "DE": {"fixed": ["DE-001", "DE-004", "DE-005", "DE-006"], "accepted": ["DE-003"], "commit": "77472af"},
+    "DM_QT": {"fixed": ["DM-005", "DM-008", "DM-010", "QT-008", "QT-010"], "commit": "81c7b5e (RE source も混入)"},
+    "RE": {"fixed": ["RE-005", "RE-006", "RE-007", "RE-008", "PTRC-bypass-log"], "commits": ["81c7b5e (source混入)", "ec9b74a (main.py+RE-006 test残)"]},
+    "PA": {"fixed": ["PA-002", "PA-003", "PA-007", "PA-008", "PA-005(key)"], "accepted": ["PA-005(Paper)", "PA-009", "PA-001"], "commit": "16d8814"}
+  },
+  "incident": "RE エージェントが diff レビュー用に git add でステージした変更が、DM/QT コミット時の git commit(index全体) に混入し 81c7b5e に RE source が紛れた。検証で全 green 確認済みだが帰属が不正確。以降は git reset + 明示 add で個別コミット。教訓: 並行サブエージェント実行中の commit は `git commit -- <paths>` か index リセットを徹底。",
+  "verification": "consolidated unit+integration+risk+architecture 1861 passed/5 xfailed、各バッチ専門家報告 1849-1905 passed、parity 65 (最終確認中)。新規 lint 違反 0 (全バッチ HEAD 一致)。トレード執行判定は不変。",
+  "final_status": "critical 0 / high 0 / medium 0 / low: fixed 20 + accepted 13 = 全 33 件処理完了"
+}

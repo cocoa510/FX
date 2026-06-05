@@ -1,0 +1,47 @@
+{
+  "verifier": "platform-architect",
+  "summary": "PA-201〜PA-203 を引用 file:line を全て開いて検証し全件 confirmed。3件とも現コードに実在し severity(low) も妥当。PA-201: restore_positions(strategy_slot.py:1313-1322) の unmatched が `comment != self.strategy_id` のみで算出され、定期照合 _reconcile_live_positions(runner.py:899-904) が live_strategy_ids 集合で全 Live 戦略を除外するロジックと非対称であることを両経路で実コード確認。fix 案(runner.py:491-497 で claimed_trade_ids と同様に live_strategy_ids を共有注入)も配線上妥当。PA-202: _sync_risk_state_from_slot(runner.py:635-640) の total_exposure 無条件加算 + _recover_stale_trade_pnl(strategy_slot.py:1714-1733) の非CLOSED/例外時 record_close 不呼出 + state クリアを確認。risk_supervisor で total_exposure を減算する経路は record_close(684-687) のみ・runner.py 内に直接減算なし(640 加算/793-816 read-only)を grep で裏取りし、汚染 state.json edge の機序は配線上成立。PA-203: StrategyLifecycle FSM はリポジトリ全体で lifecycle.py 自身と test_phase3_platform.py のみ参照、ランタイム未配線・LIVE_TRADING 状態欠如を確認。high 3件の独立クロス検証: RE-201 confirmed(record_close が唯一の exposure 減算経路である点を別ドメイン視点で裏取り、回収失敗→残留は配線上必然)。DM-204 adjusted(本番 runner 経路の set_metrics_collector 非注入による module-singleton 系カウンタの dead は事実だが、fx_kill_switch_triggered_total だけは supervisor インスタンス metrics 経由(runner.py:1093→risk_supervisor.py:1122)で生存しており dead リストに含めたのは誤り。それ以外の fx_ptrc_reject_total/fx_fill_total/fx_bar_build_total/fx_circuit_breaker_triggered_total は dead で high 妥当)。DE-201 adjusted(warmup=2000 固定が ema_800 に不足し EWM parity drift を生む機序は配線上正しいが、根拠戦略 ATLAS-2026-0508-069 は runner_config.json で execution_mode=paper・2026-05-20 demoted 済で Live ではない。LIVE 22戦略の最大 slow period は SMA 200(0511-059)で EMA は ≤200、warmup=2000 で実害ほぼ無し。『Live 稼働中戦略でシグナル分岐を変える』の severity=high は現 HEAD では過大、欠陥自体は実在し medium 相当)。",
+  "verifications": [
+    {
+      "id": "PA-201",
+      "claim_accuracy": "正確。strategy_slot.py:1313-1322 の unmatched 算出は `t.client_extensions.get('comment') != self.strategy_id` のみで自スロット strategy_id 基準。runner.py:899-904 の定期照合は live_strategy_ids 集合(全 Live 戦略の strategy_id)で `comment not in live_strategy_ids` を判定しており、引用通り両経路でロジックが非対称。runner.py:491-497 のループで claimed_trade_ids を共有注入している事実も確認でき fix 案の最小変更性も妥当。",
+      "severity_verdict": "low 妥当。採用・exposure には影響せず(R1 は引き続き非採用)安全側だが、同一 instrument 複数 Live 戦略構成で起動毎に兄弟戦略の正規タグ付トレードを position_mismatch として誤発報しアラート疲労→観測性劣化のリスク。",
+      "current_code_quote": "strategy_slot.py:1314-1317 `unmatched = [t for t in instrument_trades if t.client_extensions.get(\"comment\") != self.strategy_id]` / runner.py:899-903 `live_strategy_ids = {slot.strategy_id for slot in live_slots}` ... `if t.client_extensions.get(\"comment\") not in live_strategy_ids`",
+      "verdict": "confirmed",
+      "notes": "配線視点で完全に裏取り。restore は単一 strategy_id、定期照合は集合という非対称が実在。fix(live_strategy_ids 共有注入)は既存 claimed_trade_ids パターンの踏襲で配線上素直。"
+    },
+    {
+      "id": "PA-202",
+      "claim_accuracy": "正確。_sync_risk_state_from_slot(runner.py:635-640) は復元 state に open_trade_id があると total_exposure += rs.exposure を無条件加算。restore_positions の elif self.state.open_trade_id(strategy_slot.py:1414) → _recover_stale_trade_pnl で、当該 trade が非CLOSED(OPEN を A が保有)なら record_close(strategy_slot.py:1689) は if closed_trade.state=='CLOSED'(1675) 分岐内のみで呼ばれず、末尾(1730-1733)で open_trade_id をクリアするのみ。total_exposure の減算経路は risk_supervisor.record_close(684-687) のみで runner.py 内に他の減算なし(grep 確認: 640 加算のみ/793-816 は read-only)を裏取り。よって B 分の幻 exposure が残留する機序は配線上成立。",
+      "severity_verdict": "low 妥当。発生条件が『INC-2026-0526-001 以前に汚染された state.json が現存 かつ 当該 trade が今も OPEN』に限定され、INC 修正後の新規 state.json では fan-out 自体が起きないため新規汚染なし。confidence=medium も適切。",
+      "current_code_quote": "runner.py:640 `self._risk_supervisor.account_state.total_exposure += rs.exposure` / strategy_slot.py:1730-1733 `self.state.open_trade_id = None ...`(record_close を経ずクリア)",
+      "verdict": "confirmed",
+      "notes": "RE-201 と同根(record_close 以外に exposure 減算なし)。PA-202 は『起動時 restore の汚染 state edge』、RE-201 は『稼働中 reconcile の回収失敗』で発火点が異なるが内部会計の自己修復不能という同一構造。fix 案(stale 確定時の exposure 補正 or 起動時 rebuild)は両者共通で配線上有効。"
+    },
+    {
+      "id": "PA-203",
+      "claim_accuracy": "正確。lifecycle.py:19-50(StrategyLifecycleState 6状態 + ALLOWED_TRANSITIONS)、78(StrategyLifecycle クラス)実在。リポジトリ全体 grep で StrategyLifecycle 参照は lifecycle.py 自身と tests/unit/test_phase3_platform.py のみ。trading_platform 配下(runner/slot/worker/main)からの import・インスタンス化はゼロ。FSM に LIVE_TRADING 状態が無く Live を表現できない点も ALLOWED_TRANSITIONS の定義から確認。",
+      "severity_verdict": "low 妥当。安全性・正当性への直接影響なし。設計意図(昇格/降格 FSM)が運用に未反映の死角・設計乖離。confidence=high も適切。",
+      "current_code_quote": "lifecycle.py:21-26 `IMPORTED/VALIDATING/PAPER_TRADING/DEGRADED/SUSPENDED/RETIRED`(LIVE_TRADING 不在) / grep 参照: lifecycle.py + test_phase3_platform.py の 2 ファイルのみ",
+      "verdict": "confirmed",
+      "notes": "実際の実行制御は ExecutionMode + _disabled フラグで行われ FSM は完全死蔵。配線視点で確認済。"
+    }
+  ],
+  "cross_check_highs": [
+    {
+      "id": "RE-201",
+      "independent_verdict": "confirmed",
+      "notes": "配線視点で裏取り完了。risk_supervisor.py を grep し total_exposure / state.exposure を減算するのは record_close(684-687) ただ一箇所、record_open(637/643) が増算、runner.py 側に独立した減算経路なし(640 は加算のみ)を確認。_recover_stale_trade_pnl(strategy_slot.py:1675-1733) は record_close を if closed_trade.state=='CLOSED'(1675) 分岐内のみで呼び、else(1714-1720)/except(1721-1727) では呼ばず末尾(1730-1733)で open_trade_id を None クリア。本番定期照合 _reconcile_live_positions(runner.py:907-946) は divergence A で slot._recover_stale_trade_pnl(source='periodic_reconcile') をトリガ(936-939)し、例外時は握り潰し継続(940-946)。よって『回収失敗→exposure 残留 かつ trade_id 喪失で再回収不能』は配線上必然。回収不能後は exposure_near_cap 警告(runner.py:793-816)で可視化されるのみで自動是正なし。test_runner_periodic_reconcile.py:86 が _recover_stale_trade_pnl を AsyncMock 化しており回収失敗時の exposure 減算は未検証も確認。INC-2026-0526-001 の幻エクスポージャー同型経路で high 妥当。"
+    },
+    {
+      "id": "DM-204",
+      "independent_verdict": "adjusted",
+      "notes": "本番経路が UnifiedRunner であることを scripts/run_unified.py(160 UnifiedRunner 生成・196 initialize・122/129 で runner._metrics._registry を Prometheus scrape) で確認。main.py:107-121 は 7 モジュール(fill_processor/circuit_breaker/ptrc/bar_builder/candle_fetcher/stream_receiver/loader)に set_metrics_collector を呼ぶが、runner.py には同等ブロック無し(grep で set_metrics_collector 0 件、set_audit_logger/set_risk_alert_emitter は呼ぶ→module-singleton DI 自体は runner も使うが metrics だけ漏れ)を確認。各モジュールは module-level _metrics + `if _metrics is not None` ガード(ptrc.py:40/397, fill_processor.py:26/152, bar_builder.py:35, circuit_breaker.py:27/121/408)で、未注入のため本番で dead。⚠️ただし主張の dead リストのうち fx_kill_switch_triggered_total は誤り: 本番の Kill Switch は standalone KillSwitch クラスでなく GlobalRiskSupervisor 内製ロジックが担い、supervisor は runner.py:1093 で metrics=self._metrics を注入され risk_supervisor.py:1122-1123 で self._metrics.inc_kill_switch_triggered() を発火する(=生存)。fx_circuit_breaker_triggered_total は supervisor が inc_circuit_breaker_triggered を呼ばず standalone CircuitBreaker(module-singleton)も未注入のため dead。fx_ptrc_reject_total/fx_fill_total/fx_bar_build_total も dead。よって『複数カウンタが本番で dead・対応アラート(FxCircuitBreakerTriggered/FxPtrcRejectSpike)が永久未発火』の中核は confirmed で high 妥当だが、dead 列挙に kill_switch を含めた点のみ過大→adjusted。"
+    },
+    {
+      "id": "DE-201",
+      "independent_verdict": "adjusted",
+      "notes": "機序は配線上正しい: WARMUP_BARS=2000 固定(runner.py:74)を _warmup_all(1218-1264) が主TF(1227)・補助TF(1253) 双方で get_warmup_bars に渡し、戦略 indicator period に追従しない。live_store の BUFFER_SAFETY_FACTOR=50(43-49) / MAX_REGISTRABLE_PERIOD=1000(54-55,83-84 は ema_800 のため明示拡張) と buffer 側だけ ema_800 対応・warmup 側 2000 据置の非対称も確認。EWM 残差 ((799/801))^2000≈exp(-5)≈6.7e-3 は parity 許容 1e-10 を大幅超過で算術的に正しく、strategy.py:172-173 の uptrend/downtrend が LONG(176)/SHORT(190) を直接 gate する点もクロス付近で反転しうる。⚠️ただし severity=high の前提『Live 稼働中戦略』が現 HEAD で不成立: ATLAS-2026-0508-069/runner_config.json は execution_mode='paper'・_demoted_at=2026-05-20 で Live でなく Paper。execution_mode=live は 22 戦略あるが最大 slow period は SMA 200(0511-059、SMA は EWM tail 無く 2000 で完全収束)、ema_800 級は全 imported 中 0508-069 のみ(grep で slow_period>=300 は 069 のみ)。よって warmup 不足が『Live でシグナル反転』を起こす現実経路は現状なし→ high は過大、欠陥実在につき medium 相当。Paper でも parity drift は同様に発生するため修正(動的 warmup)の必要性自体は支持。"
+    }
+  ]
+}

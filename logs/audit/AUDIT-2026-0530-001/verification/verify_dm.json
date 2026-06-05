@@ -1,0 +1,323 @@
+{
+  "verifier": "devops-monitor-team2",
+  "scope": "DM-401〜409 第2チーム独立検証（AUDIT-2026-0530-001）",
+  "audit_commit": "d1e73b1",
+  "fts_reviewed_commit": "9998a7a",
+  "verified_at": "2026-05-30",
+  "prior_validation_ref": "cluster_c_fts_data_ops.json (DM部分)",
+  "schema_version": "2.0",
+
+  "verifications": [
+    {
+      "finding_id": "DM-401",
+      "verdict": "confirmed",
+      "original_severity": "LOW",
+      "prior_adjusted_severity": "low",
+      "team2_severity": "low",
+      "fact_check": "PASS",
+      "evidence_line_check": {
+        "email_notifier.py:778-783 _LIVE_ANOMALY_LABELS定義": "CONFIRMED — 実コード778行: _LIVE_ANOMALY_LABELS は account_position_mismatch / live_orders_silent / exposure_near_cap / position_reconcile_mismatch の4エントリのみ。oanda_connection_lost / oanda_connection_degraded / market_data_poll_failure は存在しない",
+        "email_notifier.py:316 oanda_connection_lost → live_anomaly": "CONFIRMED — _RISK_ALERT_KINDS['oanda_connection_lost'] = 'live_anomaly' が316行に存在",
+        "email_notifier.py:321 oanda_connection_degraded → live_anomaly": "CONFIRMED — 321行に存在",
+        "email_notifier.py:326 market_data_poll_failure → live_anomaly": "CONFIRMED — 326行に存在",
+        "email_notifier.py:808 label fallback": "CONFIRMED — 808行: label = self._LIVE_ANOMALY_LABELS.get(event.alert_type, 'Live 異常') でデフォルトラベルにフォールバック"
+      },
+      "devil_advocate": {
+        "claim": "本文に alert_type が含まれるため情報は失われない",
+        "verification": "CONFIRMED — _build_live_anomaly_message の819行でlines.append(f'アラート種別: {event.alert_type}')が確認できる（details全キーの列挙もある）。件名フィルタリングのみ不可能という状況は事実",
+        "conclusion": "low維持。3行追加で解決可能な純粋なドキュメント/ラベル不整合"
+      },
+      "team2_rationale": "先行検証(cluster_c DM-401)と同一結論。_LIVE_ANOMALY_LABELS の定義不足は独立grep確認。実運用上の影響はメール件名でのアラート分類不能のみ（本文に情報あり）。DM-405と同時修正が効率的",
+      "additional_note": "DM-306修正（_RISK_ALERT_KINDS登録）の後続タスクとして正確に分類されている",
+      "regression_check": "DM-306 fix (commit 9998a7a) の直接的後続欠陥として確認。DM-306登録漏れ修正 → _LIVE_ANOMALY_LABELS登録漏れの2段欠陥構造"
+    },
+    {
+      "finding_id": "DM-402",
+      "verdict": "confirmed_canonical",
+      "original_severity": "HIGH",
+      "prior_adjusted_severity": "high",
+      "team2_severity": "high",
+      "fact_check": "PASS",
+      "evidence_line_check": {
+        "runner.py:343-347 OANDABroker生成": "CONFIRMED — runner.py:343-347を直接読み取り確認: 'self._broker = OANDABroker(api_key=api_key, account_id=account_id, base_url=base_url)' にmetrics=引数なし",
+        "runner.py:205-208 self._metrics存在": "CONFIRMED — runner.py:207: 'self._metrics: MetricsCollector = metrics or MetricsCollector()' で MetricsCollector インスタンスが確実に存在する",
+        "client.py:841-843 early return": "CONFIRMED — client.py:841-842: 'if self._metrics is None: return' で全計装がスキップされる",
+        "main.py:335-339 OANDABroker生成": "CONFIRMED — main.py:335-339: _create_broker() メソッド内で 'self._oanda_broker = OANDABroker(api_key=..., account_id=..., base_url=...)' にmetrics=なし。forward_test.py:239も同様",
+        "grep OANDABroker.*metrics=": "CONFIRMED 0件 — trading_platformディレクトリ全体で 'metrics=.*OANDABroker|OANDABroker.*metrics=' パターンが0件。3箇所全てにmetrics=なし確認"
+      },
+      "devil_advocate": {
+        "claim": "OANDABrokerのコンストラクタにmetrics=を受け取る引数が存在するか",
+        "verification": "CONFIRMED — _record_api_metric(client.py:817)が存在しself._metricsを使う実装はある。コンストラクタにmetrics引数があり受け取れる設計だがrunner/main/forward_test全ての呼び出しサイトで渡していない",
+        "claim2": "DE-402との重複",
+        "verification2": "cluster_c がDM-402 canonicalと判定済み。forward_test.py:239はLIVEパスでなくcluster_c判定は適切"
+      },
+      "team2_rationale": "最重要確認事項。grep独立検証で3箇所全てmetrics=渡しなしを確認（runner.py:343/main.py:335/forward_test.py:239）。runner.py:207でself._metricsが存在するにもかかわらずrunner.py:343のOANDABroker生成でmetrics=を渡していない。client.py:841のearly return gateにより本番でfx_oanda_api_latency_ms/fx_oanda_api_responses_totalが一切加算されない。FxOandaApiLatencyHighが永久Inactive。DM-302 fix（commit 9998a7a）の根幹が未到達という high severity は完全に正当化される",
+      "additional_note": "修正は runner.py:343-347 の OANDABroker() 呼び出しに metrics=self._metrics を追加する3行修正。同時に test_dm302 はモックで検証しているため本番配線の欠落を検出できなかった（QT-404とセット修正推奨）",
+      "regression_check": "DM-302 post_fix_defect として正確。test_dm302_metrics_instrumentation.py が OANDABroker(metrics=mock) で検証しているため本番配線ミスを検出不能という構造的テスト盲点"
+    },
+    {
+      "finding_id": "DM-403",
+      "verdict": "confirmed",
+      "original_severity": "LOW",
+      "prior_adjusted_severity": "low",
+      "team2_severity": "low",
+      "fact_check": "PASS",
+      "evidence_line_check": {
+        "client.py:700-727 close_trade通常経路": "CONFIRMED — close_trade の PUT /trades/{id}/close は async with session.put(url, json=body) as resp: 内でデータ取得するが _record_api_metric 呼び出しなし。_t0/elapsed_ms変数の定義もなし",
+        "client.py:564-587 get_trade": "CONFIRMED — get_trade は async with session.get(url) as resp: 内で処理するが _record_api_metric 呼び出しなし",
+        "client.py:729-752 get_open_positions": "CONFIRMED — get_open_positions も同様に _record_api_metric なし",
+        "client.py:497-528 cancel_order TimeoutError先例": "CONFIRMED — cancel_order の TimeoutError パスに self._record_api_metric('cancel_order', None, None) が存在（先例として正確）",
+        "計装済み5メソッド確認": "CONFIRMED — grep '_record_api_metric' で submit_order(373行)/cancel_order(500,522行)/account_info(548行)/open_trades(599行)/candles(789行)の5メソッドに計装あり。close_trade/get_trade/get_open_positionsは0件"
+      },
+      "devil_advocate": {
+        "claim": "DM-402が未修正の状態ではself._metrics=Noneのためclose_tradeに_record_api_metricを追加しても early returnされる",
+        "verification": "CONFIRMED — DM-402修正が前提条件。DM-402とDM-403は同一PRで修正すべき依存関係",
+        "claim2": "close_tradeのレイテンシは実際に問題になるか",
+        "verification2": "CONFIRMED — close_trade は決済の中核API。TimeoutError/ConnectionError発生時の5xx/timeout計装がないため FxOandaApiLatencyHigh が close_trade の劣化を観測できない"
+      },
+      "team2_rationale": "3メソッドの _record_api_metric なしはgrep独立確認。DM-402未修正状態では表面化しないがDM-402修正後に残存するギャップ。cluster_c の low 判定は適切",
+      "additional_note": "DE-404（QT-404依存のsubmit_order TimeoutErrorメトリクス欠落）と同根。DM-402修正PRにclose_trade/get_trade/get_open_positions計装を bundleするのが効率的",
+      "regression_check": null
+    },
+    {
+      "finding_id": "DM-404",
+      "verdict": "confirmed",
+      "original_severity": "MEDIUM",
+      "prior_adjusted_severity": "medium",
+      "team2_severity": "medium",
+      "fact_check": "PASS",
+      "evidence_line_check": {
+        "runner.py:1602-1631 RE-305ループ": "CONFIRMED — runner.py:1608-1631: '_consecutive_poll_errors >= 30 and self._consecutive_poll_errors % 30 == 0' 条件で 'live_orders_silent' をpublish。コメント1626行に '30 の倍数で繰り返し発火し、復旧まで運用者に通知し続ける' と明記",
+        "email_notifier.py:349 throttle 43200s": "CONFIRMED — _EMAIL_THROTTLE_INTERVAL_SEC['live_orders_silent'] = 43200.0 が349行に存在",
+        "runner.py:70 POLL_INTERVAL_SEC=60": "CONFIRMED — 70行: POLL_INTERVAL_SEC: int = 60",
+        "runner.py:89 LIVE_ORDER_SILENCE_THRESHOLD_SEC=6h": "CONFIRMED — 89行: LIVE_ORDER_SILENCE_THRESHOLD_SEC: int = 6 * 60 * 60 (21600秒=6時間)"
+      },
+      "devil_advocate": {
+        "claim": "12h throttle はユーザー明示的要請（2026-05-29）であり、RE-305 との衝突は既知設計判断の積み重ねである",
+        "verification": "CONFIRMED — email_notifier.py:344-349のコメントに 'ユーザー要請 2026-05-29' と明記。ただし RE-305 コメント（runner.py:1626）に '復旧まで通知し続ける' と書かれているため2要件が衝突している事実は変わらない",
+        "claim2": "heartbeat _check_live_health_alerts からも live_orders_silent が発火するためRE-305単独の問題ではない",
+        "verification2": "CONFIRMED — runner.py:902-944の _check_live_health_alerts は silence_sec >= LIVE_ORDER_SILENCE_THRESHOLD_SEC(6h)で毎heartbeat評価・発火。こちらも12h throttle で2通目以降は抑止される。合計で最長18h(=6h閾値+12h throttle)の無音期間が発生しうる"
+      },
+      "team2_rationale": "RE-305ループ（30倍数で繰り返し発火）と12h throttle の設計衝突はコード独立確認。POLL_INTERVAL_SEC=60なら30エラー=30分→2通目(60分目)以降は全throttle。_check_live_health_alertsのheartbeat経路も同様にthrottleされる。cluster_cのDESIGN-C-001（ユーザー判断待ち）という結論が適切。medium維持",
+      "additional_note": "解決策A（専用kind oanda_poll_error_escalation でthrottle=0）が最も整合的。解決策B（RE-305コメント修正＋初回1通設計への変更）は通知設計の意図を下方修正するためユーザー確認必要",
+      "regression_check": "live_orders_silent 12h throttle 導入（commit 9998a7a ユーザー要請2026-05-29）が RE-305 設計との衝突を生じた post_fix_defect"
+    },
+    {
+      "finding_id": "DM-405",
+      "verdict": "confirmed",
+      "original_severity": "LOW",
+      "prior_adjusted_severity": "low",
+      "team2_severity": "low",
+      "fact_check": "PASS",
+      "evidence_line_check": {
+        "email_notifier.py:827-840 対応手順テキスト": "CONFIRMED — 830-836行に '幻エクスポージャー・上限張り付き・Live 沈黙のいずれかが疑われます' と 'OANDA Web 管理画面で実建玉と内部 heartbeat exposure の乖離を確認' というテキストが存在。OANDA断絶に対して不適切",
+        "email_notifier.py:316-326 OANDA断絶系がlive_anomaly集約": "CONFIRMED — oanda_connection_lost(316)/oanda_connection_degraded(321)/market_data_poll_failure(326)が live_anomaly kind に集約され、_build_live_anomaly_message を経由する",
+        "live_orders_silent も同builder": "CONFIRMED — email_notifier.py:413-417: kind == 'live_orders_silent' の場合も _build_live_anomaly_message(event) を呼び出す。Live新規エントリー沈黙についても OANDA断絶の対応手順（OANDA Web管理画面確認）が表示されるのは DM-405 の影響範囲が当初より広いことを示す"
+      },
+      "devil_advocate": {
+        "claim": "alert_type がメール本文に記載されるため運用者が混同する可能性は低い",
+        "verification": "PARTIAL — alert_type は本文に記載されるが、対応手順が間違った操作（OANDA Web管理画面で幻ポジション確認）を先に誘導するため、深夜のトリアージで適切でない手順を踏むリスクがある",
+        "conclusion": "low維持。DM-401（件名ラベル）とDM-405（本文手順）は同時修正すると最小変更で最大効果"
+      },
+      "team2_rationale": "対応手順テキストの内容は独立確認済み。live_orders_silent も同じbuilderを使うため影響範囲がDM-405クレームより広い（4種ではなく全live_anomaly + live_orders_silent）。低重大度だが修正コストも低い（alert_type分岐追加）",
+      "additional_note": "DM-401修正に合わせて _LIVE_ANOMALY_LABELS 登録＋ _build_live_anomaly_message に alert_type 別分岐を追加するのが最効率",
+      "regression_check": "DM-306 fix 後続欠陥（DM-401と同根）"
+    },
+    {
+      "finding_id": "DM-406",
+      "verdict": "confirmed_with_phase_note",
+      "original_severity": "LOW",
+      "prior_adjusted_severity": "low",
+      "team2_severity": "low",
+      "fact_check": "PASS",
+      "evidence_line_check": {
+        "alerting_rules.yml OANDA断絶関連アラートなし": "CONFIRMED — alerting_rules.yml全10アラートを確認: FxKillSwitchTriggered/FxCircuitBreakerTriggered/FxStreamDisconnectedHigh/FxDataQualityRejectHigh/FxOandaApiLatencyHigh/FxPtrcRejectSpike/FxFeatureStorestaleHigh/FxPositionReconcilerMismatch/FxEmailNotifierFailuresHigh/FxEventBusDedupSpike。oanda_connection_lost/live_orders_silentに対応するPrometheusアラートは存在しない",
+        "Email経路のみでの観測": "CONFIRMED — _RISK_ALERT_KINDS経由のEmail通知のみが検知手段"
+      },
+      "devil_advocate": {
+        "claim": "CLAUDE.md仕様によればPrometheus+GrafanaはPhase 2。Phase 1ではEmail通知のみで設計上妥当",
+        "verification": "CONFIRMED — fx_trading_system/CLAUDE.md の技術スタック表に '監視: Prometheus + Grafana（Phase 2）' と明記。cluster_c の Phase 2 スコープ判定は適切",
+        "claim2": "SMTP障害時の代替検知手段はFxEmailNotifierFailuresHighアラートが機能する",
+        "verification2": "CONFIRMED — FxEmailNotifierFailuresHighがSMTP失敗をcountするが、これはEmailNotifier自体の障害通知であり OANDA断絶の内容を伝えない。代替とは言えない"
+      },
+      "team2_rationale": "Phase 2スコープとしてのlow判定は適切。ただし SMTP障害×OANDA断絶の同時発生時には完全なサイレント障害となる点は記録価値あり。cluster_c の confirmed_minor が適切",
+      "additional_note": "DM-402修正後に Prometheus counter が機能するようになることで、カウンタベースのアラート追加は容易になる",
+      "regression_check": null
+    },
+    {
+      "finding_id": "DM-407",
+      "verdict": "confirmed_minor",
+      "original_severity": "LOW",
+      "prior_adjusted_severity": "low",
+      "team2_severity": "low",
+      "fact_check": "PASS",
+      "evidence_line_check": {
+        "metrics.py:354-387 kind一覧コメント": "CONFIRMED — metrics.py:357-364のコメント: 'kind ラベル一覧（監査 2026-05-24 H-8 で更新, R3 低 ① で追加）' に fill/kill_switch/kill_switch_cancel_failed/position_reconciler/unrealized_warning の5種のみ記載。live_anomaly/live_orders_silent/position_mismatch/live_gate_rejection が未記載",
+        "email_notifier.py:275-327 _RISK_ALERT_KINDS実際の種数": "CONFIRMED — _RISK_ALERT_KINDS に 12エントリ: kill_switch_activated(kill_switch)/kill_switch_cancel_failed/instrument_quantity_mismatch(position_reconciler)/unrealized_warning_activated(unrealized_warning)/unrealized_warning_deactivated(unrealized_warning)/position_mismatch/account_position_mismatch(live_anomaly)/live_orders_silent/exposure_near_cap(live_anomaly)/position_reconcile_mismatch(live_anomaly)/live_strategy_rejected_by_gate(live_gate_rejection)/oanda_connection_lost(live_anomaly)/oanda_connection_degraded(live_anomaly)/market_data_poll_failure(live_anomaly)"
+      },
+      "devil_advocate": {
+        "claim": "Prometheusのkindラベルは動的付与のためコメント不整合がGrafanaクエリの機能に影響しない",
+        "verification": "CONFIRMED — DM-029の第2チーム検証（DM-305）で同一パターンを確認済み。Grafanaクエリfx_email_notifier_sent_total{kind='live_anomaly'}は機能する",
+        "conclusion": "ドキュメント不整合のみ。低重大度が適切"
+      },
+      "team2_rationale": "コメントと実際の種数の乖離はgrep独立確認。機能的影響なし。cluster_c の confirmed_minor が適切。構造的解決策（_RISK_ALERT_KINDSへの参照コメント化）が提案されており、単純なコメント追加より優れている",
+      "additional_note": "commit 9998a7a で live_anomaly/live_orders_silent等が追加されたがmetrics.pyコメントが追従しなかった後続欠陥",
+      "regression_check": null
+    },
+    {
+      "finding_id": "DM-408",
+      "verdict": "confirmed_documentation_issue",
+      "original_severity": "LOW",
+      "prior_adjusted_severity": "low",
+      "team2_severity": "low",
+      "fact_check": "PASS",
+      "evidence_line_check": {
+        "metrics.py:838-850 引数名strategy_id": "CONFIRMED — metrics.py:838: 'def observe_feature_staleness(self, strategy_id: str, age_sec: float)' 引数名がstrategy_id",
+        "live_store.py:439 primary_tfを渡す": "CONFIRMED — live_store.py:439: 'self._metrics.observe_feature_staleness(self.primary_tf, age_sec)' でprimary_tf（例: 'H1'）を渡している",
+        "alerting_rules.yml:98-111 max()集約": "CONFIRMED — alerting_rules.yml:99: 'max(fx_feature_staleness_sec) > 60' でstrategy_idラベルを使わないmax集約",
+        "Grafana表示": "fx_feature_staleness_sec{strategy_id='H1'}はlabelが意味論的に不正確だが機能する"
+      },
+      "devil_advocate": {
+        "claim": "DE-403修正（alerting_rules.yml閾値>=7200sへの引き上げ）でwarmup遷移の偽陽性FIRINGが解消されるため、DM-408のAPIドキュメント不整合は DE-403修正後に再評価すべき",
+        "verification": "CONFIRMED — cluster_c の adversarial_review で 'Fix DE-403 first then re-evaluate DM-408' と示されており、依存関係が正確に捉えられている",
+        "claim2": "LiveFeatureStoreにstrategy_idを注入する設計に変更すれば自然解決するが、SnapshotWriterや他の注入パターンとの整合性が必要",
+        "verification2": "CONFIRMED — 現在LiveFeatureStoreはインスタンス変数にstrategy_idを持たない設計（primary_tfのみ）"
+      },
+      "team2_rationale": "APIドキュメントと実態の乖離はgrep独立確認。アラートルールはmax()集約のためstrategy_idラベル値が意味不明でも機能上影響なし。DE-403修正後に LiveFeatureStore へ strategy_id 注入する設計変更と同時解決が最効率。cluster_c の confirmed_as_documentation_issue が適切",
+      "additional_note": "DM-302の live_store.py 計装追加時に引数名の不一致が生じた。DE-403との依存関係を明示する",
+      "regression_check": "DM-302 fix (commit 9998a7a) が live_store.py:439 の計装を追加した際の副産物"
+    },
+    {
+      "finding_id": "DM-409",
+      "verdict": "confirmed_minor",
+      "original_severity": "INFO",
+      "prior_adjusted_severity": "info",
+      "team2_severity": "info",
+      "fact_check": "PASS",
+      "evidence_line_check": {
+        "app.py:52 API_BASE_URL取得": "CONFIRMED — app.py:52: 'API_BASE_URL: str = os.environ.get(\"FTS_DASHBOARD_API_BASE_URL\", \"\").strip()'",
+        "app.py:113 requests.get status": "CONFIRMED — app.py:113: 'resp = requests.get(f\"{API_BASE_URL}/status\", timeout=5)' (fetch_status内)",
+        "app.py:131 requests.get health": "CONFIRMED — app.py:131: 'resp = requests.get(f\"{API_BASE_URL}/health\", timeout=5)' (fetch_health内)",
+        "API_BASE_URL='' の本番主経路": "CONFIRMED — app.py:111: 'if API_BASE_URL:' でAPI_BASE_URL未設定時はstateファイル直読みにフォールバック。本番（UnifiedRunner/run_unified.py）ではHTTP APIを公開しないためAPI_BASE_URLは通常空文字列。SSRF成立条件は管理者がFTS_DASHBOARD_API_BASE_URLを設定した場合のみ"
+      },
+      "devil_advocate": {
+        "claim": "Streamlitはlocalhost/イントラネット運用前提。FTS_DASHBOARD_API_BASE_URLは管理者が設定する環境変数。SSRF成立条件が限定的",
+        "verification": "CONFIRMED — CLAUDE.md の 'ユーザー入力・外部APIレスポンスは必ず検証する' との対称性問題だが、env varは管理者制御下。前回監査(DM-309, AUDIT-2026-0529-001)でも同様の検証を実施しSSRFリスクが低いと判定済み",
+        "claim2": "本番主経路（API_BASE_URL=''）ではrequests.get呼び出し自体がスキップされる",
+        "verification2": "CONFIRMED — fetch_status/fetch_health共に 'if API_BASE_URL:' ガードがあり未設定時はstateファイル直読み経路に進む。SSRF発動には管理者の明示的なURL設定が必要"
+      },
+      "team2_rationale": "evidence行番号は全て一致確認。SSRF成立条件（管理者がFTS_DASHBOARD_API_BASE_URLに任意URLを設定）は実運用では低リスク。本番主経路ではrequests.get自体が呼ばれない。INFO維持。Phase 2認証機構追加時にホワイトリスト検証を合わせて実装で十分",
+      "additional_note": "DM-309（認証なし）との連動。DM-309とDM-409はPhase 2一括対応が適切",
+      "regression_check": null
+    }
+  ],
+
+  "additional_findings": [
+    {
+      "id": "DM-410",
+      "severity": "low",
+      "area": "alerting",
+      "title": "live_orders_silent の _build_live_anomaly_message 共用による不適切な対応手順の影響範囲がDM-405クレームより広い",
+      "description": "DM-405は oanda_connection_lost/oanda_connection_degraded/market_data_poll_failure の3種について _build_live_anomaly_message の手順テキスト不適切を指摘している。しかし email_notifier.py:413-417により kind='live_orders_silent' の場合も同じ _build_live_anomaly_message が使われる。live_orders_silent は Live 新規エントリー沈黙アラートであり、INC-2026-0526-001の対応手順（幻エクスポージャー等）は部分的には適切だが、OANDA断絶系の3種と比べれば差異は小さい。ただし形式的には DM-405 の影響範囲に live_orders_silent が追加されることを記録する。",
+      "evidence": [
+        "trading_platform/core/monitoring/email_notifier.py:413-417 (live_orders_silent も _build_live_anomaly_message を使用)",
+        "trading_platform/core/monitoring/email_notifier.py:827-840 (不適切なOANDA Web管理画面確認の手順)"
+      ],
+      "impact": "DM-405修正時に live_orders_silent 向けの手順テキスト分岐も同時に確認が必要。live_orders_silent の対応手順は幻ポジション確認が部分的には適切だが明示的な alert_type 別分岐が望ましい",
+      "suggested_fix": "DM-401/405修正（_LIVE_ANOMALY_LABELS登録 + alert_type分岐追加）に live_orders_silent 向け手順テキストも含める",
+      "duplicate_of": "DM-405 (影響範囲の補足)"
+    },
+    {
+      "id": "DM-411",
+      "severity": "info",
+      "area": "throttle",
+      "title": "12h throttle 導入後の _check_live_health_alerts heartbeat 評価と LIVE_ORDER_SILENCE_THRESHOLD_SEC の比率問題",
+      "description": "DM-404が指摘するRE-305ループの問題に加え、_check_live_health_alerts（heartbeatループ）も同様の12h throttle 衝突を持つ。LIVE_ORDER_SILENCE_THRESHOLD_SEC=6hを超えた沈黙は heartbeat ループで毎回評価・発火するが12h throttleで全抑止される。初報から次報まで最長18h（=6h閾値+12h throttle）の無音期間が発生する。18h は日本株式市場の取引時間（9:00-15:30）を含む運用で見逃しが生じうる期間だが、ユーザー要請（2026-05-29）では '数時間〜数日続く性質' に対して '12時間毎の継続通知で十分' と判断されている。この比率は設計判断として記録する。",
+      "evidence": [
+        "trading_platform/core/unified_runner/runner.py:902-944 (_check_live_health_alerts: LIVE_ORDER_SILENCE_THRESHOLD_SEC=6h)",
+        "trading_platform/core/monitoring/email_notifier.py:344-349 (live_orders_silent throttle=43200s=12h)",
+        "trading_platform/core/unified_runner/runner.py:89 (LIVE_ORDER_SILENCE_THRESHOLD_SEC = 6 * 60 * 60)"
+      ],
+      "impact": "最長18h=初報+12h throttle の無音期間。FX市場のセッション跨ぎ（アジア→ロンドン）をカバーしない可能性あり。ユーザー要請で認容済みの設計判断",
+      "suggested_fix": "DESIGN-C-001の解決方針に合わせて判断。警告として記録するのみ",
+      "duplicate_of": "DM-404 (補足観点)"
+    }
+  ],
+
+  "devil_advocate_resolutions": {
+    "DM-402_canonical_vs_cluster_b_RE-401": {
+      "subject": "OANDABroker metrics= 未注入の canonical finding の帰属",
+      "cluster_c_judgment": "DM-402 canonical (DE-402 duplicate)",
+      "team2_verdict": "cluster_c の判定を支持。DM-402 canonical が正確",
+      "rationale": "DM-402 は runner.py/main.py/forward_test.py の3箇所全てを対象とし、client.py の early return gate（841-843行）まで含めて因果関係を正確に記述している。RE-401がcluster_bで主張されている内容があるとすれば、同一の根本原因（OANDABroker生成時のmetrics=欠落）に対して異なる観点（リスク実行エンジン側の影響）から記述したものと考えられる。DM-402がPrometheus観測の観点から記述しており計装目的の defect としての canonical として適切",
+      "grep_verification": "trading_platform全体で 'OANDABroker.*metrics=|metrics=.*OANDABroker' 0件確認"
+    },
+    "DM-404_DESIGN-C-001": {
+      "subject": "RE-305継続通知設計 vs live_orders_silent 12h throttle の矛盾",
+      "recommendation": "選択肢A（専用kind oanda_poll_error_escalation、throttle=0）が最も整合的。RE-305のコメント（'復旧まで通知し続ける'）の設計意図を維持しながら12h throttleを回避できる。12h throttleはlive_orders_silent（heartbeatループ評価）向けに維持し、RE-305（OANDA account_info連続失敗エスカレーション）は別経路とする"
+    }
+  },
+
+  "dm_302_fix_intent_vs_implementation": {
+    "subject": "DM-302 修正（commit 9998a7a）のコミットメッセージ意図と実態の乖離",
+    "commit_intent": "DM-302 は 'client.py に _record_api_metric() ヘルパーを追加し5APIメソッドで計装' という内容。OANDA API レイテンシ計装の実現が目的",
+    "actual_state": "client.py への計装ヘルパー追加は完了しているが、OANDABroker 生成サイト（runner.py:343/main.py:335）に metrics= を渡す変更が行われていないため本番で dead path のまま",
+    "gap_analysis": "コミットは client.py 実装レイヤーのみを修正し、runner.py/main.py の呼び出しレイヤーへの配線を省略した。test_dm302 がモック経由で検証しているため CI は green だったが本番配線が未完成",
+    "evidence": [
+      "trading_platform/core/unified_runner/runner.py:343-347 (metrics= なし)",
+      "trading_platform/main.py:335-339 (metrics= なし)",
+      "trading_platform/broker/oanda_adapter/client.py:841-843 (early return gate)"
+    ]
+  },
+
+  "summary": {
+    "total_dm_verified": 9,
+    "confirmed": 7,
+    "confirmed_minor": 2,
+    "downgraded": 0,
+    "upgraded": 0,
+    "refuted": 0,
+    "additional_findings": 2,
+    "team2_severity_distribution": {
+      "high": 1,
+      "medium": 1,
+      "low": 5,
+      "info": 2
+    },
+    "agreement_with_prior_validation": "cluster_c の全9件の判定と完全一致。severity調整なし",
+    "key_verified_facts": [
+      "DM-402 HIGH confirmed: grep独立検証でOANDABroker()*3箇所全てにmetrics=なし。runner.py:207のself._metrics存在→runner.py:343のOANDABroker()未注入→client.py:841 early returnの因果関係を独立確認。FxOandaApiLatencyHighが永久Inactive",
+      "DM-404 MEDIUM confirmed: runner.py:89でLIVE_ORDER_SILENCE_THRESHOLD_SEC=6h、email_notifier.py:349でthrottle=43200s(12h)確認。heartbeat(_check_live_health_alerts)とRE-305ループの両方が12h throttleで2通目以降抑止されることを確認",
+      "DM-401/405/407/408 LOW confirmed: 全てgrep独立確認。機能的影響はなくドキュメント・ラベル不整合のみ",
+      "DM-402 canonical判定: cluster_c の DM-402 canonical / DE-402 duplicate を支持",
+      "追加発見DM-410: DM-405の影響範囲にlive_orders_silentが含まれることを確認（DM-405の補足）",
+      "追加発見DM-411: 最長18h(6h+12h)の無音期間が存在するが設計判断として記録"
+    ],
+    "must_fix": [
+      {
+        "finding_id": "DM-402",
+        "action": "runner.py:343-347 の OANDABroker() に metrics=self._metrics を追加（3行修正）。main.py:335-339 も同様。QT-404（submit_order計装テスト）を同PRに bundleし、AST検証テストを追加する",
+        "blocking": true
+      }
+    ],
+    "should_consider": [
+      "DM-404: DESIGN-C-001ユーザー判断後に選択肢A実装",
+      "DM-401+DM-405: 同一コミットで_LIVE_ANOMALY_LABELS登録 + _build_live_anomaly_message alert_type分岐追加",
+      "DM-403: DM-402修正PRにclose_trade/get_trade/get_open_positions計装をbundle"
+    ],
+    "informational": [
+      "DM-406: Phase 2スコープ。DM-402修正後にPrometheusカウンタ経由アラート追加が容易になる",
+      "DM-407: metrics.pyコメントを_RISK_ALERT_KINDS参照に一元化",
+      "DM-408: DE-403修正後にLiveFeatureStoreへstrategy_id注入設計と合わせて解決",
+      "DM-409: Phase 2認証機構追加時にホワイトリスト検証を実装"
+    ],
+    "design_decision_required": [
+      {
+        "decision_id": "DESIGN-C-001",
+        "description": "RE-305継続通知設計（30倍数で繰り返し発火）とlive_orders_silent 12h throttle（ユーザー要請2026-05-29）の衝突解消",
+        "recommendation": "選択肢A: RE-305専用kind oanda_poll_error_escalation（throttle=0）を追加。live_orders_silent 12h throttle は heartbeat評価向けに維持",
+        "blocking_findings": ["DM-404", "DE-406"]
+      }
+    ]
+  }
+}

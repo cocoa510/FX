@@ -1,0 +1,336 @@
+{
+  "verifier": "devops-monitor-team2",
+  "scope": "DM-301〜313 第2チーム独立検証",
+  "audit_commit": "2803be57b058b8a963f9224185195ffeeb73d71c",
+  "verified_at": "2026-05-29",
+  "prior_validation_ref": "cluster_c_fts_data_ops.json (DM部分)",
+  "verifications": [
+    {
+      "finding_id": "DM-301",
+      "verdict": "downgraded",
+      "original_severity": "high",
+      "prior_adjusted_severity": "medium",
+      "team2_severity": "medium",
+      "fact_check": "PASS",
+      "evidence_line_check": {
+        "metrics.py:439 inc_signal": "確認済み（実際は439行）",
+        "metrics.py:449 inc_order": "確認済み（実際は448行、1行ずれあり）",
+        "metrics.py:457 inc_fill": "確認済み（実際は457行）",
+        "grep 0件": "CONFIRMED — metrics.py定義行のみヒット、本番コードからの呼び出しは0件"
+      },
+      "devil_advocate": {
+        "claim": "EmailNotifier が約定通知メール（fill kind）を送信する代替経路が生存している",
+        "verification": "CONFIRMED with nuance — fill の Email 送信は _RISK_ALERT_KINDS 経由ではなく _on_fill ハンドラが FillEvent(EventType.FILL) を直接 subscribe して実行される（email_notifier.py:222/246-265）。cluster_c の 'fill kind に登録済み' という表現は技術的に不正確（_RISK_ALERT_KINDS にはfillなし）だが、Email 通知経路自体は生存しているという主張は正確。またPTRC判定・注文根拠は ptrc.py の AuditLogger 経由で記録される代替経路が存在（ptrc.py:43,125,135）",
+        "fill_processor_auditlog": "fill_processor.py に AuditLog 呼び出しはなし（structlog のみ）",
+        "conclusion": "Prometheus/Grafana 可視化のみ dead。約定通知は Email/structlog 経路が生存。medium が妥当"
+      },
+      "team2_rationale": "先行検証(cluster_c)と同一結論。inc_fill/inc_order/inc_signal の本番呼び出し0件は事実。ただし約定はEmailNotifier._on_fill(FillEvent購読)で通知され、PTRCはAuditLogに記録される。完全観測死ではなくPrometheus/Grafana可視化のみ欠落。medium維持",
+      "additional_note": "metrics.py:449 は実際には448行（1行ずれ）。evidence精度は軽微な誤差あり",
+      "regression_check": null
+    },
+    {
+      "finding_id": "DM-302",
+      "verdict": "validated",
+      "original_severity": "high",
+      "prior_adjusted_severity": "high",
+      "team2_severity": "high",
+      "fact_check": "PASS",
+      "evidence_line_check": {
+        "metrics.py:562-591 observe_oanda_api_latency / inc_oanda_api_status": "確認済み（562,578行）",
+        "metrics.py:832-844 observe_feature_staleness": "確認済み（832-844行）",
+        "metrics.py:822-830 set_order_success_rate": "確認済み（822-830行）",
+        "grep 0件": "CONFIRMED — trading_platform/ 全体でmetrics.py定義行のみヒット",
+        "alerting_rules.yml:70-81 FxOandaApiLatencyHigh": "確認済み（70-81行）",
+        "alerting_rules.yml:97-111 FxFeatureStorestaleHigh": "確認済み（97-111行）"
+      },
+      "devil_advocate": {
+        "claim": "OANDAレイテンシ劣化は _RISK_ALERT_KINDS に未登録のためEmail経路もdead。冗長経路なし",
+        "verification": "CONFIRMED — _RISK_ALERT_KINDS(email_notifier.py:275-307)に oanda latency 関連 kind なし。health_check.py にも AuditLog 呼び出しなし。structlog logger.warning/error のみが生存経路（リアルタイムアラートとして機能しない）",
+        "conclusion": "Prometheus dead + Email dead + AuditLog dead。structlog のみ残存。high維持"
+      },
+      "team2_rationale": "先行検証(cluster_c)と同一結論。4メソッド全て本番呼び出し0件確認。FxOandaApiLatencyHighとFxFeatureStorestaleHighは永久Inactive。OANDA APIレイテンシとFeatureStore陳腐化は本番運用最重要観測対象でありhigh維持",
+      "additional_note": "DM-306と連動（OANDA断絶時にEmail/Prometheus両経路がdeadという二重dead構造）",
+      "regression_check": null
+    },
+    {
+      "finding_id": "DM-303",
+      "verdict": "downgraded",
+      "original_severity": "high",
+      "prior_adjusted_severity": "medium",
+      "team2_severity": "medium",
+      "fact_check": "PASS",
+      "evidence_line_check": {
+        "metrics.py:546-560 observe_event_bus_latency": "確認済み（546-560行）",
+        "grep 0件": "CONFIRMED — trading_platform/ 全体でmetrics.py定義行のみヒット"
+      },
+      "devil_advocate": {
+        "claim": "本番はInMemoryEventBus使用。同一プロセス内のためレイテンシ常時1ms未満でありリスク限定的",
+        "verification": "CONFIRMED — runner.py:125 で 'self._event_bus: EventBus = event_bus or InMemoryEventBus()' を確認。コメントにも 'UnifiedRunner は Redis を直接使用しない（InMemoryEventBus）' と明記（runner.py:411）。InMemoryEventBus での実際のレイテンシ高騰リスクは極めて低い",
+        "additional_finding": "FxEventBusDedupSpikeアラート(alerting_rules.yml:145)はredis_adapter.pyのみでinc_event_bus_dedupを呼んでおり、本番InMemoryEventBusでは計上されない（dedup機能自体がInMemoryEventBusに未実装）。ただしInMemoryEventBusに重複配信リスクはなく実害なし",
+        "conclusion": "可視性の問題としてmediumが妥当。先行検証と同一結論"
+      },
+      "team2_rationale": "本番がInMemoryEventBusであることをrunner.py:125で独立確認。observe_event_bus_latency本番呼び出し0件は事実。実害はRedisモード移行時に顕在化。mediumに引き下げ（先行検証と一致）",
+      "additional_note": "FxEventBusDedupSpikeアラートもInMemoryEventBus環境では機能しない（事実上のdead）が実害は別問題",
+      "regression_check": null
+    },
+    {
+      "finding_id": "DM-304",
+      "verdict": "validated",
+      "original_severity": "medium",
+      "prior_adjusted_severity": "medium",
+      "team2_severity": "medium",
+      "fact_check": "PASS",
+      "evidence_line_check": {
+        "alerting_rules.yml:127 position_reconciler_mismatch.md参照": "確認済み（127行）",
+        "docs/runbook/ listing": "CONFIRMED — Globで19ファイル確認。position_reconciler_mismatch.mdは不在。position_mismatch.mdは存在",
+        "docs/runbook/email_notifier_smtp.md参照": "未確認（第2チーム検証スコープ外）"
+      },
+      "devil_advocate": {
+        "claim": "alerting_rules.yml:127 の runbook 参照が 404 になる事実確認",
+        "verification": "CONFIRMED — docs/runbook/に position_reconciler_mismatch.md が存在しないことをGlob独立確認",
+        "conclusion": "severity=criticalアラート発火時の一次対応手順が参照不能。mediumが妥当"
+      },
+      "team2_rationale": "先行検証と同一結論。runbook不在はGlob独立確認。position_reconciler_mismatch_total自体の計装(position_reconciler.py:266)は存在するためアラートは実際に発火しうる。そのため runbook 404 は運用上実害あり",
+      "additional_note": "FxPositionReconcilerMismatchアラート自体は機能している（計装済み）ためrunbook欠落の優先度はDM-301/302よりも高い",
+      "regression_check": null
+    },
+    {
+      "finding_id": "DM-305",
+      "verdict": "downgraded",
+      "original_severity": "medium",
+      "prior_adjusted_severity": "low",
+      "team2_severity": "low",
+      "fact_check": "PASS",
+      "evidence_line_check": {
+        "metrics.py:356-363 kindラベルコメント": "確認済み（356-363行）。live_gate_rejection/position_mismatch/live_anomalyがコメント未記載",
+        "email_notifier.py:275-307 _RISK_ALERT_KINDS": "確認済み。live_gate_rejection(306行)/position_mismatch(284行)/live_anomaly(290-296行)が存在"
+      },
+      "devil_advocate": {
+        "claim": "PrometheusラベルはEmailNotifier実行時に動的に付与されるためGrafanaクエリfx_email_notifier_sent_total{kind=live_gate_rejection}は実際に機能する",
+        "verification": "CONFIRMED — Prometheusのkindラベルは inc_email_notifier_sent(kind) 呼び出し時に動的に付与される。コメントはあくまで開発者向けドキュメントであり、Grafanaクエリの機能に影響しない",
+        "conclusion": "機能欠陥ではなくドキュメント不整合のみ。lowが妥当"
+      },
+      "team2_rationale": "先行検証と同一結論。コメント不整合は事実だが運用上の実害はなし。Grafanaクエリは実際に機能する。lowに引き下げ",
+      "additional_note": null,
+      "regression_check": null
+    },
+    {
+      "finding_id": "DM-306",
+      "verdict": "upgraded",
+      "original_severity": "medium",
+      "prior_adjusted_severity": "high",
+      "team2_severity": "high",
+      "fact_check": "PASS",
+      "evidence_line_check": {
+        "health_check.py:417 alert_type='oanda_connection_lost'": "CONFIRMED — health_check.py:417で alert_type='oanda_connection_lost' を持つRiskAlertEventをpublish確認",
+        "_RISK_ALERT_KINDSにoanda_connection_lostなし": "CONFIRMED — email_notifier.py:275-307の_RISK_ALERT_KINDSを全行精読。oanda_connection_lostキーなし確認",
+        "alerting_rules.ymlにoanda_connection_lost発火メトリクスなし": "CONFIRMED — alerting_rules.yml全体確認（158行）。oanda_connection_lost/oanda_outage関連アラートなし",
+        "_on_risk_alertのdrop動作": "CONFIRMED — email_notifier.py:359-361 で 'kind = self._RISK_ALERT_KINDS.get(event.alert_type); if kind is None: return' により silently drop",
+        "AuditLog代替経路": "CONFIRMED 不在 — health_check.py全体にAuditLog呼び出しなし",
+        "Dashboard代替経路": "CONFIRMED 不在 — DM-310確認、state ファイル存在確認のみでrunning表示"
+      },
+      "devil_advocate": {
+        "claim": "structlog logger.critical(...)が残存する代替経路として機能する",
+        "verification": "PARTIAL — health_check.py:400-404でlogger.criticalが呼ばれることはコードから確認できる。しかしstructlogはpull型（ログ監視者が能動的に閲覧する必要）でありリアルタイムアラートとして機能しない。本番の運用者へのプッシュ通知経路がゼロであることは変わらない",
+        "conclusion": "OANDA断絶60秒時の通知経路: Prometheus(dead/DM-302) + Email(silently drop確認) + Dashboard(running誤表示/DM-310) + AuditLog(未記録) = プッシュ通知ゼロ。structlogのみが残存するがログ閲覧が前提。完全なsilent failure構造。high upgrade確定"
+      },
+      "team2_rationale": "先行検証(cluster_c)と同一結論でありupgrade確定。health_check.py:417のoanda_connection_lost publishを独立確認。email_notifier.py:275-307の_RISK_ALERT_KINDSにoanda_connection_lostなしを独立確認。alerting_rules.ymlにも対応アラートなし。_on_risk_alertのsilently drop動作（:359-361）も確認。OANDAストリーム断絶は本番最頻発障害（oanda_disconnect.mdが存在することからも重要性確認）であり通知経路ゼロはhigh相当。_RISK_ALERT_KINDSへの1行追加でEmail経路は即回復",
+      "additional_note": "修正優先度: _RISK_ALERT_KINDSに 'oanda_connection_lost': 'live_anomaly' を追加（ただしlive_anomalyは900秒throttle適用）。または専用 'oanda_outage' kindを追加してthrottleなしとする",
+      "regression_check": null
+    },
+    {
+      "finding_id": "DM-307",
+      "verdict": "validated",
+      "original_severity": "medium",
+      "prior_adjusted_severity": "medium",
+      "team2_severity": "medium",
+      "fact_check": "PASS",
+      "evidence_line_check": {
+        "alerting_rules.yml:71 FxOandaApiLatencyHigh": "確認済み（71行）",
+        "DM-302依存": "CONFIRMED — observe_oanda_api_latency本番呼び出し0件はgrep独立確認済み"
+      },
+      "devil_advocate": {
+        "claim": "DM-302の修正が前提",
+        "verification": "CONFIRMED — deadアラートの事実は自明。DM-302が修正されない限り永久Inactive",
+        "conclusion": "DM-302の派生finding。medium維持"
+      },
+      "team2_rationale": "先行検証と同一結論。DM-302の派生問題としてmedium",
+      "additional_note": null,
+      "regression_check": null
+    },
+    {
+      "finding_id": "DM-308",
+      "verdict": "validated",
+      "original_severity": "medium",
+      "prior_adjusted_severity": "medium",
+      "team2_severity": "medium",
+      "fact_check": "PASS",
+      "evidence_line_check": {
+        "alerting_rules.yml:99 FxFeatureStorestaleHigh": "確認済み（99行: max(fx_feature_staleness_sec) > 60）",
+        "DM-302依存": "CONFIRMED — observe_feature_staleness本番呼び出し0件はgrep独立確認済み"
+      },
+      "devil_advocate": {
+        "claim": "DM-302の修正が前提",
+        "verification": "CONFIRMED",
+        "conclusion": "DM-302の派生finding。medium維持"
+      },
+      "team2_rationale": "先行検証と同一結論。DM-302の派生問題としてmedium",
+      "additional_note": null,
+      "regression_check": null
+    },
+    {
+      "finding_id": "DM-309",
+      "verdict": "validated",
+      "original_severity": "low",
+      "prior_adjusted_severity": "low",
+      "team2_severity": "low",
+      "fact_check": "PASS",
+      "evidence_line_check": {
+        "app.py:39 st.set_page_config": "確認済み（39行）",
+        "login/authenticate/password/auth grep 0件": "CONFIRMED — app.py全体をgrepで確認、認証関連コードなし"
+      },
+      "devil_advocate": {
+        "claim": "read-only表示のみで制御操作はできない。個人LAN運用ではlow相当",
+        "verification": "CONFIRMED — unsafe_allow_html=Trueの使用なし（app.py全体確認）。XSSリスクも低い。st.markdownによるHTMLレンダリングはStreamlitがデフォルトでエスケープ",
+        "ssrf_check": "app.py:52でAPI_BASE_URLは環境変数から取得。streamlit UIからユーザーがURLを変更できる入力フォームなし。SSRF成立条件なし",
+        "conclusion": "low維持。systemd --server.address=127.0.0.1の運用回避が現実的"
+      },
+      "team2_rationale": "先行検証と同一結論。low維持",
+      "additional_note": "XSS/SSRFの追加検証を実施。両リスクとも低。認証なしは事実だがread-onlyかつ個人運用ではlow相当",
+      "regression_check": null
+    },
+    {
+      "finding_id": "DM-310",
+      "verdict": "validated",
+      "original_severity": "low",
+      "prior_adjusted_severity": "low",
+      "team2_severity": "low",
+      "fact_check": "PASS",
+      "evidence_line_check": {
+        "app.py:136-138 state ファイル存在でrunning返却": "確認済み（136-139行）",
+        "app.py:122-139 fetch_health()": "確認済み（122-139行）"
+      },
+      "devil_advocate": {
+        "claim": "HealthChecker prober状態がDashboardに未反映",
+        "verification": "CONFIRMED — FTS_DASHBOARD_API_BASE_URL未設定時（本番主経路）はSTATE_DIR.glob('*.state.json')の存在確認のみでrunning返却。HealthCheckerの実際の状態は参照されない",
+        "conclusion": "DM-306と相補的。OANDA断絶時にDashboardが誤ってrunning表示する。low維持"
+      },
+      "team2_rationale": "先行検証と同一結論。DM-306とのセット対応が効率的。low維持",
+      "additional_note": null,
+      "regression_check": null
+    },
+    {
+      "finding_id": "DM-311",
+      "verdict": "validated",
+      "original_severity": "low",
+      "prior_adjusted_severity": "low",
+      "team2_severity": "low",
+      "fact_check": "PASS",
+      "evidence_line_check": {
+        "metrics.py:473-489 set_equity/set_exposure/set_daily_pnl": "確認済み（473-489行）",
+        "grep 0件": "CONFIRMED — set_equity/set_exposure/set_daily_pnlのgrep結果: metrics.py定義行のみヒット。ただしset_daily_pnl_realizedはrisk_supervisor.py:711,973から呼ばれており部分的な計装は存在",
+        "set_daily_pnl_realizedの補足": "metrics.py:519でset_daily_pnl_realizedが定義されrisk_supervisor.py:711,973から呼ばれているが、これはstrategy_id別の戦略PnLであり口座全体のfx_daily_pnlゲージとは別物"
+      },
+      "devil_advocate": {
+        "claim": "Dashboard のstate ファイル経由で部分的な観測は可能",
+        "verification": "PARTIAL CONFIRMED — state ファイルにpnl情報が含まれるかどうかはunified_state ファイル仕様に依存。Prometheus観点ではfx_account_equity/fx_total_exposure/fx_daily_pnlが常時0のままであることは事実",
+        "conclusion": "low維持"
+      },
+      "team2_rationale": "先行検証と同一結論。set_daily_pnl_realizedはrisk_supervisorから呼ばれている補足事実あり。口座レベルゲージ(set_equity/set_exposure/set_daily_pnl)は本番呼び出し0件。low維持",
+      "additional_note": "DM-301/302/303/311は同根の未配線問題群。一括修正が効率的",
+      "regression_check": null
+    },
+    {
+      "finding_id": "DM-312",
+      "verdict": "validated",
+      "original_severity": "low",
+      "prior_adjusted_severity": "low",
+      "team2_severity": "low",
+      "fact_check": "PASS",
+      "evidence_line_check": {
+        "strategy_slot.py:573 bind_contextvars": "確認済み（573-575行、try/finallyでunbind_contextvars対称）",
+        "ptrc.py bind_contextvarsなし": "CONFIRMED — ptrc.py全体でbind_contextvarsのgrepヒットなし",
+        "fill_processor.py bind_contextvarsなし": "CONFIRMED — fill_processor.py全体でbind_contextvarsのgrepヒットなし"
+      },
+      "devil_advocate": {
+        "claim": "asyncioコンテキスト境界の問題もあり修正コストが高い割に運用影響は軽微",
+        "verification": "CONFIRMED — strategy_slot.py:590でunbind_contextvarsがfinallyで対称呼び出しされているためコンテキストリークは防止済み。PTRC/FillProcessorへの伝播なし",
+        "conclusion": "SIGNAL→ORDER→FILL のstructlog JOINがcorrelation_idで機能しない。low維持"
+      },
+      "team2_rationale": "先行検証と同一結論。bind_contextvars の使用箇所が strategy_slot.py のみであることをgrep独立確認。low維持",
+      "additional_note": null,
+      "regression_check": null
+    },
+    {
+      "finding_id": "DM-313",
+      "verdict": "validated",
+      "original_severity": "low",
+      "prior_adjusted_severity": "low",
+      "team2_severity": "low",
+      "fact_check": "PASS",
+      "evidence_line_check": {
+        "parity.yml:83-89 unit testsステップ": "確認済み（83-89行）",
+        ".github/workflows/ unit.yml不在": "CONFIRMED — .github/workflows/にparity.ymlのみ存在"
+      },
+      "devil_advocate": {
+        "claim": "技術的欠陥ではなく運用上の不便さのみ",
+        "verification": "CONFIRMED — parity.yml:47-51でATLASを先インストールするため現状顕在化しない。paths-ignore: logs/**は修正済みで毎時bot CI洪水は解消済み(MEMORY.md確認)",
+        "conclusion": "low維持。QT-307/QT-317との三重重複"
+      },
+      "team2_rationale": "先行検証と同一結論。三重重複の報告冗長性の問題。low維持",
+      "additional_note": "QT-307/QT-317/DM-313の三重重複確認",
+      "regression_check": null
+    }
+  ],
+  "additional_findings": [
+    {
+      "id": "DM-314",
+      "severity": "low",
+      "area": "alerting",
+      "title": "FxEventBusDedupSpike アラートが本番 InMemoryEventBus 環境では機能しない",
+      "description": "alerting_rules.yml:145-157 の FxEventBusDedupSpike アラートは fx_event_bus_dedup_total を参照するが、inc_event_bus_dedup は redis_adapter.py のみで呼ばれており（redis_adapter.py:501,522）、本番が使用する InMemoryEventBus には dedup 機能が実装されておらず inc_event_bus_dedup の呼び出しもない（memory_adapter.py grep 0件）。UnifiedRunner は runner.py:125 で 'event_bus or InMemoryEventBus()' を使用しており Redis EventBus は本番主経路外。FxOandaApiLatencyHigh/FxFeatureStorestaleHigh と同種のデッドアラート状態だが InMemoryEventBus に dedup リスクがないため実害は限定的。",
+      "evidence": [
+        "redis_adapter.py:501,522 inc_event_bus_dedup呼び出し確認",
+        "memory_adapter.py: inc_event_bus_dedup呼び出し 0件（grep確認）",
+        "runner.py:125 'self._event_bus: EventBus = event_bus or InMemoryEventBus()'",
+        "runner.py:411 コメント 'UnifiedRunner は Redis を直接使用しない（InMemoryEventBus）' 確認",
+        "alerting_rules.yml:145-157 FxEventBusDedupSpike"
+      ],
+      "impact": "InMemoryEventBus環境でFxEventBusDedupSpikeが永久Inactive。実害は低い（InMemoryEventBusに重複配信リスクはない）",
+      "suggested_fix": "DM-303/302と同様に一括修正セットに含める。またはアラートのコメントにInMemoryEventBus非対応の注記を追加",
+      "duplicate_of": null
+    }
+  ],
+  "past_inc_regression_check": {
+    "INV-2026-0528-001 EmailNotifier first-send throttle": "修正済み確認 — email_notifier.py:326-349の_should_throttle実装でlast_at is None判定による初回送信保証を確認",
+    "毎時bot CI洪水": "修正済み確認 — parity.yml:14-15のpaths-ignore: logs/**を確認",
+    "INC-2026-0527-001 paper exposure混入": "関連なし（DM管轄外）"
+  },
+  "summary": {
+    "total_dm": 13,
+    "validated": 9,
+    "downgraded": 3,
+    "upgraded": 1,
+    "refuted": 0,
+    "team2_severity_distribution": {
+      "high": 2,
+      "medium": 5,
+      "low": 6
+    },
+    "severity_changes_vs_original": {
+      "DM-301": "high -> medium (fill Email経路はFillEvent直接購読で生存、Prometheus可視化のみdead)",
+      "DM-303": "high -> medium (本番InMemoryEventBus使用確認、Redisモード時のみ深刻)",
+      "DM-305": "medium -> low (コメント不整合のみ、Grafanaクエリは機能する)",
+      "DM-306": "medium -> high (全通知経路dead確認: Prometheus/Email silently drop/_on_risk_alert:359-361/AuditLog不在/Dashboard誤表示)"
+    },
+    "agreement_with_prior_validation": "全13件で先行検証(cluster_c)と同一結論。独立grep検証による事実確認で差異なし",
+    "key_findings": [
+      "DM-306 high upgrade確定: health_check.py:417のoanda_connection_lostとemail_notifier.py:275-307の_RISK_ALERT_KINDS不在をgrep独立確認。email_notifier.py:359-361のsilently drop動作確認。alerting_rules.ymlに対応アラートなし確認。DM-302/DM-310と三重連動しOANDA断絶時のプッシュ通知経路がゼロ",
+      "DM-302 high維持: observe_oanda_api_latency/inc_oanda_api_status/observe_feature_staleness/set_order_success_rateの本番呼び出し0件をgrep独立確認。FxOandaApiLatencyHigh/FxFeatureStorestaleHighが永久Inactive",
+      "DM-301 medium: fill Email通知は_on_fill(FillEvent購読)経路が生存。_RISK_ALERT_KINDSにfillはないが約定通知は機能する。cluster_cの'fill kind登録済み'表現は技術的に不正確だが結論は正確",
+      "DM-304 medium: position_reconciler_mismatch.mdの不在をGlob独立確認。FxPositionReconcilerMismatch自体は計装済み（position_reconciler.py:266）のためrunbook欠落の実害あり",
+      "新規DM-314 low: FxEventBusDedupSpikeアラートが本番InMemoryEventBus環境でdead。DM-307/308と同種だが実害は限定的"
+    ],
+    "critical_action_item": "_RISK_ALERT_KINDSに 'oanda_connection_lost': 'oanda_outage' を追加（専用kind推奨、live_anomalyの900秒throttle非適用）することでDM-306の Email 経路を1行修正で回復可能"
+  }
+}

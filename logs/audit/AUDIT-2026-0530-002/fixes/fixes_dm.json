@@ -1,0 +1,90 @@
+{
+  "audit_id": "AUDIT-2026-0530-002",
+  "phase": "3/4",
+  "agent": "devops-monitor",
+  "generated_at": "2026-05-30",
+  "commit": null,
+  "fixes": [
+    {
+      "defect_id": "DE-503",
+      "severity": "HIGH",
+      "kind": "post_fix_defect",
+      "title": "docs/runbook/feature_staleness.md 陳腐化",
+      "root_cause": "DE-403 修正後も runbook が旧 expr (60s) / 旧 semantics (バー間隔測定) / 旧ラベルセット (strategy_id のみ) のままだった。alerting_rules.yml:130 の annotations が実態 (TF 名が strategy_id に入る) と乖離。",
+      "files_modified": [
+        "fx_trading_system/docs/runbook/feature_staleness.md",
+        "fx_trading_system/deploy/prometheus/alerting_rules.yml"
+      ],
+      "changes": {
+        "fx_trading_system/docs/runbook/feature_staleness.md": {
+          "action": "全面書き換え (v1→v3)",
+          "details": [
+            "Prometheus 条件を新 expr に更新: TF 別閾値 M15>1800s / H1>7200s / H4>28800s",
+            "staleness semantics セクション追加: max(0, now - (_last_primary_bar_time + TF_SECONDS[primary_tf])) の説明",
+            "ラベル仕様テーブル追加: strategy_id に TF 名が入る旨 (DE-403 Phase 4.5 ADVISORY) を明記",
+            "primary_tf ラベルでスライシングすること、を強調",
+            "週末閉場セクション追加 (DE-504 連動): OANDA 閉場時間・自動抑止の説明・oncall 判断材料",
+            "Step 0 (週末閉場チェック) を調査手順先頭に追加",
+            "週末閉場明け staleness 未解消のアクション追加",
+            "エスカレーション基準を TF 別閾値に合わせて更新",
+            "改訂履歴を v2/v3 まで追記"
+          ]
+        },
+        "fx_trading_system/deploy/prometheus/alerting_rules.yml": {
+          "action": "FxFeatureStorestaleHigh annotations 更新 (DE-503 対応)",
+          "line_range": "旧 130 行付近の description フィールド",
+          "details": [
+            "旧 '影響戦略は strategy_id ラベルで特定できます' を削除",
+            "新: '[ラベル注意 / DE-503 ADVISORY]' セクション追加 — strategy_id に TF 名が入ること、primary_tf を使うことを明記",
+            "新: '[週末閉場 / DE-504]' セクション追加 — 閉場中は自動抑止される旨を明記"
+          ]
+        }
+      }
+    },
+    {
+      "defect_id": "DE-504",
+      "severity": "HIGH",
+      "kind": "post_fix_defect",
+      "title": "週末閉場で全 H1/H4 戦略 (~22 件) staleness 一斉 FIRING",
+      "root_cause": "DE-403 修正は staleness semantics を修正したが alerting_rules.yml に週末 mute がなかった。OANDA 閉場 (金曜 22:00 UTC 〜 日曜 22:00 UTC) 中は H4 staleness が最大 172800s (閾値 28800s の 6 倍) に達し約 72h 継続 FIRING していた。",
+      "solution_adopted": "案A (PromQL 内完結): alerting_rules.yml の expr に hour() / day_of_week() による週末 mute を組み込む",
+      "files_modified": [
+        "fx_trading_system/deploy/prometheus/alerting_rules.yml"
+      ],
+      "files_created": [
+        "fx_trading_system/tests/unit/test_de504_weekend_alert_mute.py"
+      ],
+      "changes": {
+        "fx_trading_system/deploy/prometheus/alerting_rules.yml": {
+          "action": "FxFeatureStorestaleHigh expr に週末 mute 条件を追加 (DE-504 案A)",
+          "expr_before": "(\n  fx_feature_staleness_sec{primary_tf=\"M15\"} > 1800\n  or\n  fx_feature_staleness_sec{primary_tf=\"H1\"} > 7200\n  or\n  fx_feature_staleness_sec{primary_tf=\"H4\"} > 28800\n)",
+          "expr_after": "(\n  (\n    fx_feature_staleness_sec{primary_tf=\"M15\"} > 1800\n    or\n    fx_feature_staleness_sec{primary_tf=\"H1\"} > 7200\n    or\n    fx_feature_staleness_sec{primary_tf=\"H4\"} > 28800\n  )\n  and on()\n  (\n    (day_of_week() != 6)\n    and (day_of_week() != 0)\n    and not (day_of_week() == 5 and hour() >= 22)\n  )\n)",
+          "mute_conditions": {
+            "saturday_all_day": "day_of_week() == 6",
+            "sunday_all_day": "day_of_week() == 0  (OANDA open 22:00 は月曜 day_of_week==1 扱い)",
+            "friday_after_close": "day_of_week() == 5 and hour() >= 22",
+            "note": "PromQL day_of_week(): 0=日曜, 1=月曜, ..., 5=金曜, 6=土曜"
+          }
+        },
+        "fx_trading_system/tests/unit/test_de504_weekend_alert_mute.py": {
+          "action": "新規作成 — 回帰防止テスト 17 件",
+          "test_classes": [
+            "TestAlertingRulesContainsWeekendMute (5 件): alerting_rules.yml に day_of_week() / hour() / TF 閾値 / advisory annotations が含まれること",
+            "TestWeekendMuteBoundaryValues (10 件): 月曜朝発火確認 / 金曜 22:30 抑止 / 土曜 12:00 抑止 / 日曜 21:00 抑止 (継続) 等の境界値",
+            "TestH4WeekendStalenessEstimate (2 件): 閉場時間が H4 閾値を超えること / 週末全時点が mute されること"
+          ],
+          "test_results": "17 passed in 0.14s"
+        }
+      }
+    }
+  ],
+  "regression_tests": {
+    "new": "tests/unit/test_de504_weekend_alert_mute.py (17 件)",
+    "existing_unchanged": "tests/unit/test_de403_feature_staleness_semantics.py (9 件) — 全 PASS 確認済み"
+  },
+  "known_limitations": [
+    "PromQL day_of_week() では日曜 22:00 UTC の OANDA open 後も day_of_week()==0 のため、月曜 00:00 UTC まで mute が継続する (約 2h の発火遅れ)。for:3m の抑止時間を考慮すると実害は軽微と判断。",
+    "PromQL の hour() / day_of_week() は Prometheus の評価時刻 (UTC) を使用するため、DST の影響なし。",
+    "strategy_id ラベルに実戦略 ID が入らない問題 (DE-403 Phase 4.5 ADVISORY) は本修正対象外。"
+  ]
+}

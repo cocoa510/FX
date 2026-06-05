@@ -1,0 +1,53 @@
+{
+  "agent": "code-safety-reviewer",
+  "note": "本ファイルは Phase 1 で CSR エージェントの永続化が失敗（bash クォートエスケープ問題）したため、エージェント最終要約から回収・再構築したもの。high 1 / medium 4 / low 2 の計7件のうち、要約で詳細が判明した4件を収録。残り3件（medium 1 + low 2）は詳細が失われ未収録（recovery_gap）。",
+  "recovery_gap": ["medium x1", "low x2 (詳細不明)"],
+  "commit_verification": {
+    "d0090668_CSR-001": "PARTIAL — Defense1 (ALLOWED_ATLAS_SUBMODULES) 有効だが Defense2 に CSR-101/CSR-102 の残穴",
+    "497a1c00_CSR-005": "PASS — queue.put 前に logger.error 実行で修正完全",
+    "0450a7c6_CSR-002": "PASS — profit_factor=None 修正は正確、Gate 影響なし",
+    "07f15dd7_CSR-007": "PARTIAL — runner.py は修正済みだが sandbox_runner.py の _load_strategy_class が未対応 (CSR-103)"
+  },
+  "findings": [
+    {
+      "id": "CSR-101",
+      "severity": "high",
+      "area": "atlas/common/sandbox",
+      "title": "__import__ ランタイム動的インポートによる AST 静的解析バイパス (RCE 疑い)",
+      "description": "SANDBOX_BUILTINS に __import__ が含まれ、戦略コード内で文字列を動的生成 (例 __import__(chr(111)+chr(115)).system('id')) して渡すと Stage1 AST 静的解析をすり抜けサンドボックス外でシステムコール実行できる可能性。コメントの『from __future__ import annotations に必須』という正当化は CPython 3.11 では __import__ を呼ばないため誤りの疑い。",
+      "evidence": ["atlas/common/sandbox_builtins.py:29"],
+      "suggested_fix": "__import__ を SANDBOX_BUILTINS から除去し、必要な atlas サブモジュールを exec_module 直前に sys.modules へプリロードする方式へ変更",
+      "category": "incomplete_fix"
+    },
+    {
+      "id": "CSR-102",
+      "severity": "medium",
+      "area": "atlas/validator/syntax_checker",
+      "title": "CSR-001 Defense2 の 2 セグメント連鎖チェック漏れ",
+      "description": "chain_parts[1:-1] スライスは呼び出しチェーンが 2 セグメント (import atlas_mod as a; a.os()) のとき中間ノードリストが空になり、末端が os でも FORBIDDEN_MODULES 検出をスルー。Defense2 は 3 セグメント以上でしか機能しない。",
+      "evidence": ["atlas/validator/syntax_checker.py:277"],
+      "suggested_fix": "chain_parts[1:-1] を chain_parts[1:] に変更し末端属性名も検査対象に含める",
+      "category": "incomplete_fix"
+    },
+    {
+      "id": "CSR-103",
+      "severity": "medium",
+      "area": "atlas/validator/sandbox_runner",
+      "title": "CSR-007 修正の波及漏れ — sandbox_runner の _load_strategy_class が未対応",
+      "description": "07f15dd7 (CSR-007) は runner.py を修正したが sandbox_runner.py の _load_strategy_class が同種の未対応のまま残存。",
+      "evidence": ["atlas/validator/sandbox_runner.py (_load_strategy_class)"],
+      "suggested_fix": "runner.py と同じ修正を sandbox_runner.py の _load_strategy_class にも適用",
+      "category": "incomplete_fix"
+    },
+    {
+      "id": "CSR-106",
+      "severity": "medium",
+      "area": "atlas/backtest/event_simulator",
+      "title": "3 つのエグジット経路が state.notify_fill() を迂回 (shadow position ドリフト)",
+      "description": "ギャップ SL クローズ・シグナル FLAT クローズ・SL/TP クローズの 3 経路が strategy.on_fill() を直接呼び、state.notify_fill() を経由しないため shadow position_manager に FLAT イベントが届かない。エントリー経路(L1062)・end_of_data(L1258)は正しく notify_fill 系を使用。コメント(L1330-1332)は『移管済み』と宣言するが実装が追いつかず。OANDAHedgingManager のポジション状態ずれと parity テストの偽陽性 PASS につながりうる。",
+      "evidence": ["atlas/backtest/event_simulator.py:921", "atlas/backtest/event_simulator.py:1101", "atlas/backtest/event_simulator.py:1144"],
+      "suggested_fix": "3 経路を state.notify_fill()/notify_fill_shadow_only() 経由に統一し、コメントの宣言と実装を一致させる",
+      "category": "new"
+    }
+  ]
+}

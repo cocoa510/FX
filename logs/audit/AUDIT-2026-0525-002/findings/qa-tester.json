@@ -1,0 +1,135 @@
+{
+  "agent": "qa-tester",
+  "audit_id": "AUDIT-2026-0525-002",
+  "audit_date": "2026-05-25",
+  "pytest_summary": {
+    "unit_parity_risk_engine": {"passed": 1019, "failed": 0, "xfailed": 0, "skipped": 0},
+    "integration": {"passed": 697, "failed": 0, "xfailed": 5, "skipped": 0},
+    "fault": {"passed": 43, "failed": 2, "xfailed": 0, "skipped": 0},
+    "performance": {"passed": 1, "failed": 0, "xfailed": 0, "skipped": 0},
+    "total_main_suite_excl_live_fault_perf": {"passed": 1926, "failed": 0, "xfailed": 5, "skipped": 0},
+    "total_all_excl_live": {"passed": 1971, "failed": 2, "xfailed": 5, "skipped": 0},
+    "note": "tests/live は常時除外。fault 2件FAIL はテスト fixture と実装の型不整合（OpenTrade vs dict）。"
+  },
+  "findings": [
+    {
+      "id": "QT-101",
+      "severity": "high",
+      "area": "tests/fault/test_reconnect_cycle.py",
+      "title": "test_reconnect_cycle.py の2件 FAIL: _make_broker_trades が dict を返すが PositionReconciler は OpenTrade を要求",
+      "description": "tests/fault/test_reconnect_cycle.py の _make_broker_trades() 関数が list[dict] を返している。一方、PositionReconciler.reconcile() は broker_positions_fn の戻り値を list[OpenTrade] として扱い bt.trade_id 属性にアクセスする（position_reconciler.py:158）。dict オブジェクトに .trade_id 属性は存在しないため AttributeError が発生し、test_reconnect_restores_reconciliation と test_position_not_auto_corrected_on_discrepancy の2件が FAIL する。この2件は AUDIT-2026-0525-001 でスコープ外とされた既知の問題だが、今回正式に severity を付けて報告する。OpenTrade モデルは PR52-M-C3（2026-05-25）で broker.py に導入されており、テスト fixture が更新されていない。",
+      "evidence": [
+        "tests/fault/test_reconnect_cycle.py:50-64: _make_broker_trades() -> list[dict]",
+        "trading_platform/core/execution_engine/position_reconciler.py:157-158: for bt in broker_trades: broker_trade_map[bt.trade_id] = bt",
+        "trading_platform/core/models/broker.py:35-51: class OpenTrade(BaseModel) with trade_id: str",
+        "pytest output: AttributeError: 'dict' object has no attribute 'trade_id' @ position_reconciler.py:158",
+        "FAILED tests/fault/test_reconnect_cycle.py::TestReconnectCycle::test_reconnect_restores_reconciliation",
+        "FAILED tests/fault/test_reconnect_cycle.py::TestReconnectCycle::test_position_not_auto_corrected_on_discrepancy"
+      ],
+      "suggested_fix": "_make_broker_trades() の戻り値を list[dict] から list[OpenTrade] に変更する。例: from trading_platform.core.models.broker import OpenTrade を import し、return [OpenTrade(trade_id=trade_id, instrument=instrument, current_units=int(quantity), quantity=int(quantity), direction=direction, price=150.0)] とする。",
+      "category": "known_pre_existing"
+    },
+    {
+      "id": "QT-102",
+      "severity": "medium",
+      "area": "tests/parity/ および tests/integration/test_atlas_top3_strategies.py",
+      "title": "QT-011 修正漏れ: 12ファイルのローカル OHLCV fixture が依然として close 基準のみで high/low を生成している",
+      "description": "QT-011 の修正は tests/conftest.py の sample_ohlcv_df / make_sample_ohlcv のみに適用された。しかし各テストファイル内で定義されたローカル OHLCV fixture（realistic_ohlcv, long_ohlcv, non_jpy_h4_ohlcv 等）は依然として 'high = close * (1 + ...)' / 'low = close * (1 - ...)' パターンを使用しており、open(=前close) が high/low の外に出る無効バーが発生する（seed=123で約37%が無効）。影響ファイル: test_feature_store_parity.py, test_feature_store_parity_buffer_trim.py, test_feature_store_parity_mtf.py, test_mismatch_strategy_parity.py, test_mtf_lookahead_red_team.py, test_feature_store_aux_cache_parity.py, test_atlas_top3_strategies.py, test_live_store_latency.py, integration/contract/test_strategy_contract.py, integration/fixtures/atlas_scenario_fixtures.py, performance/_bench_baseline.py（計12ファイル）。parityテストはATLASとLiveが同一の誤入力を受けるためparity差は0になり偽PASSにはならないが、ATR/Donchian等の OHLC 整合依存指標の絶対値が誤り（Live本番との乖離）で、parity合格が本番の正確性を保証しない。",
+      "evidence": [
+        "tests/parity/test_feature_store_parity.py:34-35: high = close * (1 + ...) / low = close * (1 - ...)",
+        "tests/parity/test_feature_store_parity_buffer_trim.py:45-46: 同パターン",
+        "tests/parity/test_feature_store_parity_mtf.py:52-53: 同パターン",
+        "tests/parity/test_mismatch_strategy_parity.py:45-46: 同パターン",
+        "tests/integration/test_atlas_top3_strategies.py:147-148: 同パターン",
+        "実測: seed=123で high < open が 111/300 本（約37%）発生",
+        "02d7cf1 commit で conftest.py のみ修正、ローカルfixture未修正"
+      ],
+      "suggested_fix": "各ファイルのローカル fixture で high/low 生成を 'high = np.maximum(open_, close) * (1 + abs_noise) / low = np.minimum(open_, close) * (1 - abs_noise)' パターンに統一する。または各ファイルが conftest.py の make_sample_ohlcv を利用するよう fixture を共通化する。",
+      "category": "incomplete_fix"
+    },
+    {
+      "id": "QT-103",
+      "severity": "medium",
+      "area": "tests/integration/test_atlas_top3_strategies.py::TestSignalGeneration::test_strategy_runs_over_500_bars_and_signals_are_valid",
+      "title": "QT-004 修正後も「シグナル0件でwarnings.warnのみPASS」の構造が残存 (xfail_scenario_signalsへの依存が非明示的)",
+      "description": "QT-004 修正（f7de546）でテスト名と契約が一致するようになったが、シグナル0件の場合は依然として warnings.warn のみで PASS する。コメントには「戦略固有発火は test_xfail_scenario_signals.py で担保」とあるが、(1) xfail_scenario_signals.py が対象とするのは _AVAILABLE_SCENARIOS（imported/ に存在する特定戦略）のみ、(2) 上位クラス TestSignalGeneration の parametrize 対象は全 imported/ 戦略であり、xfail_scenario_signals.py でカバーされていない戦略は「合成データでシグナル未発生」が警告のみでPASS し続ける。現在 5戦略（ATLAS-2026-0504-091 等）がシグナル0件で warnings.warn 発生中（pytestセッション警告 5件）。test_ptrc_approves_normal_signal で pytest.xfail されているが、シグナル検証自体の偽緑は解消されていない。",
+      "evidence": [
+        "tests/integration/test_atlas_top3_strategies.py:368-377: if not signals: warnings.warn(...) のみ（assertなし）",
+        "pytest実行結果: 5件のUserWarning（ATLAS-2026-0504-091, 0511-059, 0512-023, 0512-035, 0512-061）",
+        "tests/integration/test_xfail_scenario_signals.py:70-72: _AVAILABLE_SCENARIOS は imported/ 存在確認済みのみ",
+        "test_strategy_runs_over_500_bars_and_signals_are_valid は全戦略を対象とするが、xfail_scenario_signals.py は10戦略のみカバー"
+      ],
+      "suggested_fix": "シグナル0件の場合も pytest.xfail（reason=...）を使い、xfailとして明示する（warnings.warnの代わりに）。または当該戦略のシグナル発火を保証するfixture生成ロジックをすべての imported/ 戦略に整備する（工数大）。最小対応: warnings.warn を pytest.xfail に置換し、xfail が XPASS化（戦略がシグナルを出した場合）を検出できるようにする。",
+      "category": "incomplete_fix"
+    },
+    {
+      "id": "QT-104",
+      "severity": "low",
+      "area": "tests/parity/test_mismatch_strategy_parity.py",
+      "title": "test_0510_002_feature_set_parity と test_combined_feature_sets_parity に非NaN比較実施の番兵テストがない",
+      "description": "test_0511_009_feature_set_parity に対しては test_0511_009_ema200_has_non_nan_comparison という番兵テストが存在し、『少なくとも1本は非NaN比較が行われた』ことを保証している。しかし test_0510_002_feature_set_parity（start_bar=50）と test_combined_feature_sets_parity（start_bar=210）には対応する番兵テストがない。データ量（600本）と指標のウォームアップ要件から空振りは実際には起きないが、将来のデータ量変更（n削減等）で静かに0比較になるリスクがある。",
+      "evidence": [
+        "tests/parity/test_mismatch_strategy_parity.py:135-176: test_0511_009_feature_set_parityには番兵あり、test_0510_002は番兵なし",
+        "tests/parity/test_mismatch_strategy_parity.py:86-112: _compare_features は比較本数をreturnするが test_0510_002 はその戻り値を捨てている"
+      ],
+      "suggested_fix": "test_0510_002_feature_set_parity と test_combined_feature_sets_parity にも 'compared > 0' を検証する番兵 assert を追加するか、専用の番兵テストを追加する。",
+      "category": "new"
+    },
+    {
+      "id": "QT-105",
+      "severity": "low",
+      "area": "tests/unit/test_live_store_pr12.py",
+      "title": "does-not-raise パターンのみのテストが3件存在（境界値テストとして妥当だが assert による副作用確認なし）",
+      "description": "test_register_period_at_max_passes, test_register_existing_live_strategy_period_800_passes, test_register_param_within_limit_passes の3テストは「例外が発生しないこと」のみを検証し、register 呼び出しが実際に内部 _indicators dict に追加されたかどうかを確認する assert がない。対称テスト（test_register_period_above_max_raises）が pytest.raises を使い例外を検証しているのと対称的に、PASS 側テストも副作用（features が register に追加された等）を assert するとより堅牢になる。現状は偽緑レベルには達していないが、register の内部実装が変わって副作用が失われても PASS する。",
+      "evidence": [
+        "tests/unit/test_live_store_pr12.py:86-91: test_register_period_at_max_passes — assertなし",
+        "tests/unit/test_live_store_pr12.py:94-97: test_register_existing_live_strategy_period_800_passes — assertなし",
+        "tests/unit/test_live_store_pr12.py:116-119: test_register_param_within_limit_passes — assertなし"
+      ],
+      "suggested_fix": "各テストの末尾に 'assert name in fs._indicators or name in fs._indicators_by_tf' 等の副作用確認 assert を追加する。",
+      "category": "new"
+    },
+    {
+      "id": "QT-106",
+      "severity": "info",
+      "area": "tests/ 全体",
+      "title": "QT-001/002/004/006/007/008/010/011 の各修正は実装どおり有効に機能している",
+      "description": "AUDIT-2026-0525-001 の各QT修正について実装を精査した。(QT-001) _VIOLATION_PATTERNS に 未インポート/未配置/1件もない 等6パターン追加済み、自己検証テスト付き。(QT-002) 合成Gate通過戦略で決定論的に検証、存在チェックskip排除済み。(QT-004) テスト名と契約を一致させ全バー処理証跡+シグナル型チェックを追加済み（ただし QT-103 として残余問題を別途報告）。(QT-006) 条件付きassertを無条件に変更、定数ピンテスト追加済み。(QT-007) 別途コミット c43f013 で CI パス修正済み。(QT-008) CircuitBreaker の asyncio.sleep(1.5) を monotonic ポーリングに置換済み（~50ms完了）。(QT-010) warnings.warn + pytest.fail に置換済み、skip偽陽性なし。(QT-011) conftest.py のみ修正済み（ローカルfixtureは QT-102 として別途報告）。",
+      "evidence": [
+        "git show f7de546: QT-001/002/004/009 修正確認",
+        "git show 6da918e: QT-006 修正確認",
+        "git show 81c7b5e: QT-008/010 修正確認",
+        "git show 02d7cf1: QT-011 conftest.py 修正確認",
+        "1926 passed, 5 xfailed, 0 failed (tests/ excl live/fault/performance)"
+      ],
+      "suggested_fix": "対応不要（情報提供）",
+      "category": "known_pre_existing"
+    },
+    {
+      "id": "QT-107",
+      "severity": "info",
+      "area": "tests/performance/test_live_store_latency.py",
+      "title": "performanceテストはflaky懸念なく PASS（latency: 実行時間68秒、mean/p95は閾値以内）",
+      "description": "tests/performance/test_live_store_latency.py は 5000本 × 10特徴量 × 3TF で 68.78秒かかるが PASS した。pytestmark = pytest.mark.timeout(300) でグローバル30秒タイムアウトを回避している。AUDIT-2026-0525-001 で 'latency flaky' として懸念されていたが、今回の実行では PASS を確認。閾値（mean<20ms, p95<25ms）は Windows ノートPC環境では余裕あり。ただし OHLCV fixture が QT-102 と同様の問題を持つため（performance/_bench_baseline.py:22-23 / test_live_store_latency.py:43-44）、latency 計測の精度には影響なし。",
+      "evidence": [
+        "tests/performance/test_live_store_latency.py: 1 passed in 68.78s",
+        "tests/performance/test_live_store_latency.py:43-44: high/low close基準パターン残存（latency目的のため指標精度は問題ない）"
+      ],
+      "suggested_fix": "対応不要（情報提供）。OHLCVのfix適用は QT-102 で一括対応を推奨。",
+      "category": "known_pre_existing"
+    }
+  ],
+  "severity_summary": {
+    "critical": 0,
+    "high": 1,
+    "medium": 2,
+    "low": 2,
+    "info": 2,
+    "total": 7
+  },
+  "top3_priority": [
+    "QT-101: tests/fault/test_reconnect_cycle.py 2件FAIL — _make_broker_trades がdictを返すがPositionReconcilerはOpenTrade要求（AttributeError）。AUDIT-2026-0525-001スコープ外だった既知問題を今回正式にhigh severity報告。",
+    "QT-102: QT-011修正の漏れ — conftest.pyのみ修正済みで12ファイルのローカルfixture未修正（ATR/Donchian等のOHLC依存指標の絶対値が不正確）。parityテスト自体はATLAS/Live両方に同一誤入力のためparity差0=偽PASSではないが、本番精度保証が欠ける。",
+    "QT-103: QT-004の残余偽緑 — シグナル0件のtest_strategy_runs_over_500_bars_and_signals_are_validはwarnings.warnのみでPASS（assertなし）。現在5戦略がこの経路を通過中。pytest.xfailへの置換が推奨。"
+  ]
+}

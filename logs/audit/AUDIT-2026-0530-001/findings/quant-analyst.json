@@ -1,0 +1,224 @@
+{
+  "agent": "quant-analyst",
+  "scope": "ATLAS hyouka sou (QA-301 jigokensho + shinki) audit_commit=15d62e62",
+  "audit_commit": "15d62e62",
+  "qa301_fix_commit": "05ae8595",
+  "modules_reviewed": [
+    "atlas/backtest/runner.py",
+    "atlas/backtest/result_parser.py",
+    "atlas/backtest/event_simulator.py",
+    "atlas/analyzer/scorer.py",
+    "atlas/analyzer/comparator.py",
+    "atlas/analyzer/dedup.py",
+    "atlas/analyzer/weakness_detector.py",
+    "atlas/orchestrator/convergence.py",
+    "atlas/config/defaults.py",
+    "atlas/common/models.py",
+    "tests/golden/test_qa301_soft_score_floor.py",
+    "tests/golden/test_v5_5_0_metrics.py"
+  ],
+  "empirical_baseline": {
+    "total_strategies": 1452,
+    "currently_passing_gate": 308,
+    "schema_distribution_in_result_json": {
+      "6.1.0": 1452,
+      "6.2.0": 0
+    },
+    "short_only_strategies": 422,
+    "short_only_with_wfa_none": 218,
+    "short_only_with_3plus_indicators_none": 193,
+    "short_only_with_4_indicators_none_qa301_pattern": 192,
+    "short_only_4_none_AND_pass_AND_pf_ge_1_5_AND_sh_ge_1_5_AND_dd_le_5": 0,
+    "currently_pass_strategies_that_would_FLIP_to_FAIL_under_new_FLOOR_090": 8,
+    "flip_breakdown_by_direction": {
+      "balanced": 2,
+      "long_only": 5,
+      "short_only": 1
+    },
+    "flip_breakdown_by_indicator_none_count": {
+      "2": 8,
+      "3": 0,
+      "4": 0
+    },
+    "max_old_soft_score_in_flip_set": 0.7588,
+    "min_old_soft_score_in_flip_set": 0.7009,
+    "flip_strategy_ids": [
+      "ATLAS-2026-0508-037",
+      "ATLAS-2026-0508-042",
+      "ATLAS-2026-0508-205",
+      "ATLAS-2026-0509-005",
+      "ATLAS-2026-0509-011",
+      "ATLAS-2026-0509-040",
+      "ATLAS-2026-0511-004",
+      "ATLAS-2026-0520-041"
+    ]
+  },
+  "empirical_baseline_note": "QA-301 target pattern (4-None + high-basic + PASS) has ZERO realised occurrences in current 1452 strategies. The 8 actual flips are the 2-None boundary longtail not the design target.",
+  "post_fix_verification": {
+    "commit_05ae8595_QA301": "PARTIAL OK with structural concerns",
+    "numerical_reproduction": "PASS (unit test 5 cases reproduce 0.857 -> 0.667 as designed)",
+    "schema_version_bump": "PASS (defaults.METRICS_SCHEMA_VERSION = 6.2.0 at defaults.py:70)",
+    "backfill_status": "DEFERRED (1452/1452 result.json stay at 6.1.0)",
+    "false_positive_path_reality_check": "QA-301 blocked-pattern occurs ZERO times in current 1452 strategies (192 SHORT with 4-None but all Tier1 FAIL). Effective blocking benefit = 0",
+    "actual_flip_population": "8 strategies (balanced 2 / long_only 5 / short_only 1). SHORT bias not observed (1/422 = 0.2%) matching design intent",
+    "test_e2e_coverage": "INSUFFICIENT (QA-301 golden test only exercises _compute_soft_score_redistributed directly, never check_backtest_gate)",
+    "qa302_interaction": "UNRESOLVED (commit msg explicitly notes recalibration required with QA-302 deferred; opposite-direction biases now imbalanced)",
+    "live_propagation_check": "PASS (8 flip strategies absent from fx_trading_system/logs/state_backup_2026-05-07/)",
+    "atlas_loop_propagation_risk": "MEDIUM (re-evaluation under 6.2.0 would surface flip cases; ATLAS_LOOP improvement-rate calc would break if mixed-version)"
+  },
+  "notes": [
+    "regime detection module does not exist in ATLAS (grep confirmed). Parity tests live under tests/parity/ - out of audit scope.",
+    "All findings are dry-run results, no code changes performed.",
+    "AUDIT-2026-0529-001 existing IDs (QA-301/302/303/307) intentionally not re-issued. Regression/new-only at QA-401 onward.",
+    "Empirical baseline computed via atlas .venv against strategies/*/backtest/result.json at commit 15d62e62 (1452 strategies)"
+  ],
+  "findings": [
+    {
+      "id": "QA-401",
+      "severity": "medium",
+      "area": "metrics",
+      "title": "Post-QA-301: all 1452 result.json still at 6.1.0 while comparator/convergence lack cross-version warning",
+      "description": "Commit 05ae8595 bumped METRICS_SCHEMA_VERSION 6.1.0 -> 6.2.0 but backfill is deferred, so strategies/*/backtest/result.json shows 1452/1452 at 6.1.0 (measured). New strategies will record 6.2.0. Meanwhile atlas/analyzer/comparator.py (compare_two/compare_generations) and atlas/orchestrator/convergence.py (check_convergence) never consult metrics_schema_version. Only dedup.py has a legacy gate on major<3 (dedup.py:205-210). During the transition window 6.1.0 and 6.2.0 strategies will silently mix in improvement-rate / convergence / cross-strategy comparison. Violates CLAUDE.md guidance that cross-version comparison should warn on schema diff. The same risk was filed as QA-307 (deferred) in AUDIT-2026-0529-001 and is now materialised by the QA-301 bump.",
+      "evidence": [
+        "atlas/config/defaults.py:70 (METRICS_SCHEMA_VERSION = 6.2.0)",
+        "atlas/analyzer/comparator.py:79-159 (compare_two has no schema check)",
+        "atlas/orchestrator/convergence.py:1-350 (check_convergence has no schema check)",
+        "atlas/analyzer/dedup.py:205-210 (legacy guard is major<3 only)",
+        "docs/spec_change_log.md:24-27 (backfill explicitly deferred)",
+        "measured: strategies/*/backtest/result.json 1452/1452 at 6.1.0"
+      ],
+      "reproduction": "Run python in atlas .venv to aggregate metrics_schema_version under strategies/ -> {6.1.0: 1452, 6.2.0: 0}. Generate a new strategy (records 6.2.0). Call compare_two(prev=6.1.0_strategy, current=6.2.0_strategy) and observe that soft_score/oos_is_pf_ratio diffs are computed across schemas with no warning log and no errors key.",
+      "suggested_fix": "(1) comparator.compare_two / compare_generations entrance: compare metrics_schema_version; major mismatch -> raise, minor mismatch -> logger.warning with schema_version_warning. (2) convergence.check_convergence: include schema mismatch as a WARN in ConvergenceResult.details when calculating improvement_rate. (3) Codify the METRICS_SCHEMA_VERSION cross-generation warning rule currently only present in quant-analyst prompt. Backfill resolves at the root but structural defense is needed during transition.",
+      "impact_scope": "Improvement-rate (atlas-loop convergence), dedup ranking, atlas-compare accuracy. No Live impact, but ATLAS_LOOP may mis-detect improvement stagnation because soft_score ceiling shrinks 6.1.0 -> 6.2.0 and new strategies systematically score lower.",
+      "regression_of": null,
+      "post_fix_defect": true
+    },
+    {
+      "id": "QA-402",
+      "severity": "medium",
+      "area": "gate",
+      "title": "QA-301 golden test only exercises _compute_soft_score_redistributed unit, skips check_backtest_gate E2E",
+      "description": "tests/golden/test_qa301_soft_score_floor.py (5 tests) call _compute_soft_score_redistributed(components) directly and never traverse check_backtest_gate (Tier 2 harness + Tier 1/3 integration). The following E2E regressions cannot be detected: (a) normalisation errors during tier2_components construction (e.g. PF norm flipped from (PF-1.0)/0.5 to (PF-1.0)/0.6) when soft_score happens to coincide; (b) integrity of combined_conditions dict structure; (c) presence of the Soft Score (< 0.70) marker in failed_conditions; (d) GateDecision.from_tiers overall_passed aggregation. tests/golden/test_v5_5_0_metrics.py::TestA3 does call check_backtest_gate but only updates fixed values, not the FLOOR change itself. CLAUDE.md golden test mandatory list points runner.py::check_backtest_gate as a required golden surface; coverage is insufficient.",
+      "evidence": [
+        "tests/golden/test_qa301_soft_score_floor.py:69, 98, 119, 134 (direct _compute_soft_score_redistributed calls)",
+        "atlas/backtest/runner.py:944-1080 (check_backtest_gate Tier 2 construction and soft_score computation)",
+        "tests/golden/test_v5_5_0_metrics.py:104-169 (reference E2E pattern via check_backtest_gate)",
+        "CLAUDE.md L562-568 (golden mandatory list naming runner.py::check_backtest_gate)"
+      ],
+      "reproduction": "Intentionally break normalisation logic inside runner.py:944-1014 (e.g. change PF norm denominator from 0.5 to 0.6) without touching _compute_soft_score_redistributed signature. test_qa301_soft_score_floor.py still passes all 5 cases.",
+      "suggested_fix": "Add minimum 2 E2E cases to test_qa301_soft_score_floor.py that invoke check_backtest_gate: (a) Layer2Result with WFA/Drift/OOS/Top3=None and PF/Sharpe/DD/Sensitivity at max -> assert overall_passed=False, (b) Layer2Result with only WFA=None -> assert overall_passed=True. Reuse _make_layer2 helper from test_v5_5_0_metrics.py to keep effort small.",
+      "impact_scope": "Gate logic regression detection. Future changes around check_backtest_gate lack protective net. No Live impact but silent merge of Gate regression possible.",
+      "regression_of": null,
+      "post_fix_defect": true
+    },
+    {
+      "id": "QA-403",
+      "severity": "low",
+      "area": "gate",
+      "title": "Post-QA-301 8-strategy flip impact set not recorded in spec_change_log",
+      "description": "Commit 05ae8595 message claims step 2 (before/after comparison) complete via 5 reproduction tests, but in measured aggregate 8 of the currently-308-passing strategies flip PASS -> FAIL when re-Gate-d under FLOOR=0.90. Breakdown: balanced 2 / long_only 5 / short_only 1. All 8 have soft_score in [0.7009, 0.7588], n_invalid=2 (mostly WFA+Top3 or WFA+Drift). These are NOT the 4-None false positive pattern QA-301 targets; they are legitimate strategies caught at the boundary. CLAUDE.md [change:spec] step 6 mandates recording post-backfill PASS count, but docs/spec_change_log.md 2026-05-29 entry says only strategies with 3+ None indicators are affected which contradicts the measured 2-None flips.",
+      "evidence": [
+        "measured flip 8: ATLAS-2026-0508-037, 0508-042, 0508-205, 0509-005, 0509-011, 0509-040, 0511-004, 0520-041",
+        "all flip strategies: n_invalid=2, old_soft_score in [0.7009, 0.7588]",
+        "docs/spec_change_log.md:24 (claims 3+ None only which is false)",
+        "atlas/backtest/runner.py:687 (EFFECTIVE_WEIGHT_FLOOR=0.90 squeezes valid_weight ~0.92 strategies below 0.70)",
+        "fx_trading_system/logs/state_backup_2026-05-07/ does not contain any of the 8 flip ids (Live risk = 0, verified)"
+      ],
+      "reproduction": "In atlas .venv, iterate all strategies/*/backtest/result.json gate_check.tier2.components, extract valid_w / raw_contrib, compute old_eff=max(valid_w, 0.70) and new_eff=max(valid_w, 0.90) -> recompute soft_score -> 8 strategies cross the 0.70 threshold.",
+      "suggested_fix": "(1) Append to docs/spec_change_log.md 2026-05-29 entry: list 8 flip ids + direction breakdown + correction of 3+ None assertion. (2) When backfill runs, flag the flip strategies for atlas-loop re-evaluation (evaluation/report.json::needs_regate=true). (3) Persist the impact-preview script (the snippet used in this audit) as scripts/preview_floor_change_impact.py for future [change:spec] reuse.",
+      "impact_scope": "Documentation integrity only. No Live impact (flips absent from FTS state). ATLAS_LOOP impact compounds with QA-401 (improvement-rate misread across schemas).",
+      "regression_of": null,
+      "post_fix_defect": true
+    },
+    {
+      "id": "QA-404",
+      "severity": "low",
+      "area": "scoring",
+      "title": "QA-301 cost/benefit not recorded: 0 realised positives blocked vs 8 collateral false-fails",
+      "description": "The QA-301 target pattern (WFA/Drift/OOS/Top3 all None AND PF>=1.5/Sharpe>=1.5/DD<=5.0/PASS) occurs ZERO times in current 1452 strategies (192 SHORT have 4-None but all fail Tier1). Collateral impact: 8 strategies flip. Real-world benefit of the fix is currently pre-emptive theoretical hardening (0 realised positives blocked) at the cost of 8 legitimate PASS strategies. The probability x impact RoI estimate is missing from both AUDIT-2026-0529-001 quant-analyst.json and docs/spec_change_log.md. CLAUDE.md Phase 5 supplementary rule says RoI miss is exploration cost not failure but record in spec_change_log.md. The QA-301 [change:spec] commit omits this record.",
+      "evidence": [
+        "measured: 0 occurrences of 4-None + high-basic + PASS pattern across 1452 strategies",
+        "measured: 8 PASS->FAIL flips under FLOOR=0.90 across 1452 strategies",
+        "docs/spec_change_log.md:24-27 (RoI estimate absent)",
+        "logs/audit/AUDIT-2026-0529-001/findings/quant-analyst.json QA-301 (suggested_fix only, no measured impact)"
+      ],
+      "reproduction": "From empirical_baseline section of this finding, compare potential 0 vs collateral 8. A FLOOR=0.80 alternative likely reduces flip count toward 0 (re-calculation required).",
+      "suggested_fix": "Append to docs/spec_change_log.md 2026-05-29 entry: (a) intended-block count = 0 measured, (b) collateral flip count = 8, (c) sensitivity comparison FLOOR=0.80 vs 0.90. For future [change:spec], make the 3-item pre-record mandatory as a supplement to CLAUDE.md change-management step 2.",
+      "impact_scope": "Meta-quality (discipline adherence) only. No production damage.",
+      "regression_of": null,
+      "post_fix_defect": true
+    },
+    {
+      "id": "QA-405",
+      "severity": "medium",
+      "area": "wfa",
+      "title": "QA-302 (oos_is_pf_ratio fallback) still deferred, allowing double-penalise path when combined with QA-301",
+      "description": "AUDIT-2026-0529-001 QA-302 (oos_is_pf_ratio fallback to full-period profit_factor when is_profit_factor_walks=None, which understates the ratio) is NOT fixed by 05ae8595. Combined behaviour under QA-301: in short-horizon H4 strategies where walks<10 forces is_profit_factor_walks=None, (a) QA-302 fallback yields oos_is_pf_ratio approx 0.4-0.5 -> Tier 2 OOS/IS normalised at approx 0.5, (b) WFA Efficiency also None (excluded) -> valid_weight below 0.90 -> FLOOR clamp applied, (c) soft_score is penalised twice. By design QA-301 (strict) and QA-302 (loose) are opposite-direction biases meant to offset; deferring QA-302 leaves the asymmetric state. The QA-301 commit message itself says QA-302 is opposite-direction bias and recalibration is required when combined but takes no action.",
+      "evidence": [
+        "atlas/backtest/result_parser.py:240-263 (_compute_oos_is_ratio fallback - unchanged)",
+        "atlas/backtest/runner.py:665-682 (QA-301 docstring explicitly cites QA-302 offset relationship)",
+        "docs/spec_change_log.md:24 (defers QA-302 recalibration as future task)",
+        "atlas/backtest/event_simulator.py:1589-1600 (walks<min_walks returns all-None)"
+      ],
+      "reproduction": "Generate a short-horizon BT (e.g. 2-year data x WFA OOS=6mo x IS=12mo x Step=1mo) producing walks<10 -> is_profit_factor_walks=None AND wfa_efficiency_ratio=None. With layer2.profit_factor=1.5, oos_profit_factor=0.6, fallback yields oos_is_pf_ratio=0.40 (true value via IS PF walks mean would be approx 0.60); WFA=None forces valid_weight=0.90 and FLOOR engages; soft_score is doubly depressed.",
+      "suggested_fix": "Pair QA-302 with QA-301 as [change:spec] 6.2.0 -> 6.3.0: in result_parser._compute_oos_is_ratio return None instead of falling back (let Tier 2 redistribute). Alternatively soften QA-301 FLOOR to 0.85 so QA-302 fallback understatement is offset. Leaving both deferred increases collateral damage on WFA+Drift None subset of the 8 flip strategies.",
+      "impact_scope": "Tier 2 soft_score OOS/IS Ratio component (weight 0.12). Pronounced for short-horizon H4 SHORT strategies, contradicting ATLAS_LOOP SHORT-reinforcement direction (memory/short_session_2026_0520).",
+      "regression_of": "QA-302 (AUDIT-2026-0529-001 deferred)",
+      "post_fix_defect": false
+    },
+    {
+      "id": "QA-406",
+      "severity": "low",
+      "area": "wfa",
+      "title": "WFA_MIN_WALKS=10 with DEFAULT_BACKTEST_YEARS=3 + WFA_OOS_MONTHS=6 structurally starves H4 strategies of walks",
+      "description": "defaults.py WFA config: IS_OOS_RATIO=2, OOS_MONTHS=6, STEP_MONTHS=1, MIN_WALKS=10, DEFAULT_BACKTEST_YEARS=3. Sliding IS=12mo + OOS=6mo over 3 years theoretically yields (36-12-6)/1+1 = 19 walks, but data gaps (weekends/holidays) and open-position rounding cause H4/D1 strategies to fall below 10 walks frequently. This is the root cause of the walks<10 -> all WFA metrics None path that QA-301 highlights. WFA_MIN_WALKS was tightened 6 -> 10 for statistical power but in turn enlarged the QA-301 / QA-302 / QA-405 vulnerability surface.",
+      "evidence": [
+        "atlas/config/defaults.py:311-316 (WFA config + MIN_WALKS=10 comment)",
+        "atlas/backtest/event_simulator.py:1589-1600 (walks<min_walks returns all-None)",
+        "measured: 218 of 422 SHORT strategies (52%) have wfa_efficiency_ratio=None"
+      ],
+      "reproduction": "/atlas-backtest a 3-year H4 strategy and inspect WFA walks - 5-12 range observed depending on hold duration and pauses. MIN_WALKS=10 threshold crossing is frequent.",
+      "suggested_fix": "(1) Branch MIN_WALKS=10 to a relaxed value for H4/D1 long-horizon strategies, OR (2) shorten WFA_OOS_MONTHS=6 to 3 to double walk count. Both are [change:spec] minor-bump. Dry-run audit, proposal only.",
+      "impact_scope": "Tier 2 soft_score WFA Efficiency (0.10) + Strategy Drift (0.08) + OOS/IS Ratio (0.12) = 0.30 weight structurally None for H4 strategies. Combined with QA-301 strictness, H4 Gate passage becomes structurally hard.",
+      "regression_of": null,
+      "post_fix_defect": false
+    },
+    {
+      "id": "QA-407",
+      "severity": "low",
+      "area": "scoring",
+      "title": "Tier 2 weights are LONG/SHORT-common with no fairness check despite asymmetric SHORT-rescue elsewhere",
+      "description": "atlas/config/defaults.py:205-213 GATE_TIER2_WEIGHT_* are direction_bias-independent (PF=0.18, MaxDD=0.15, Sharpe=0.15, OOS_IS=0.12, Drift=0.08, Top3=0.10, Sensitivity=0.12, WFA=0.10). However v5.5.0 introduced SHORT-only rescues elsewhere: Tier1 Secondary PF 0.6 for SHORT, L1/L2 drift warn 0.35 for SHORT, WFA_MIN_VALID_IS_SHARPE 0.5 -> 0.3 for all. Keeping Tier 2 weights non-asymmetric means SHORT strategies that unavoidably have WFA/Drift/OOS=None (measured 218/422 = 52% have WFA=None) accumulate Tier 2 penalty. QA-301 FLOOR=0.90 partially contradicts the SHORT-rescue programme.",
+      "evidence": [
+        "atlas/config/defaults.py:205-213 (Tier 2 weights direction-independent)",
+        "atlas/config/defaults.py:191-193 (Tier1 Secondary PF 0.6 for SHORT)",
+        "atlas/config/defaults.py:166-167 (L1/L2 drift 0.35 warn threshold for SHORT)",
+        "atlas/config/defaults.py:316 (WFA_MIN_VALID_IS_SHARPE relaxed to 0.3)",
+        "measured: 218/422 SHORT strategies (52%) have wfa_efficiency_ratio=None",
+        "measured: 308 PASS strategies contain very few short_only (consistent with memory/project_short_strategy_deficit)"
+      ],
+      "reproduction": "Recompute soft_score with GATE_TIER2_WEIGHT_WFA_EFFICIENCY 0.10 -> 0.05 (redistribute to others) for SHORT only -> SHORT PASS count increases. Implementation requires [change:spec].",
+      "suggested_fix": "(1) Short-term: keep Tier 2 weights, branch QA-301 FLOOR 0.90 -> 0.85 for SHORT only. (2) Long-term: make GATE_TIER2_WEIGHT_* a direction-keyed dict and recalibrate so SHORT is not structurally disadvantaged when WFA is unavailable. Both require [change:spec] + golden updates; dry-run proposal only.",
+      "impact_scope": "Strategy generation fairness (LONG vs SHORT). One of the root structural causes feeding memory/project_short_strategy_deficit.md (SHORT strategy deficit).",
+      "regression_of": null,
+      "post_fix_defect": false
+    },
+    {
+      "id": "QA-408",
+      "severity": "low",
+      "area": "scoring",
+      "title": "Layer1 scorer.py required_metrics omits oos_is_pf_ratio while Tier 2 weights it at 0.12",
+      "description": "atlas/analyzer/scorer.py:118-128 required_metrics = wfa_efficiency_ratio / strategy_drift / param_sensitivity_score / consistency_score / sharpe_ratio / profit_factor / max_drawdown_pct (7 items). oos_is_pf_ratio (Tier 2 weight 0.12) is not required. So WFA=None forces evaluable=False (final_score clamped to 0.5) but oos_is_pf_ratio=None alone (e.g. oos_profit_factor=None) leaves evaluable=True with full-range final_score. Combined with QA-302 fallback (is_profit_factor_walks=None -> full-period PF), oos_is_pf_ratio is non-None but understated, so evaluable=True while Tier 2 OOS/IS contribution drops. final_score (Layer1) and Tier 2 soft_score do not fully align.",
+      "evidence": [
+        "atlas/analyzer/scorer.py:118-128 (required_metrics has no oos_is_pf_ratio)",
+        "atlas/backtest/runner.py:973-980 (Tier 2 OOS/IS Ratio with weight 0.12)",
+        "atlas/backtest/result_parser.py:240-263 (oos_is_pf_ratio fallback)"
+      ],
+      "reproduction": "Synthesise a strategy with oos_profit_factor=None AND wfa_efficiency_ratio=1.0 / strategy_drift=0.1 / other required metrics populated -> scorer.compute_score returns evaluable=True (full final_score) while check_backtest_gate Tier 2 OOS/IS contribution=0 -> internal inconsistency.",
+      "suggested_fix": "Add oos_is_pf_ratio to required_metrics OR redistribute the 0.12 Tier 2 OOS/IS weight. Requires [change:spec] and full-strategy final_score recompute.",
+      "impact_scope": "Inconsistency between atlas-loop convergence (final_score comparison) and Tier 2 Gate. No Live impact.",
+      "regression_of": null,
+      "post_fix_defect": false
+    }
+  ]
+}

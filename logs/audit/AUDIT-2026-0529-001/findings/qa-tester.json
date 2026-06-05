@@ -1,0 +1,270 @@
+{
+  "agent": "qa-tester",
+  "scope": "FTS テスト基盤",
+  "audit_date": "2026-05-29",
+  "commit": "2803be5",
+  "findings": [
+    {
+      "id": "QT-301",
+      "severity": "high",
+      "area": "mocking",
+      "title": "_maybe_reconcile_live_positions テストが _reconcile_live_positions を AsyncMock で全差替え — 照合ロジック本体が未検証",
+      "description": "test_maybe_reconcile_skips_within_interval / test_maybe_reconcile_runs_after_interval / test_maybe_reconcile_runs_when_never_reconciled の 3 テストは runner._reconcile_live_positions = AsyncMock() で本体を完全に差し替え、周期ゲート判定 (_maybe_reconcile_live_positions) のみを検証している。これは RE-201 と同型の AsyncMock 過剰差替えパターンであり、_reconcile_live_positions の exposure 減算・アラート発出・stale 回収トリガが周期ゲートを通じて呼ばれるかは完全未検証。将来 _reconcile_live_positions の呼び出しシグネチャが変わっても型エラーすら出ない。",
+      "evidence": [
+        "tests/unit/test_runner_periodic_reconcile.py:339",
+        "tests/unit/test_runner_periodic_reconcile.py:354",
+        "tests/unit/test_runner_periodic_reconcile.py:371"
+      ],
+      "reproduction": "runner._reconcile_live_positions を呼ばずに実装を変更（例: 引数を追加）してもこれら 3 テストは緑のまま通過する",
+      "suggested_fix": "周期ゲートの integration テストでは AsyncMock で差し替えず、実際の _reconcile_live_positions を呼ぶ。乖離シナリオを含む broker モックを用意し、_maybe_reconcile → _reconcile → アラート発出の E2E を 1 本追加する",
+      "test_blind_spot": "周期ゲートを通じた exposure 減算パスの退行、_reconcile_live_positions シグネチャ変更による TypeError",
+      "regression_of": null
+    },
+    {
+      "id": "QT-302",
+      "severity": "high",
+      "area": "mocking",
+      "title": "ExecutionCoordinator を None 引数で構築するテストが本番経路を踏まない",
+      "description": "test_coordinator_unrealized_pnl.py の _make_coordinator は event_bus=None, ptrc=None, order_manager=None, broker_gateway=None で ExecutionCoordinator を構築する。_update_unrealized_pnl() 単体は検証できるが、Coordinator の on_bar / on_signal イベントハンドラ経由での unrealized PnL 更新経路は完全未検証。INC で発覚した daily_unrealized_pnl = 0 のバグ修正 (RE-R3-002) の回帰防止テストとして機能するが、実際の Bar 受信ループ → price 更新 → unrealized 計算の配線は別途不在。",
+      "evidence": [
+        "tests/unit/test_coordinator_unrealized_pnl.py:22-35"
+      ],
+      "reproduction": "Coordinator._on_bar() が _update_unrealized_pnl() を呼ぶコードを削除してもこれらのテストは全て緑のまま",
+      "suggested_fix": "integration テストで InMemoryEventBus に TickEvent を publish し、_last_prices が更新されて daily_unrealized_pnl に反映される end-to-end を 1 本追加する",
+      "test_blind_spot": "_on_bar から _update_unrealized_pnl への呼び出し削除・タイミング問題",
+      "regression_of": null
+    },
+    {
+      "id": "QT-303",
+      "severity": "high",
+      "area": "parity",
+      "title": "Parity テストのウォームアップ期間 (start_bar=50) が同一データ投入の対称性で偽緑化する恐れ",
+      "description": "test_feature_store_parity.py の _compare_features は start_bar=50 からしか比較しない。ATLAS _SimpleFeatureStore は全バー事前計算 (adjust=False で先頭から伝播) し、Live FeatureStore は逐次投入する。両側に完全に同一の numpy seed 固定データを渡すため、Live 側の EWM 初期値ドリフトがウォームアップ後に収束していれば start_bar=50 では差が出ない。しかし実際の本番環境では Live FeatureStore が途中起動・バッファ不足でドリフトする可能性があり、この構造上の非対称性をテストが検出できない。test_feature_store_parity_buffer_trim.py が小バッファで補完しているが、start_bar=200 の比較開始点で同様の問題がある。",
+      "evidence": [
+        "tests/parity/test_feature_store_parity.py:68-70",
+        "tests/parity/test_feature_store_parity_buffer_trim.py:33"
+      ],
+      "reproduction": "Live FeatureStore が途中から起動する（先頭 100 バーを欠く）シナリオで start_bar より後ろだけを比較すると、ドリフトが start_bar 以前に収束しているため偽緑になる",
+      "suggested_fix": "「Live FeatureStore を N バー目から起動し、残りバーで比較する」asymmetric warmup テストを追加する。ATLAS 側は全バー投入、Live 側は先頭 100 バーを欠いた状態で開始させ、差が許容誤差内に収まることを確認する",
+      "test_blind_spot": "途中起動時の EWM 初期値ドリフト（本番再起動シナリオ）",
+      "regression_of": null
+    },
+    {
+      "id": "QT-304",
+      "severity": "medium",
+      "area": "mocking",
+      "title": "test_full_signal_to_fill_flow がシグナル未発火時に fills_completed==0 で空振りしても偽緑",
+      "description": "test_signal_flow.py の test_full_signal_to_fill_flow は最後に fills_completed > 0 のときのみ positions の assert を行う。戦略が 500 本で一度もシグナルを出さない場合、assert が全てスキップされ緑で通過する。コメントにも「シグナルが出ない場合もあり得るので」と書かれており意図的だが、これはテスト価値を著しく低下させる。conftest.py の sample_ohlcv_df が seed=42 の合成データで特定戦略に発火を保証しない点が根本原因。",
+      "evidence": [
+        "tests/integration/test_signal_flow.py:286-292"
+      ],
+      "reproduction": "atlas_strategy_001 が 500 バーで全く LONG/SHORT シグナルを出さない戦略に差し替わると、このテストは assert を全スキップして緑で終わる",
+      "suggested_fix": "bar_event_factory の設計ルールに従い、戦略の expected_direction を持つ StrategyScenario ベースのデータを使う。または fills_completed == 0 の場合 pytest.skip ではなく pytest.fail(「E2E フロー実行機会ゼロ: signal 未発火」) にする",
+      "test_blind_spot": "シグナル生成→PTRC→Fill の E2E フロー（戦略が発火しなければ何も検証されない）",
+      "regression_of": null
+    },
+    {
+      "id": "QT-305",
+      "severity": "medium",
+      "area": "injection",
+      "title": "PostgreSQL/StateStore 障害注入テストが InMemoryBackend のみでPG 本番経路を未カバー",
+      "description": "tests/fault/test_redis_disconnect.py は InMemoryBackend ベースの FaultRedisBackend を使い Redis 接続断を模倣しているが、PostgreSQL バックエンド (postgres_store.py) の接続断シナリオは fault/ 配下に存在しない。StateStore が PostgreSQL に切り替わった際の connection pool 枯渇・タイムアウト・デッドロックは未検証。また FaultRedisBackend が InMemoryBackend の上に乗っているため、「切断中にも data が_inner に保持される」という本番 Redis 非互換な挙動でテストしている点も乖離。",
+      "evidence": [
+        "tests/fault/conftest.py:89-130",
+        "tests/fault/test_redis_disconnect.py:79-102"
+      ],
+      "reproduction": "本番 Redis で接続断が起きた場合、InMemoryBackend と異なり切断前のデータは揮発する。test_reconnect_restores_operations は切断後 connected=True で InMemoryBackend からデータを読み返し成功するが、実 Redis では切断前に保存したデータが TTL 次第では消える",
+      "suggested_fix": "fakeredis や asyncmock で実際の redis.asyncio.Redis インターフェースを差し替えた接続断テストを追加。PostgreSQL 接続断は asyncpg.exceptions.ConnectionDoesNotExistError をモックした StateStore の結合テストを追加する",
+      "test_blind_spot": "Redis 揮発後の State 復旧不能、PostgreSQL 切断時の StateStore 例外伝搬",
+      "regression_of": null
+    },
+    {
+      "id": "QT-306",
+      "severity": "medium",
+      "area": "regression",
+      "title": "INC-2026-0526-001 (fan-out) 回帰防止テストが runner._restore_all_positions() を直接呼ばず偽緑リスク",
+      "description": "test_restore_positions_multi_slot.py は runner._restore_all_positions() の呼び出しとその結果を検証するが、コード内コメント（「将来のリファクタでループが分割されると単体テストは緑のまま fan-out が再発し得る」）が示す通り、内部ループが別メソッドに抽出されても claimed_trade_ids の共有ロジックが正しく機能するかをテストが保証できない構造的限界がある。また、runner 本体の initialize() 内にインライン埋め込みされているとのことで、_restore_all_positions を直接テストする手段が内部メソッド呼び出しに依存している。",
+      "evidence": [
+        "tests/integration/test_restore_positions_multi_slot.py:9-16"
+      ],
+      "reproduction": "runner.initialize() をリファクタして restore ループを別クラスに移動すると、test_restore_positions_multi_slot.py が参照する _restore_all_positions が消えてテストが収集できなくなる（AttributeError で fail するか、テストが消える）",
+      "suggested_fix": "runner.initialize() を E2E で呼び出し（broker.get_open_trades を AsyncMock で制御）、結果として slot.state.open_trade_id が 1 スロットのみに設定されることを検証するテストを integration/ に追加する",
+      "test_blind_spot": "リファクタ後の fan-out バグ再発（6 日間 Live 注文ゼロと同型）",
+      "regression_of": null
+    },
+    {
+      "id": "QT-307",
+      "severity": "medium",
+      "area": "ci",
+      "title": "parity.yml が unit テストと同一ジョブで --maxfail=10 を使用しており、parity 失敗が unit の結果に影響する",
+      "description": "parity.yml の最終ステップ「Run unit tests」は parity/ を --ignore したうえで tests/ 全体を --maxfail=10 で走らせる。これは parity ジョブと unit ジョブが混在しており、parity テスト自体は別ステップ（pytest tests/parity/）で走るが、unit ステップのログには parity 系テストの collect エラーが混入する可能性がある。また unit テストと parity テストで依存 (timeout=300) の扱いが異なるため、unit ステップで parity ファイルが --ignore されても tests/ 配下の conftest 読み込みで parity の import が走る構造になっている。",
+      "evidence": [
+        ".github/workflows/parity.yml:89"
+      ],
+      "reproduction": "parity/ の conftest.py が atlas をインポートするため、unit ステップの pytest 起動時に atlas が未インストールだと conftest.py の import エラーで全 unit テストが収集失敗する潜在リスクがある（現状は同一ジョブで atlas を先にインストールしているため顕在化していない）",
+      "suggested_fix": "unit テストと parity テストを完全に別ジョブ（separate workflow）に分割する。または parity conftest を parity/ の中だけに閉じ込め、unit ステップの --ignore=tests/parity が確実に機能するようにする",
+      "test_blind_spot": "atlas インストール漏れ時の unit テスト全収集失敗がサイレントになるリスク",
+      "regression_of": null
+    },
+    {
+      "id": "QT-308",
+      "severity": "medium",
+      "area": "fixture",
+      "title": "sample_ohlcv_df が DatetimeIndex を持たず、Asia Breakout 戦略の hour 判定テストでサイレント非発火",
+      "description": "conftest.py の sample_ohlcv_df は timestamp 列なしの DataFrame を返す。test_xfail_scenario_signals.py の _run_strategy_over_scenario では bar.name = ts として Asia breakout 戦略に timestamp を渡しているが、sample_ohlcv_df を使う test_signal_flow.py:test_signal_generation_with_data では bar = row[['open','high','low','close','volume']] のみで timestamp を渡していない。Asia session 判定 (bar.name.hour) を行う戦略が実際は発火しないまま signals_generated のカウントが正しいように見える偽緑になる可能性がある。",
+      "evidence": [
+        "tests/conftest.py:214-250",
+        "tests/integration/test_signal_flow.py:79-81",
+        "tests/integration/test_xfail_scenario_signals.py:101-102"
+      ],
+      "reproduction": "atlas_strategy_001 が Asia time フィルタを持つ戦略の場合、timestamp がない sample_ohlcv_df では bar.name.hour が AttributeError または NaT になり、戦略が全てシグナルを出さず signals_generated==0 でもテストは通過する",
+      "suggested_fix": "sample_ohlcv_df に DatetimeIndex（UTC）を追加する。または bar_event_factory 経由で必ず bar_time を含む BarEvent を使いシグナル生成ループを組み立てるよう test_signal_flow.py を改修する",
+      "test_blind_spot": "Session フィルタ付き戦略のシグナル非発火（テストが空振りしても緑）",
+      "regression_of": null
+    },
+    {
+      "id": "QT-309",
+      "severity": "medium",
+      "area": "parity",
+      "title": "parity/conftest.py の PARITY_COVERED_INDICATORS は ATF 実装との手動同期が必要で乖離リスクがある",
+      "description": "PARITY_COVERED_INDICATORS は frozenset のハードコードリストで管理されており、test_no_uncovered_builtin_indicators でメタテストを行っている。しかし ATLAS 側で indicator 名が rename された場合（例: 'macd_histogram' → 'macd_hist'）、parity/conftest.py を手動更新するまでメタテストは False Positive（実は差異があるのにカバー済みと誤判定）となる。また、PARITY_COVERED_INDICATORS に含まれるが実際に対応するテスト関数が削除された場合は検出できない（片方向のみのチェック）。",
+      "evidence": [
+        "tests/parity/conftest.py:29-49",
+        "tests/parity/test_feature_store_parity.py:300-316"
+      ],
+      "reproduction": "tests/parity/test_feature_store_parity.py から test_rsi_parity を削除しても PARITY_COVERED_INDICATORS に 'rsi' が残る限り test_no_uncovered_builtin_indicators は緑のままになる",
+      "suggested_fix": "PARITY_COVERED_INDICATORS を静的 frozenset ではなく、実際のテスト関数が register している indicator 名を動的収集する仕組みに置き換える。またはメタテストを双方向（ATLAS → covered かつ covered → テスト存在）に拡張する",
+      "test_blind_spot": "indicator 名変更・テスト削除後の Parity カバレッジ欠落がサイレントになる",
+      "regression_of": null
+    },
+    {
+      "id": "QT-310",
+      "severity": "medium",
+      "area": "injection",
+      "title": "Kill Switch 発動時のディスクへの audit log 書き込み失敗（ディスクフル）シナリオが未テスト",
+      "description": "tests/fault/ 配下には OANDA タイムアウト・Redis 切断・部分約定・週末ギャップ・バックフィル失敗・KS 発動（gap）・再接続サイクルが揃っているが、Kill Switch 発動時に audit log の write が失敗するシナリオ（ディスクフル・パーミッションエラー）は未テスト。audit log への書き込みに OSError が発生した場合に KS 発動フローが止まらないこと・例外が握りつぶされないことは検証されていない。KS 発動は最重要安全経路であり、ここのログ失敗で処理が停止するとポジションが放置される可能性がある。",
+      "evidence": [
+        "tests/fault/test_gap_kill_switch.py",
+        "tests/unit/test_dm001_ks_audit_log.py"
+      ],
+      "reproduction": "KS 発動時の audit_log.log() をモックして OSError を raise させ、KS._activate() が例外を握りつぶして処理継続するかを確認するテストが存在しない",
+      "suggested_fix": "fault/ に test_kill_switch_disk_full.py を追加。audit_log の write メソッドを OSError に差し替えた状態で KS を発動させ、KS._active == True になることと、例外が適切にログ記録されることを検証する",
+      "test_blind_spot": "ディスクフル時の Kill Switch 機能喪失（ポジション放置リスク）",
+      "regression_of": null
+    },
+    {
+      "id": "QT-311",
+      "severity": "medium",
+      "area": "mocking",
+      "title": "test_platform_e2e_smoke.py の Prometheus レジストリリセットが autouse fixture と二重適用になっている",
+      "description": "test_platform_e2e_smoke.py は autouse=True の _reset_prometheus_registry fixture を独自定義しており、これは conftest.py の autouse=True の _cleanup_global_prometheus_registry と二重に動く。conftest.py の fixture は _collector_to_names を参照するのに対し、smoke テスト内 fixture は _names_to_collectors を参照しており、prometheus_client の内部 API に対して 2 種類の異なるアプローチでクリーンアップを行う。将来の prometheus_client バージョン変更で片方が壊れても他方が補完するが、どちらかが誤動作した場合のデバッグが困難になる。",
+      "evidence": [
+        "tests/integration/test_platform_e2e_smoke.py:18-28",
+        "tests/conftest.py:87-127"
+      ],
+      "reproduction": "test_platform_e2e_smoke.py の fixture を削除し、conftest.py の autouse fixture のみに委ねれば同等の隔離が得られる",
+      "suggested_fix": "test_platform_e2e_smoke.py の _reset_prometheus_registry fixture を削除し、conftest.py の _cleanup_global_prometheus_registry に統一する。内部 API の参照先も統一する",
+      "test_blind_spot": "Prometheus クリーンアップの二重適用による order-dependent な副作用（特に prometheus_client upgrade 時）",
+      "regression_of": null
+    },
+    {
+      "id": "QT-312",
+      "severity": "medium",
+      "area": "fixture",
+      "title": "test_restore_positions_multi_slot.py が autouse fixture で Prometheus レジストリをリセットするが、conftest の autouse fixture と競合",
+      "description": "test_restore_positions_multi_slot.py も独自の autouse=True _reset_prometheus_registry を定義（QT-311 と同型）。こちらは REGISTRY._names_to_collectors を参照している。QT-311 と同じ二重クリーンアップ問題に加え、複数 runner を生成する integration テストで conftest 側の fx_* purge と組み合わさると、purge 順序によって他テストの Collector が巻き込まれる可能性がある。",
+      "evidence": [
+        "tests/integration/test_restore_positions_multi_slot.py:41-56"
+      ],
+      "reproduction": "conftest.py の _cleanup_global_prometheus_registry が fixture scope=function で動作しているため、test_restore_positions_multi_slot.py の teardown タイミングと競合する",
+      "suggested_fix": "test_restore_positions_multi_slot.py の独自 fixture を削除し conftest.py に統一",
+      "test_blind_spot": "Prometheus state contamination による他テストへの副作用",
+      "regression_of": null
+    },
+    {
+      "id": "QT-313",
+      "severity": "low",
+      "area": "injection",
+      "title": "FaultOANDAClient が get_open_trades / get_candles / get_trade を実装しておらず、本番 OANDA クライアントの全インターフェースをカバーしていない",
+      "description": "fault/conftest.py の FaultOANDAClient は submit_order / cancel_order / get_account_info / close のみ実装。本番 OANDABroker が持つ get_open_trades / get_candles / get_trade / close_trade 等は未実装のため、これらを呼ぶ障害シナリオ（例: reconcile ループ中の get_open_trades タイムアウト）を FaultOANDAClient で注入できない。現状の reconcile 障害テストは broker.get_open_trades = AsyncMock(side_effect=...) で個別にモックしており一貫性がない。",
+      "evidence": [
+        "tests/fault/conftest.py:66-85"
+      ],
+      "reproduction": "FaultOANDAClient を使って get_open_trades 障害を注入しようとしても AttributeError になる",
+      "suggested_fix": "FaultOANDAClient に get_open_trades / get_candles / get_trade を追加し、raise_on_method: dict[str, type[Exception]] パラメータでメソッドごとに障害を注入できるように拡張する",
+      "test_blind_spot": "reconcile / backfill / trade 照合経路の OANDA API 障害シナリオ",
+      "regression_of": null
+    },
+    {
+      "id": "QT-314",
+      "severity": "low",
+      "area": "skip",
+      "title": "STRICT_SKIP=1 が pytest_terminal_summary で exit code を 2 にするが、pytest_sessionfinish の session.exitstatus 書き換えが pytest バージョン依存",
+      "description": "conftest.py の pytest_sessionfinish は session.exitstatus = 2 を直接代入している。pytest の公式 API では exitstatus は read-only ではないが、将来バージョンで変更される可能性がある。また、config.__dict__['_strict_skip_failed'] = True というプライベート辞書への直接書き込みも非公式 API であり、pytest upgrade で壊れる可能性がある。現状の機能は正しく動作しているが脆弱性がある。",
+      "evidence": [
+        "tests/conftest.py:407-412",
+        "tests/conftest.py:415-418"
+      ],
+      "reproduction": "pytest の将来バージョンで _strict_skip_failed のプライベート辞書アクセスが禁止されると STRICT_SKIP=1 の enforcement が無音で壊れる",
+      "suggested_fix": "pytest_sessionfinish ではなく pytest plugin の公式フック (pytest_report_collectionfinish + sys.exit) を使うか、STRICT_SKIP 違反を pytest.fail() で明示的に失敗させる方法に変更する",
+      "test_blind_spot": "pytest upgrade 後の STRICT_SKIP 強制の無効化（偽緑防護の喪失）",
+      "regression_of": null
+    },
+    {
+      "id": "QT-315",
+      "severity": "low",
+      "area": "parity",
+      "title": "MTF Parity テストが M15×H1×H4 の組み合わせのみで M5×H1 等の実戦 TF 組合せを未検証",
+      "description": "test_feature_store_parity_mtf.py と test_mtf_lookahead_red_team.py は M15 を primary TF として H1 / H4 の補助 TF を検証している。本番では M5 primary × H1/H4 補助の戦略も存在する可能性があり、resample の label/closed 設定が M5 基準で正しいかは未検証。また、test_dual_tf_simultaneous は H1 と H4 を同時使用するが、H1 バーと H4 バーのタイムスタンプ境界が M15 境界と完全に合致するという前提で作られており、M5 primary の場合の 12 本/H1 境界での ffill 動作は未テスト。",
+      "evidence": [
+        "tests/parity/test_feature_store_parity_mtf.py:36-89"
+      ],
+      "reproduction": "M5 primary で H1 auxiliary を使う戦略を Live で動かした場合、M15 基準でのみ検証した Parity テストでは誤計算を検出できない",
+      "suggested_fix": "M5 × 4800 本 (= 1×H1 = 400 本) の fixture を追加し、H1 ffill・look-ahead 防止を M5 primary 基準でも検証するテストを test_feature_store_parity_mtf.py に追加する",
+      "test_blind_spot": "M5 primary 戦略の MTF 計算誤差",
+      "regression_of": null
+    },
+    {
+      "id": "QT-316",
+      "severity": "low",
+      "area": "regression",
+      "title": "test_partial_fill.py の test_fill_rejection_leaves_position_unchanged が実際に約定拒否をシミュレートしていない",
+      "description": "test_partial_fill.py:test_fill_rejection_leaves_position_unchanged は「約定拒否時にポジションが変化しないこと」を検証するとしているが、実際には FillProcessor.process_fill() を呼ばず、「ポジションが存在しないことの確認」で終わっている。約定拒否（broker.submit() が success=False を返した後のコードパス）が FillProcessor に誤って到達した場合のバグを検出できない。",
+      "evidence": [
+        "tests/fault/test_partial_fill.py:102-118"
+      ],
+      "reproduction": "BrokerGateway が success=False の BrokerFillResult を返した後に誤って fill_processor.process_fill() を呼ぶバグを入れても、このテストは緑のまま",
+      "suggested_fix": "BrokerGateway.submit() が success=False を返すシナリオで実際に上流コード（ExecutionCoordinator または StrategySlot）の約定後処理を通し、FillProcessor のポジションが変化しないことを検証するテストに置き換える",
+      "test_blind_spot": "約定失敗時の誤 fill 処理（ポジション二重計上）",
+      "regression_of": null
+    },
+    {
+      "id": "QT-317",
+      "severity": "low",
+      "area": "ci",
+      "title": "parity.yml に dependabot 設定はあるが unit テスト workflow が存在せず、unit テストの CI ゲートが parity.yml に混在している",
+      "description": "parity.yml の最終ステップで unit テストも実行されており、CI 上で parity と unit が同一ジョブで動く。これにより parity テストのタイムアウト（timeout=300 が設定されている）が unit テストの完了を遅らせ、ジョブ全体の timeout-minutes=20 に圧迫される。また、unit テスト単独の失敗と parity 失敗が同一ジョブログに混在するため、原因特定が困難になる。",
+      "evidence": [
+        ".github/workflows/parity.yml:19-89"
+      ],
+      "reproduction": "parity テストが全て通過しているのに unit テストの1件が失敗した場合、ジョブ名が 'Parity & Contract tests' のため担当者が parity バグと誤解する",
+      "suggested_fix": "unit/.github/workflows/unit.yml を別途作成し、parity.yml と unit.yml を独立したジョブとして分離する。または matrix strategy で parallel 実行する",
+      "test_blind_spot": "parity 失敗と unit 失敗の混在による原因特定遅延",
+      "regression_of": null
+    },
+    {
+      "id": "QT-318",
+      "severity": "low",
+      "area": "fixture",
+      "title": "make_sample_ohlcv の volatility デフォルト値が JPY と非 JPY で pip スケールに基づいているが、本番実データとの乖離が大きい",
+      "description": "conftest.py の make_sample_ohlcv は JPY ペアに volatility=0.003（約 30pips/bar）、非 JPY に volatility=0.0003（約 3pips/bar）を適用する。H1 バーとして 30pips の std は過小（実際の USD/JPY H1 は 50-100pips 程度）、非 JPY の 3pips も過小（EUR/USD H1 は通常 10-30pips）。結果として PTRC の Fat Finger チェックや exposure 計算で本番と乖離したスケールのデータが使われ、テストでは通過するが本番では拒否されるシナリオが発生しうる。",
+      "evidence": [
+        "tests/conftest.py:294-296"
+      ],
+      "reproduction": "非 JPY ペアで volatility=0.0003 の合成データは ATR が 3pips 程度になり、実際の EUR/USD の ATR (20-30pips) と大きく乖離する。ATR ベースの SL 計算テストでは本番の ATR 水準での検証ができない",
+      "suggested_fix": "H1 基準の現実的な volatility（JPY: 0.006-0.008、非 JPY: 0.001-0.002）にデフォルト値を調整するか、用途（H1/H4/M15）を引数で指定できるようにする",
+      "test_blind_spot": "本番 ATR 水準での PTRC Fat Finger / Stop Loss 計算の誤差",
+      "regression_of": null
+    }
+  ]
+}

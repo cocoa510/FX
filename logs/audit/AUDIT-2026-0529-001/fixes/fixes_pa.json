@@ -1,0 +1,145 @@
+{
+  "agent": "platform-architect",
+  "audit_id": "AUDIT-2026-0529-001",
+  "phase": "3-4",
+  "summary": "PA-301 / PA-303 / PA-306 / RE-305 / RE-306 の medium 5件を実コード修正 + 回帰テスト追加 (コミットは作成していない)",
+  "fixes": [
+    {
+      "id": "PA-301",
+      "severity": "medium",
+      "title": "OrderSubmissionGuard の MetricsCollector 注入漏れ",
+      "files_modified": [
+        "trading_platform/main.py",
+        "trading_platform/core/unified_runner/runner.py"
+      ],
+      "changes": {
+        "trading_platform/main.py": "set_metrics_collector 注入ループ (旧 7 モジュール) に order_submission_guard を _osg_mod として追加 (8 モジュール)。PA-301 注記コメントを追加し、Snapshot 永続化失敗時の fx_snapshot_persistence_failures カウンタが本番でも加算されるようにした。",
+        "trading_platform/core/unified_runner/runner.py": "main.py と同型の修正。set_metrics_collector ループに _osg_mod を追加し、main.py / runner.py 両経路で配線同型を維持。"
+      },
+      "tests_added": [
+        "tests/unit/test_pa301_osg_metrics_injection.py (6 tests)"
+      ],
+      "test_coverage": [
+        "main.py / runner.py 両方の import 検証",
+        "set_metrics_collector for ループに _osg_mod が含まれる AST 検証",
+        "order_submission_guard モジュール global _metrics が set_metrics_collector で更新されること",
+        "PA-301 注記コメントが残ること (将来の再削除防止)"
+      ],
+      "status": "fixed"
+    },
+    {
+      "id": "PA-303",
+      "severity": "medium",
+      "title": "main.py LIVE 経路で StrategyLoadError が握りつぶされ live_strategy_rejected_by_gate イベントが発火しない",
+      "files_modified": [
+        "trading_platform/main.py"
+      ],
+      "changes": {
+        "trading_platform/main.py": "load_all_strategies 一括呼び出しを discover_strategies + load_strategy 個別ループに置き換え、runner.py:533-578 と同型の LIVE Gate 拒否ハンドリング (live_strategy_rejected_by_gate Audit Log + Event Bus publish) を追加。actor は 'main_platform' で runner.py の 'unified_runner' と区別。PLATFORM_ALLOW_MAIN_PRODUCTION_LIVE escape hatch 通過時の dead-path を埋める。"
+      },
+      "tests_added": [
+        "tests/unit/test_pa303_main_live_gate_rejection.py (6 tests)"
+      ],
+      "test_coverage": [
+        "main.py に live_strategy_rejected_by_gate ハンドリングが存在する",
+        "AuditEntry/RiskAlertEvent/AlertLevel/AuditCategory の import 検証",
+        "discover_strategies + load_strategy 個別ループ構造の検証",
+        "AST で同一関数内に 'live_strategy_rejected_by_gate' constant と .publish() の共存を検証",
+        "Audit Log と EventBus への発火パターンの実行検証 (mock ベース)"
+      ],
+      "status": "fixed"
+    },
+    {
+      "id": "PA-306",
+      "severity": "medium",
+      "title": "main.py StateStore が常に InMemoryBackend",
+      "files_modified": [
+        "trading_platform/main.py"
+      ],
+      "changes": {
+        "trading_platform/main.py": "StateStore() 引数なしのフォールバック依存を廃止し、PlatformSettings.state_backend ('memory' | 'redis') から InMemoryBackend を明示的に生成して渡す。'redis' は Stage B 未実装で fail-loud (既存)、'memory' は InMemoryBackend(backend=) を明示し WARN ログで ephemeral 状態を可視化、未知値は fail-loud。production+memory は settings._enforce_production_state_backend で起動拒否される経路を尊重 (修正対象外)。"
+      },
+      "tests_added": [
+        "tests/unit/test_pa306_state_store_backend_selection.py (5 tests)"
+      ],
+      "test_coverage": [
+        "main.py に InMemoryBackend import が存在する",
+        "AST で StateStore() 呼び出しが必ず backend= キーワード引数を持つこと",
+        "'memory' / 'redis' / unknown の 3 分岐が明示的に存在する",
+        "明示的 InMemoryBackend 注入での save/load round-trip が動作する",
+        "ephemeral 利用時の警告ログ可観測性"
+      ],
+      "regression_check": "既存の test_state_store_string_storage.py / test_state_store_account_risk_persistence.py を実行 (7 passed) — 既存挙動を破壊していない。",
+      "status": "fixed"
+    },
+    {
+      "id": "RE-305",
+      "severity": "medium",
+      "title": "_consecutive_poll_errors >= 5 で WARNING のみ shutdown/KS なし",
+      "files_modified": [
+        "trading_platform/core/unified_runner/runner.py"
+      ],
+      "changes": {
+        "trading_platform/core/unified_runner/runner.py": "account_info 取得失敗の except ブロックに、_consecutive_poll_errors >= 30 かつ 30 の倍数で live_orders_silent RiskAlertEvent を発出するロジックを追加。既存の RE-MISSED-302 (5 回時の oanda_connection_degraded 一度送信) は維持し、長期化時の昇格通知として 30 回 (約 30 分相当) を境界に繰り返し発火する。DE-303 の修正と同じ live_orders_silent alert_type を共有 (アラートレベル WARNING は既存)。"
+      },
+      "tests_added": [
+        "tests/unit/test_re305_poll_errors_alert.py (5 tests)"
+      ],
+      "test_coverage": [
+        "30 回連続失敗 (境界値) で live_orders_silent が発火",
+        "29 回 (境界 below) では発火しない",
+        "60 回 (30 の倍数) で再発火 (継続通知)",
+        "31 回 (30 の倍数でない) では発火しない (重複発火回避)",
+        "成功時に _consecutive_poll_errors と _account_info_degraded_alert_sent がリセットされる"
+      ],
+      "status": "fixed"
+    },
+    {
+      "id": "RE-306",
+      "severity": "medium",
+      "title": "_maybe_reconcile_live_positions の last_position_reconcile_at 更新タイミング",
+      "files_modified": [
+        "trading_platform/core/unified_runner/runner.py"
+      ],
+      "changes": {
+        "trading_platform/core/unified_runner/runner.py": "_reconcile_live_positions の戻り値を None → bool に変更 (True=成功 / False=get_open_trades 失敗 / 照合不要 broker None / Live スロットなし は True 扱い)。_maybe_reconcile_live_positions は呼出前更新を廃止し、succeeded = await ... の戻り値で判定して成功時のみ _last_position_reconcile_at = now する。これにより一時的な OANDA 接続エラーで照合が INTERVAL (約 1 時間) スキップされる死角を埋める。"
+      },
+      "tests_added": [
+        "tests/unit/test_re306_reconcile_failure_retry.py (7 tests)"
+      ],
+      "test_coverage": [
+        "_reconcile_live_positions が成功時 True / 失敗時 False / broker None で True / no live slots で True を返す",
+        "_maybe_reconcile_live_positions が失敗時に _last_position_reconcile_at を更新しない",
+        "_maybe_reconcile_live_positions が成功時に _last_position_reconcile_at を更新する",
+        "失敗 → 成功シーケンスで時刻が進み (再試行が即時に走り) broker が 2 回呼ばれる"
+      ],
+      "regression_check": "既存の test_runner_periodic_reconcile.py 13 tests を実行 (全 pass) — AsyncMock の truthy デフォルト戻り値により _maybe_reconcile_live_positions の既存テストは透過的に動作。",
+      "status": "fixed"
+    }
+  ],
+  "files_modified_summary": [
+    "trading_platform/main.py (PA-301, PA-303, PA-306)",
+    "trading_platform/core/unified_runner/runner.py (PA-301, RE-305, RE-306)"
+  ],
+  "tests_added_summary": [
+    "tests/unit/test_pa301_osg_metrics_injection.py (6 tests)",
+    "tests/unit/test_pa303_main_live_gate_rejection.py (6 tests)",
+    "tests/unit/test_pa306_state_store_backend_selection.py (5 tests)",
+    "tests/unit/test_re305_poll_errors_alert.py (5 tests)",
+    "tests/unit/test_re306_reconcile_failure_retry.py (7 tests)"
+  ],
+  "test_results": {
+    "new_tests": "29 tests added — all passing",
+    "regression_check": "131 既存関連テスト (-k runner or main_p or state_store or osg or pa30 or pa10 or re30 or coordinator_state) all passing; 42 coordinator/order_submission tests all passing"
+  },
+  "out_of_scope": [
+    "PA-307 (main.py 廃止 ADR) — 設計判断が必要なため本セッション対象外。main.py vs runner.py の二重実装パターン解消は将来の宿題。"
+  ],
+  "commit_created": false,
+  "notes": [
+    "コミットは作成していない (指示通り)。",
+    "PA-303 の修正で main.py から load_all_strategies の呼び出しは削除したが、import は残存 (他箇所参照無し・互換性のため維持)。",
+    "RE-305 は既存 RE-MISSED-302 (5 回時 oanda_connection_degraded) と共存する設計。30 回到達の昇格通知として追加。",
+    "RE-306 で _reconcile_live_positions の戻り値型変更 (None → bool) は内部メソッドのため公開 API 影響なし。既存テストは AsyncMock の MagicMock 戻り値が truthy のため透過的に通過。"
+  ]
+}

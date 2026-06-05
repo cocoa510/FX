@@ -1,0 +1,232 @@
+{
+  "validator": "devil-advocate-A",
+  "scope": "ATLAS (CSR+QA)",
+  "audit_id": "AUDIT-2026-0529-001",
+  "validated_at": "2026-05-29",
+  "validations": [
+    {
+      "finding_id": "CSR-301",
+      "verdict": "downgraded",
+      "original_severity": "medium",
+      "adjusted_severity": "low",
+      "rationale": "sandbox_builtins.py:29 の __import__は確認済み。FORBIDDEN_BUILTINS に __import__ が明示列挙 (syntax_checker.py:53)。FORBIDDEN_MODULES で 24 モジュールを封鎖。CSR-101 で Name ノード経由の参照は遮断済み。finding の再現条件は AST をすり抜ける未知の Name 参照経路が発見された場合であり仮定的シナリオ。AUDIT-0525-002 で CSR-101 が critical に格上げされた既実証 RCE とは性質が異なる。現時点で既知の悪用経路は存在しない。severity=low が妥当。",
+      "evidence_check": "sandbox_builtins.py:29 を Read で確認 (一致)。syntax_checker.py:51-56 の FORBIDDEN_BUILTINS に __import__ が含まれることも確認 (一致)。コメント行 23-26 に禁止モジュールの import は上位レイヤの AST 静的解析で検出済みと明記。",
+      "reproduction_check": "不可能 (仮定的シナリオ: AST をすり抜ける Name 参照経路の具体的証明なし)",
+      "duplicate_of": null,
+      "additional_note": "adoption_level: should_consider"
+    },
+    {
+      "finding_id": "CSR-302",
+      "verdict": "downgraded",
+      "original_severity": "medium",
+      "adjusted_severity": "low",
+      "rationale": "main.py:141-144 の parent_id 結合コードは確認できた。ただし finding の影響範囲に誇張がある。行 142 で isinstance チェックにより None や空文字列は早期リターンされる (finding が言及していない保護)。実際の危険経路は攻撃者が metadata.json を直接書き換えられる環境に限定される。ATLAS はクローズドな開発ツールであり severity=low が妥当。",
+      "evidence_check": "main.py:134-155 を Read 確認。parent_id 結合は行 144 で一致。行 142 の str 型チェックは確認できた (finding は言及していない)。finding がサニタイズなしと述べるのは部分一致: 型チェックはあるが正規表現バリデーションはない。",
+      "reproduction_check": "再現可能: strategies/{gen_id}/metadata.json の parent_id を ../../../tmp/evil に設定すれば strategies/../../../tmp/evil/evaluation/weakness.json を読もうとする。ただし実際の悪用には metadata.json への書き込み権限が必要。",
+      "duplicate_of": null,
+      "additional_note": "正規表現バリデーションの追加は低コストで実施すべき。ただし severity=low に格下げ。adoption_level: should_consider"
+    },
+    {
+      "finding_id": "CSR-303",
+      "verdict": "validated",
+      "original_severity": "medium",
+      "adjusted_severity": "medium",
+      "rationale": "main.py:177 strategy_dir = Path(strategies)/generation_id は実コードで確認。CLI 引数 generation_id は正規表現バリデーションなしに Path 結合される。save_backtest_result (runner.py:1525) は _strategies_dir(generation_id)/backtest への書き込みを行うため、generation_id に ../../../tmp を渡せば任意ディレクトリへの JSON 書き込みが可能。CSR-302 との差異は CLI から直接渡せる点で metadata.json 書き換えという前提条件が不要。影響は任意 JSON 書き込み + 情報漏洩止まりで RCE には至らないが、前提条件なしで再現可能な点が CSR-302 より深刻。severity=medium は適切。",
+      "evidence_check": "main.py:177-178 確認 (一致)。runner.py:1525-1526 確認 (_strategies_dir(generation_id)/backtest 経由で Path 結合のみで resolve チェックなし)。metrics.py:26 確認 (一致)。",
+      "reproduction_check": "再現可能: python -m atlas.main backtest ../../../tmp/evil を実行すれば save_backtest_result が strategies/../../../tmp/evil/backtest/ への書き込みを試みる。",
+      "duplicate_of": null,
+      "additional_note": "generation_id 先頭バリデーション (正規表現) は CLI コマンドの共通前処理として実装すべき。adoption_level: should_consider"
+    },
+    {
+      "finding_id": "CSR-304",
+      "verdict": "validated",
+      "original_severity": "low",
+      "adjusted_severity": "low",
+      "rationale": "syntax_checker.py:51-56 の FORBIDDEN_BUILTINS に type は含まれない。sandbox_builtins.py:45 で type: type が許可されていることも確認。finding の通り type(name, bases, dict) は AST 検査を通過する。ただし finding 自身が既知 RCE 経路はないと認めており、攻撃面縮小目的の予防的修正。type による埋め込み callable は最終的に exec/eval 等の禁止 builtin を呼ぶ必要があり、そこで遮断される二次防衛が存在する。severity=low は適切。",
+      "evidence_check": "syntax_checker.py:51-56 の FORBIDDEN_BUILTINS を Read 確認 (type は含まれず、一致)。sandbox_builtins.py:45 で type: type を確認 (一致)。",
+      "reproduction_check": "再現可能: strategy.py に type 3引数形式を記述して atlas validate Stage 1 を通過することは論理的に確認できる。",
+      "duplicate_of": null,
+      "additional_note": "adoption_level: informational"
+    },
+    {
+      "finding_id": "CSR-305",
+      "verdict": "validated",
+      "original_severity": "low",
+      "adjusted_severity": "low",
+      "rationale": "event_simulator.py の ProcessPoolExecutor 経路 (行 1785-1799) と _walk_worker (行 1676 以降) を確認。spawn で起動した子プロセスは module.__builtins__ への代入が引き継がれない点は実装的事実。finding 自身が Stage 1-4 を全てすり抜けた場合のみ影響、デフォルト ATLAS_WFA_PARALLEL_WORKERS=1 のため通常運用では不発動と認めている。実害シナリオは並列設定 + AST 突破の 2 前提条件が同時成立を要求する。severity=low は適切。",
+      "evidence_check": "event_simulator.py:1785-1799 の ProcessPoolExecutor 経路を確認 (一致)。行 1703-1717 の _resolve_wfa_workers でデフォルト 1 を確認 (一致)。_walk_worker 内 (行 1676-1688) でサンドボックス再設定なしを確認 (一致)。",
+      "reproduction_check": "再現可能: ATLAS_WFA_PARALLEL_WORKERS=2 環境で __builtins__ が完全 builtins になることは Python spawn モデルの仕様通り。",
+      "duplicate_of": null,
+      "additional_note": "_walk_worker 先頭でのサンドボックス再適用は低コストで実施可能。adoption_level: informational"
+    },
+    {
+      "finding_id": "CSR-306",
+      "verdict": "validated",
+      "original_severity": "low",
+      "adjusted_severity": "low",
+      "rationale": "context_builder.py:546-549 の except Exception: return None を Read で確認。CLAUDE.md コーディング規約への違反は明確。市場データ破損時の無音フォールバックで None が返され、以降の処理がデータなしで進行する。severity=low は適切 (本番 Live に直接影響しない ATLAS 計算ツール内の問題)。1 行修正で完了するため対処を推奨。",
+      "evidence_check": "context_builder.py:546-549 を Read 確認 (except Exception: return None の 2 行を確認、一致)。",
+      "reproduction_check": "再現可能: 対象 parquet を破損させて atlas context を実行することで確認可能。",
+      "duplicate_of": null,
+      "additional_note": "logger.warning 追加は 1 行修正で完了する最小コスト修正。CLAUDE.md 規約違反の直接一致。adoption_level: must_fix"
+    },
+    {
+      "finding_id": "QA-301",
+      "verdict": "validated",
+      "original_severity": "high",
+      "adjusted_severity": "high",
+      "rationale": "実コードで計算を検証した結果、QA-301 の主張は数値的に正確。runner.py:631-674 の _compute_soft_score_redistributed は EFFECTIVE_WEIGHT_FLOOR=0.70 (行 663) でキャップする。WFA(0.10)+Drift(0.08)+OOS_IS(0.12)+Top3(0.10)=0.40 が全 None の場合、valid weight=0.60 < FLOOR=0.70 のため effective_weight=0.70 で固定。残り PF(0.18)+MaxDD(0.15)+Sharpe(0.15)+Sensitivity(0.12)=0.60 が全て正規化 1.0 なら soft_score=0.60/0.70 approx 0.857 で閾値 0.70 を超える。より現実的なシナリオは WFA/Drift/OOS の 3 指標のみ None (Top3 は値あり) で valid weight=0.50 + effective=0.70 + soft_score approx 0.71 で通過可能。WFA walks<10 は短期 H4 戦略で現実的に発生する (event_simulator.py:1589-1599 確認)。Gate 直結問題として severity=high は妥当。",
+      "evidence_check": "runner.py:631-674 (_compute_soft_score_redistributed) 確認 (EFFECTIVE_WEIGHT_FLOOR=0.70 行 663、valid 集合から value=None を除外する設計 行 665 を確認、一致)。defaults.py の重み定数を確認 (PF=0.18/MaxDD=0.15/Sharpe=0.15/OOS=0.12/Drift=0.08/Top3=0.10/Sensitivity=0.12/WFA=0.10 一致)。event_simulator.py:1589-1599 の walks<min_walks 時全 None 返却を確認 (一致)。",
+      "reproduction_check": "再現可能: WFA walks<10 になる短期 H4 戦略 + WFA IS PF None で _compute_soft_score_redistributed に渡せば soft_score>=0.70 を確認できる。",
+      "duplicate_of": null,
+      "additional_note": "v6.0.1 コメント (行 647-658) に LONG 11件/balanced 10件の偽陽性発生のためキャップ採用とあり、FLOOR 導入自体が過去の偽陽性対策であることが判明。今回の指摘はそのトレードオフの裏面。adoption_level: must_fix"
+    },
+    {
+      "finding_id": "QA-302",
+      "verdict": "validated",
+      "original_severity": "high",
+      "adjusted_severity": "medium",
+      "rationale": "result_parser.py:240-263 の _compute_oos_is_ratio を確認。行 257-260 で is_profit_factor_walks が None の場合に l2.profit_factor にフォールバックする実装を確認。finding の P8-H6 で問題視された異質スコープ比較の再導入という主張は技術的に正確。ただし severity=high は過大評価。影響方向: oos_is_pf_ratio が過小評価される方向のバイアスであり Gate を落とす方向で、未検証戦略が通過するリスク (QA-301) より安全側。発生条件: 新フォーマットでは is_profit_factor_walks が常に埋まる設計で、旧フォーマット読み戻しか WFA walks<10 のケースに限定。QA-301 が通過させる戦略と QA-302 が落とす戦略は同種であり、QA-302 は QA-301 の危険性を部分的に相殺している。severity=medium が妥当。",
+      "evidence_check": "result_parser.py:240-263 を Read 確認 (行 256-260 の is_profit_factor_walks=None 時の profit_factor フォールバックを確認、一致)。コメント行 243-250 に P8-H6 への言及が明示されており、意図的フォールバックであることを確認。",
+      "reproduction_check": "再現可能: result.json の layer2 で is_profit_factor_walks=null, oos_profit_factor=1.2, profit_factor=2.5 を作製して _compute_oos_is_ratio を呼ぶことで確認可能。",
+      "duplicate_of": null,
+      "additional_note": "QA-301 (通過方向バイアス) と QA-302 (落下方向バイアス) が部分相殺する。フォールバック削除は QA-302 修正と同時に QA-301 も悪化させる可能性があるため、両者セットで設計変更すること。adoption_level: should_consider"
+    },
+    {
+      "finding_id": "QA-303",
+      "verdict": "validated",
+      "original_severity": "medium",
+      "adjusted_severity": "medium",
+      "rationale": "vectorbt_engine.py:853 の np.std(sharpes) が ddof=0 (デフォルト) で算出されることを実コードで確認。perturbations=[0.9, 1.0, 1.1] の 3 点固定 (行 811) も確認。3 点サンプルでの母集団 std は標本 std の sqrt(2/3) approx 0.816 倍になり、CV が 18.4% 過小評価される。event_simulator.py:1965-1974 の L2 感度分析も arr.std() (ddof=0 デフォルト) を使用。scorer Layer2 の sensitivity ボーナスと Tier2 Param Sensitivity (weight 0.12) への影響は実在する。severity=medium は適切。",
+      "evidence_check": "vectorbt_engine.py:851-854 を Read 確認 (np.std(sharpes) ddof=0 使用を確認、一致)。行 811 の perturbations=[0.9, 1.0, 1.1] 確認 (一致)。event_simulator.py:1965-1974 の L2 版も arr.std() (ddof=0 デフォルト) を確認 (一致)。",
+      "reproduction_check": "再現可能: sharpes=[1.0, 1.2, 0.8] で np.std()=0.163, np.std(ddof=1)=0.2 の差を確認可能 (22% 過小評価)。",
+      "duplicate_of": null,
+      "additional_note": "ddof=0 vs ddof=1 の影響は 3 点で 18.4% で Param Sensitivity の threshold (0.3/0.5) と比較すると有意差になりうる。[change:spec] 手順を経ての修正を推奨。adoption_level: should_consider"
+    },
+    {
+      "finding_id": "QA-304",
+      "verdict": "validated",
+      "original_severity": "medium",
+      "adjusted_severity": "low",
+      "rationale": "event_simulator.py:1548 の tail_ratio = abs(p95) / abs(p5) を Read で確認。abs 化による方向性情報の破壊は技術的に正確な指摘。ただし severity=medium は過大。finding が Gate には直接接続していないと自ら認めており、Tier1/Tier2 判定に影響しない。p95<0 かつ p5<0 になる戦略は L2 Sharpe も大きく負であり、Tier2 Sharpe コンポーネント (weight 0.15) で既に低評価される。weakness_detector 経由で改善方針への影響はあるが Gate 判定には影響しない。severity=low が妥当。",
+      "evidence_check": "event_simulator.py:1548 の abs(p95)/abs(p5) if abs(p5) > 1e-10 else None を確認 (一致)。weakness_detector.py:283-293 の tail_ratio<0.8 判定を確認 (一致)。",
+      "reproduction_check": "再現可能: np.random.normal(-0.01, 0.005, 1000) でリターン系列生成、p95 approx -0.002, p5 approx -0.018 で abs(p95)/abs(p5) approx 0.111 < 0.8 で weakness 誤検出は確認可能。",
+      "duplicate_of": null,
+      "additional_note": "全負リターン戦略は Tier1 PF>=1.0 / Tier2 Sharpe でほぼ除外されるため、実害は改善ループ中の誤った改善方針提案に限定。adoption_level: informational"
+    },
+    {
+      "finding_id": "QA-305",
+      "verdict": "validated",
+      "original_severity": "medium",
+      "adjusted_severity": "low",
+      "rationale": "vectorbt_engine.py:953 の if pf is not None and pf < L1_MIN_PROFIT_FACTOR と行 966 の if sharpe is not None and sharpe < L1_MIN_SHARPE を実コードで確認。None の場合はそのまま通過する設計。ただし finding 自身が Gate 直結ではない (Tier 1 で最終的に落ちる) と認めており、実際に L2 Tier1 の _t1_cond で value is None -> passed=False となる (runner.py:787-792)。問題は L2 の高負荷処理 (WFA+MC+感度分析) が無駄に走ることのみ。severity=low が適切。",
+      "evidence_check": "vectorbt_engine.py:953 行の if pf is not None and pf < L1_MIN_PROFIT_FACTOR を Read 確認 (一致)。行 966 の if sharpe is not None and sharpe < L1_MIN_SHARPE を確認 (一致)。行 736-740 の gross_loss=0 で pf=None 返却を確認 (一致)。",
+      "reproduction_check": "再現可能: trade=21, gross_loss=0 のダミー戦略で L1 pf=None でも passed=True となることは確認可能。",
+      "duplicate_of": null,
+      "additional_note": "L1 の早期リジェクト条件 if pf is None or pf < MIN への変更は低コスト。adoption_level: should_consider"
+    },
+    {
+      "finding_id": "QA-306",
+      "verdict": "downgraded",
+      "original_severity": "medium",
+      "adjusted_severity": "low",
+      "rationale": "monte_carlo.py:212 の sharpe = mean_pnl / std_pnl が年率化なしであることを Read で確認。L1/L2 Sharpe が年率化済みなのに対し MC Sharpe は per-trade mean/std 比で単位が異なる。ただし finding 自身が scorer は mc_drawdown_95pct のみ参照し MC Sharpe を消費しないと述べており、Gate/scorer への数値的影響はゼロ。metrics.py:56 で bt_result.monte_carlo が出力に含まれることは確認したが、これは Claude が読む情報であり Gate 判定には届かない。問題は計算ロジックの誤りではなく命名による誤読リスクであり severity=low が妥当。",
+      "evidence_check": "monte_carlo.py:210-213 (CPU) の sharpe = mean_pnl / std_pnl を確認 (一致)。monte_carlo.py:287-290 (GPU) 確認 (一致)。monte_carlo.py:62-65 の MonteCarloResult.sharpe_mean フィールドを確認 (一致)。metrics.py:56 の bt_result.monte_carlo 出力を確認 (一致)。",
+      "reproduction_check": "再現可能: MC 実行して sharpe_mean と L2 sharpe_ratio を比較すれば桁違いを確認可能。",
+      "duplicate_of": null,
+      "additional_note": "rename (sharpe_per_trade_mean) は命名の明確化として価値あり。Gate/scorer への数値影響ゼロのため severity=low。adoption_level: informational"
+    },
+    {
+      "finding_id": "QA-307",
+      "verdict": "validated",
+      "original_severity": "medium",
+      "adjusted_severity": "medium",
+      "rationale": "comparator.py:79-160 と convergence.py:66-350 を Read で確認。compare_two は import 部に METRICS_SCHEMA_VERSION への参照なし (finding 通り)。convergence.py はスコア系列のみで schema_version チェックなし。CLAUDE.md のバージョン差異を警告すること要求に対して計算層で未実装。影響は収束判定の歪み (最大 1-2 世代) であり severity=medium は適切。",
+      "evidence_check": "comparator.py:1-34 の import 部に METRICS_SCHEMA_VERSION なし (一致)。comparator.py:79-160 の compare_two で schema_version 参照なし (一致)。convergence.py:60-120 で records の schema_version チェックなし (一致)。defaults.py:65 で METRICS_SCHEMA_VERSION=6.1.0 を確認、変更履歴コメント (行 59-65) で 6.0.0 to 6.1.0 の var_95 計算根拠変更を確認 (finding の具体例と一致)。",
+      "reproduction_check": "再現可能: METRICS_SCHEMA_VERSION が異なる 2 世代の GenerationRecord を compare_two に渡しても schema_version_warning が出ないことは確認可能。",
+      "duplicate_of": null,
+      "additional_note": "実装は comparator.py と convergence.py の 2 箇所への追加のみ。adoption_level: should_consider"
+    },
+    {
+      "finding_id": "QA-308",
+      "verdict": "validated",
+      "original_severity": "low",
+      "adjusted_severity": "low",
+      "rationale": "result_parser.py:296-305 の MFE=0 取引を 0.0 で母集団化する実装を Read で確認。finding の指摘通り、コメントの是正名目で逆方向のバイアスを導入している。50% MFE=0 の戦略では trade_efficiency=0.25 と算出され weakness_detector.py:182 の threshold 0.3 を下回る可能性。Gate 接続なし。severity=low は適切。",
+      "evidence_check": "result_parser.py:294-305 を Read 確認 (MFE=0 時に efficiencies.append(0.0) している実装を確認、一致)。コメント「修正: MFE=0 の取引は efficiency=0 として全取引を母集団に含める」も確認。weakness_detector.py:182 の trade_efficiency < 0.3 判定を確認 (一致)。",
+      "reproduction_check": "再現可能: finding の数値例 (50% MFE=0、50% MFE=20/pnl=10) で mean=0.25 になることは計算可能。",
+      "duplicate_of": null,
+      "additional_note": "mfe_zero_ratio の明示が改善ループの方針精度を上げる。adoption_level: should_consider"
+    },
+    {
+      "finding_id": "QA-309",
+      "verdict": "validated",
+      "original_severity": "low",
+      "adjusted_severity": "low",
+      "rationale": "scorer.py:222-232 を Read で確認。adjusted * quality_mult の後に min(final_score, 0.5) クランプが適用される実装を確認。finding の指摘通り、quality_mult=1.2 の未評価戦略は実質 -0.1 ペナルティ、quality_mult=0.8 の未評価戦略はペナルティなし、という非対称性が存在する。収束優良 (0.75) には絶対届かずと finding 自身が認める通り、Gate PASS/FAIL への影響はない。severity=low は適切。",
+      "evidence_check": "scorer.py:225-232 を Read 確認 (quality_mult 適用後にクランプが入る順序を確認、一致)。scorer.py:118-128 の required_metrics 7 フィールドを確認 (一致)。",
+      "reproduction_check": "再現可能: 戦略 A (quality_mult=1.2, adjusted=0.5) -> final=0.6 -> クランプ後 0.5。戦略 B (quality_mult=0.8, adjusted=0.5) -> final=0.4 -> クランプなし。数値計算で確認可能。",
+      "duplicate_of": null,
+      "additional_note": "quality_mult 適用前にクランプする修正は 1 行変更だがゴールデンテスト全件の更新が必要 ([change:spec])。adoption_level: should_consider"
+    },
+    {
+      "finding_id": "QA-310",
+      "verdict": "downgraded",
+      "original_severity": "low",
+      "adjusted_severity": "low",
+      "rationale": "dedup.py:160-170 の _compute_cosine_similarity を Read で確認。finding は keys が空のとき 1.0 を返すと述べているが、実コードでは keys=union が空の場合のみ 1.0 (行 163) であり、さらに行 168-169 で norm_a==0 or norm_b==0 のとき 0.0 を返す保護も存在する (finding が言及していない)。片方が空でもう片方が値ありのケースは 0.0 で保護されており finding より影響が限定的。両者パラメータが空という発生条件は config.json Pydantic バリデーションで最低 1 パラメータが要求されれば事実上発生しない。severity=low を維持するが、発生確率は finding より更に低い。",
+      "evidence_check": "dedup.py:160-170 を Read 確認。if not keys: return 1.0 (行 163) を確認 (一致)。ただし行 168-169 if norm_a == 0 or norm_b == 0: return 0.0 も確認でき、finding が言及していない保護が存在する。runner.py:1464-1498 の check_duplicate 結果による Gate 判定を確認 (is_duplicate=True で overall_passed=False 反転する実装を確認)。",
+      "reproduction_check": "再現可能: parameters={} の戦略 2 件で check_duplicate を呼べば is_duplicate=True となる経路は存在するが、実際にはほぼ発生しない。",
+      "duplicate_of": null,
+      "additional_note": "adoption_level: informational"
+    },
+    {
+      "finding_id": "QA-311",
+      "verdict": "validated",
+      "original_severity": "low",
+      "adjusted_severity": "low",
+      "rationale": "event_simulator.py:1676-1689 の walk_id=0 IS seed=42 と _simulate デフォルト seed=42 (行 644) の衝突を確認。finding の指摘は技術的に正確。影響の精密化: seed 衝突が生む問題は slippage 系列の完全一致のみで、IS データが時系列の部分集合であるため slippage 以外のデータ差異が支配的。run_layer2 の base シミュレーション (行 2030) で seed 引数なし (デフォルト 42) を確認。統計的独立性の損失は微小。severity=low は適切。",
+      "evidence_check": "event_simulator.py:1676-1688 の walk_id IS seed=42+walk_id を確認 (一致)。_simulate 関数 (行 639-648) のデフォルト seed=42 を確認 (一致)。run_layer2 の base _simulate 呼び出し (行 2030-2037) で seed 引数なしを確認 (一致)。",
+      "reproduction_check": "再現可能: walk_id=0 IS と base シミュレーションの slippage 乱数系列が同一であることは seed=42 の RNG 初期化で確認可能。",
+      "duplicate_of": null,
+      "additional_note": "base seed を 99 に変更するだけでも衝突回避できる最小コスト修正 ([change:spec] + parity test 更新が必要)。adoption_level: informational"
+    },
+    {
+      "finding_id": "QA-312",
+      "verdict": "validated",
+      "original_severity": "low",
+      "adjusted_severity": "low",
+      "rationale": "scorer.py:134-167 の WFA/Drift/Sensitivity の stepwise if-elif を Read で確認。WFA=0.899 で adj=0.0、WFA=0.900 で adj=0.05 という 0.05 の不連続ジャンプは実コードで確認。finding の Goodhart Law 的脆弱性という表現は適切。Gate 直接影響なし、改善ループの効率問題として severity=low は適切。",
+      "evidence_check": "scorer.py:134-167 を Read 確認 (WFA 行 136-144: >=0.9 to +0.05, >=0.7 to 0.0, >=0.5 to -0.05, else to -0.10 の stepwise を確認、一致。Drift 行 148-156 確認、一致。Sensitivity 行 159-167 確認、一致)。",
+      "reproduction_check": "再現可能: WFA=0.899 と WFA=0.900 で他指標一致の 2 戦略を scorer に渡せば final_score の 0.05 ジャンプが確認可能。",
+      "duplicate_of": null,
+      "additional_note": "線形補間への変更はゴールデンテスト全件更新を要する ([change:spec])。収束安定性改善の価値はあるが緊急性は低い。adoption_level: informational"
+    }
+  ],
+  "summary": {
+    "total": 18,
+    "validated": 11,
+    "downgraded": 5,
+    "upgraded": 0,
+    "refuted": 0,
+    "severity_post": {
+      "critical": 0,
+      "high": 2,
+      "medium": 5,
+      "low": 11
+    },
+    "downgrade_notes": [
+      "CSR-301: medium to low (FORBIDDEN_BUILTINS に __import__ が明示列挙され AST 静的解析で既に封鎖済み、既知 RCE 経路なし)",
+      "CSR-302: medium to low (str 型チェックが存在、クローズド開発ツールの文脈かつ攻撃者が metadata.json を書き換える前提が必要)",
+      "QA-302: high to medium (Gate を落とす方向のバイアスであり QA-301 と部分相殺、安全側バイアス)",
+      "QA-304: medium to low (Gate に直接接続なし、全負リターン戦略は Tier2 Sharpe で既に除外)",
+      "QA-306: medium to low (Gate/scorer が MC Sharpe を参照しない、命名問題のみで数値影響ゼロ)"
+    ],
+    "cross_cutting_notes": [
+      "QA-301 と QA-302 は同一の WFA 欠落状況で逆方向に作用するため、両者をセットで設計変更すること",
+      "CSR-302 と CSR-303 は同種のパストラバーサルだが CSR-303 は前提条件なし (CLI 直接) で再現可能なため severity 差が正当",
+      "前回 AUDIT-0525-002 での影響範囲誇張パターン (全 KS dead、Live 14 戦略影響) の再確認: 本監査でも QA-304/QA-306 で同様の誇張を検出し格下げ",
+      "QA-310 は dedup.py に norm_a==0 or norm_b==0: return 0.0 の保護が存在するため finding より影響が限定的 (finding 未言及)"
+    ]
+  }
+}

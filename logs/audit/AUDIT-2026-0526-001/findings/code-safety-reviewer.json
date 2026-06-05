@@ -1,0 +1,107 @@
+{
+  "audit_id": "AUDIT-2026-0526-001",
+  "reviewer_role": "code-safety-reviewer",
+  "audit_date": "2026-05-26",
+  "atlas_head_commit": "feb111ee",
+  "dry_run": true,
+  "scope": "ATLAS repository — new/unresolved safety issues only (AUDIT-2026-0525-001/002 fixed items excluded)",
+  "findings": [
+    {
+      "id": "CSR-201",
+      "severity": "MEDIUM",
+      "category": "exception_swallowing",
+      "title": "bare except without logging in context_builder.py",
+      "file": "atlas/feedback/context_builder.py",
+      "line": 548,
+      "evidence": "except Exception:\n        return None",
+      "description": "parquet ファイル読み込み失敗時に例外を完全に握りつぶしている。CLAUDE.md「例外は握りつぶさず必ずログに記録してから再raise or 適切な処理をする」に違反。ファイル不在以外のエラー（破損 parquet、メモリ不足、依存ライブラリ不具合）が無言で None を返すため、呼び出し元は原因を特定できない。",
+      "impact": "市場統計データの黙示的欠落。コンテキスト生成が劣化してもエラーが surfaced されない。本番での誤信号リスクは低いが、デバッグ・品質管理を阻害する。",
+      "fix_instruction": "except Exception as e: logger.warning('市場統計parquet読み込みエラー', path=str(parquet_path), error=str(e), exc_info=True); return None"
+    },
+    {
+      "id": "CSR-202",
+      "severity": "LOW",
+      "category": "exception_swallowing",
+      "title": "silent exception suppression in is_kernel_available()",
+      "file": "atlas/backtest/_mc_kernels.py",
+      "line": 82,
+      "evidence": "except Exception:\n        return False",
+      "description": "GPU/cuPy プローブ関数で ImportError・CUDA エラー以外の予期しない例外（例: 権限エラー、バグ）が発生しても False を返す。GPU 利用可否の判定には問題ないが、想定外例外がデバッグ困難になる。",
+      "impact": "GPU カーネル利用不可扱いになるのみ。CPU フォールバックが動作するため本番実害なし。ただし cuPy 環境のサイレント劣化をマスクする。",
+      "fix_instruction": "ImportError と CUDAError のみ捕捉するか、または except Exception as e: logger.debug('GPU kernel 利用不可', error=str(e)); return False に変更する。"
+    },
+    {
+      "id": "CSR-203",
+      "severity": "MEDIUM",
+      "category": "sandbox_defense_in_depth",
+      "title": "type() in SANDBOX_BUILTINS enables runtime MRO traversal",
+      "file": "atlas/common/sandbox_builtins.py",
+      "line": 45,
+      "evidence": "\"type\": type  # sandbox_builtins.py:45",
+      "description": "SANDBOX_BUILTINS に type 組み込み関数が含まれるため、戦略コード内で type(self).mro() の呼び出しが可能。mro() は ast.Attribute ノードを生成せず（メソッド呼び出しの形式のため FORBIDDEN_DUNDER_ATTRS の __mro__ 属性チェックをパス）、Stage 1 静的解析では検出されない。実行時に object クラスの MRO リストが得られる。ただし、MRO リストから有害操作（__subclasses__() 等）に進むには FORBIDDEN_DUNDER_ATTRS または FORBIDDEN_BUILTINS で別途ブロックされる属性/関数が必要であり、実際の RCE パスは現時点では確認されていない。",
+      "runtime_test_result": "type(obj).mro()[-1].__subclasses__() を実行すると 918 サブクラスが取得可能だが、これを戦略コード内で使うには __subclasses__ 属性アクセス（FORBIDDEN_DUNDER_ATTRS でブロック）または getattr（FORBIDDEN_BUILTINS でブロック）が必要。現状の多層防御は機能している。",
+      "impact": "単独での RCE は成立しない（他の防御層がブロック）。しかし将来の SANDBOX_BUILTINS 拡張やチェック変更時に攻撃面が拡大するリスクがある。防御の深度を維持するため改善を推奨する。",
+      "fix_instruction": "SANDBOX_BUILTINS から type を削除し、isinstance/issubclass で代替できるユースケースをカバーする。削除不可の場合は __mro_entries__ / mro() の呼び出しをブロックする Stage 1 ルールを追加する。",
+      "is_regression_from_previous_audit": false
+    },
+    {
+      "id": "CSR-204",
+      "severity": "LOW",
+      "category": "type_hint_gap",
+      "title": "missing type annotation on normalizer parameter in _norm_or_zero()",
+      "file": "atlas/backtest/runner.py",
+      "line": 566,
+      "evidence": "def _norm_or_zero(\n    value: float | None,\n    normalizer,  # noqa: ANN001 - callable (float) -> float\n) -> float:",
+      "description": "CLAUDE.md「型ヒントを必ず付ける」ルールに違反。normalizer パラメータの型アノテーションが欠落し、noqa コメントで意図的に抑制されている。Callable[[float], float] と明記すべき。",
+      "impact": "型チェッカー（mypy/pyright）がこの引数の型を検証できない。実害なし。",
+      "fix_instruction": "from collections.abc import Callable をインポートし、normalizer: Callable[[float], float] と型付けする。noqa コメントを削除する。"
+    },
+    {
+      "id": "CSR-205",
+      "severity": "LOW",
+      "category": "type_hint_gap",
+      "title": "SANDBOX_BUILTINS declared as bare dict without type parameter",
+      "file": "atlas/common/sandbox_builtins.py",
+      "line": 27,
+      "evidence": "SANDBOX_BUILTINS: dict = {",
+      "description": "CLAUDE.md「型ヒントを必ず付ける（from __future__ import annotations を活用）」ルールに違反。dict[str, Any] と明示すべき。",
+      "impact": "型チェッカーが allowlist エントリの型を検証できない。実害なし。",
+      "fix_instruction": "from typing import Any をインポートし、SANDBOX_BUILTINS: dict[str, Any] = { と変更する。"
+    },
+    {
+      "id": "CSR-206",
+      "severity": "LOW",
+      "category": "convention_violation",
+      "title": "OOS metrics exception logged but silently degraded to empty dict",
+      "file": "atlas/backtest/vectorbt_engine.py",
+      "line": 998,
+      "evidence": "except Exception as e:\n        logger.warning('OOS検証エラー', error=str(e))\n        oos_metrics = {}",
+      "description": "OOS 検証でエラーが発生した場合、logger.warning は呼ばれるが oos_metrics が空辞書のまま Layer1Result が passed=True で返される。呼び出し元が OOS 結果の有無を判別できないため、WFA/OOS 分析が黙示的にスキップされる。CLAUDE.md「例外は握りつぶさず必ずログに記録してから再raise or 適切な処理をする」のうちログは満たしているが、データ欠落が透明でない。",
+      "impact": "Layer 1 評価が OOS スコアなしで通過する可能性。Gate 判定に影響しないが、評価品質が低下する。",
+      "fix_instruction": "Layer1Result に oos_available: bool フィールドを追加し、例外時に False をセットして呼び出し元が OOS データ欠落を認識できるようにする（または logger.error レベルに昇格）。"
+    }
+  ],
+  "summary": {
+    "total_findings": 6,
+    "by_severity": {
+      "CRITICAL": 0,
+      "HIGH": 0,
+      "MEDIUM": 2,
+      "LOW": 4
+    },
+    "previously_fixed_items_confirmed_closed": [
+      "CSR-001 (RCE via __import__ call)",
+      "CSR-101 (__import__ as Name node non-call reference)",
+      "CSR-102 (2-segment chain attribute access)",
+      "CSR-103 (strategy class selection __module__ filter)",
+      "CSR-007 (backtest runner load_strategy sandbox builtins injection)"
+    ],
+    "notes": [
+      "FORBIDDEN_BUILTINS と FORBIDDEN_DUNDER_ATTRS の多層防御は正常動作を確認済み。",
+      "CSR-203 は RCE が成立しないことを実行時テストで確認済み（defense-in-depth の gap として記録）。",
+      "sandbox_runner.py の abandoned daemon thread は仕様通り（ドキュメント済み、新 worker が spawn される）。",
+      "interface_checker.py に新規問題なし。",
+      "event_simulator.py の例外ハンドリングはすべてログ付き（問題なし）。"
+    ]
+  }
+}

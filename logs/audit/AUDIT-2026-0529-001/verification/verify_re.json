@@ -1,0 +1,199 @@
+{
+  "verifier": "risk-execution-engineer (round 2)",
+  "commit_verified": "2803be57b058b8a963f9224185195ffeeb73d71c",
+  "verification_date": "2026-05-29",
+  "verifications": [
+    {
+      "finding_id": "RE-301",
+      "original_severity": "high",
+      "devil_advocate_severity": "high",
+      "verifier_severity": "high",
+      "evidence_check": "strategy_slot.py:805-823 を実コード Read で確認。L805-810 で comment=strategy_id の正規マッチを実施、L811-823 で『matching が空なら instrument+units_predicate のみで再マッチ』するフォールバックが残存。restore_positions (L1310-1322) の R1 (instrument フォールバック廃止) + R2 (claimed_trade_ids) と非対称であることを確認。L818-823 で `trade_id_resolve_fallback` warning は出すが採用は止めない。証拠は完全に正確。",
+      "reproduction_verified": true,
+      "agreement_with_da": "agree",
+      "rationale": "INC-2026-0526-001 と完全同型の問題ベクタ。同一 instrument・同一 direction の Live 戦略複数構成 (USD_JPY 6戦略 / EUR_JPY 8戦略の実績あり) で発火しうる。最終的に他戦略の trade を close_trade してしまう実損失経路。restore_positions では既に同じ修正が入っているのに runtime には未適用という構造的見落としで、ATLAS-LOOP で量産投入される本番運用シナリオで再発リスクが極めて高い。high 維持が適正。",
+      "concerns_about_original": "なし。証拠・再現手順・修正案いずれも適切。さらに『_resolve_live_trade_id は entry_rollback_no_trade_id (L749) と合流させるべき』という具体的修正方針も妥当。"
+    },
+    {
+      "finding_id": "RE-302",
+      "original_severity": "high",
+      "devil_advocate_severity": "high",
+      "verifier_severity": "high",
+      "evidence_check": "(1) strategy_slot.py:792-799 を確認。`if not trades: state.open_trade_id = fill.broker_order_id` が `is_live` ガードなしで成立することを確認。(2) broker_gateway.py:420-428 を確認。get_open_trades が except Exception で空配列を返す設計を確認。(3) client.py:383-410 で `broker_order_id = fill_tx.get('orderID', '')` が OANDA Order ID であることを確認。(4) client.py:594-701 で close_trade の URL が `/v3/accounts/{id}/trades/{trade_id}/close` であることを確認 (L677)。OANDA は Order ID を trade_id として渡されれば 404 / TRADE_DOESNT_EXIST を返す。(5) PaperBroker simulator.py:146 で broker_order_id が 'PAPER-{uuid}' 形式であることを確認。Live と Paper の区別が形式の上でも明確で、is_live ガードを加える修正は安全。証拠は完全に正確。",
+      "reproduction_verified": true,
+      "agreement_with_da": "agree",
+      "rationale": "OANDA API のタイムアウト・502 などのネットワーク障害は恒常的事象であり (INC-2026-0526-001 の運用実績から数日に 1 回程度)、Live 経路で必ず発火しうる。一度発火すると幻ポジション残置 + close_trade 404 ループ + 人手介入必須という重大インパクト。Phase 1 では 1 行 (is_live 追加) で fix-closed にできるため、即時修正の負荷も低い。high 維持。",
+      "concerns_about_original": "PaperBroker が `get_open_trades` を持たない (broker_gateway.py:422 で hasattr=False 時に [] 返却) ことに言及されていない。これは L793 のフォールバックが Paper では『例外 (= ネットワーク障害)』ではなく『hasattr=False (= 設計通り)』で発火することを意味し、is_live ガード追加で Paper 経路は壊れない (Paper は trades=[] で broker_order_id='PAPER-xxx' を採用するだけ、それで正しく動く)。L795 の broker_order_id 採用が Paper では正しく Live では誤りという二相挙動が修正容易性の根拠であり、原 finding はこの点を補強できた。"
+    },
+    {
+      "finding_id": "RE-303",
+      "original_severity": "medium",
+      "devil_advocate_severity": "low",
+      "verifier_severity": "low",
+      "evidence_check": "(1) runner.py:1549-1566 で UnifiedRunner 経路の H-01 修正 (_shutdown_requested=True) を確認。(2) circuit_breaker.py:177-189 のクラス docstring に『本クラスは main.py (FastAPI) 経路で使用される』と明記。(3) circuit_breaker.py:386-539 の _activate 内に shutdown_requested 設定が無いことを確認。run_unified.py 経路 (UnifiedRunner) では GlobalRiskSupervisor が使われ、main.py 経路では circuit_breaker.KillSwitch が使われる二重実装が確かに存在する。証拠は正確。",
+      "reproduction_verified": true,
+      "agreement_with_da": "agree",
+      "rationale": "本番経路 (run_unified.py) では H-01 修正が機能。main.py 経路は PA-103 fail-closed (ENV=production で LIVE 拒否) でブロックされており、production LIVE では発火しない。エスケープハッチ PLATFORM_ALLOW_MAIN_PRODUCTION_LIVE=1 を意図的に設定したケースのみリスクがあり、運用上はほぼ informational。low 格下げが妥当。ただし PA-307 (main.py 二重実装) の根本対処と連動する。",
+      "concerns_about_original": "前回 risk-execution が medium とした根拠『マスター修正点は『どの経路が本番か』のドキュメント化と非本番経路の deprecation』は妥当だが、これは PA-307 (二重実装) の文脈で扱うべき問題で、KS 単体としては low が適正。前回はやや過大評価。"
+    },
+    {
+      "finding_id": "RE-304",
+      "original_severity": "medium",
+      "devil_advocate_severity": "low",
+      "verifier_severity": "low",
+      "evidence_check": "(1) runner.py:1309-1322 で `for slot in self._slots: slot.gateway.halt()` が is_live フィルタなしで全スロット halt することを確認。(2) strategy_slot.py:351-357 で `effective_supervisor = risk_supervisor if self.is_live else None` の分岐により paper は PTRC/KS の影響を受けない設計が明示されていることを確認。BrokerGateway.halt() は PTRC/KS とは別レイヤの遮断であり、paper も含めて halt される設計通り。証拠は正確。",
+      "reproduction_verified": true,
+      "agreement_with_da": "agree",
+      "rationale": "実損失 (資金) への経路は皆無 (paper はそもそも資金を動かさない)。paper のデータ収集が止まることは戦略評価の歯抜けを生むが運用上の不便に留まる。『KS=全停止 (defense-in-depth)』vs『KS=live のみ停止 (paper 評価継続)』は設計判断であり、[change:spec] レベルの議論が必要。low 格下げが妥当。",
+      "concerns_about_original": "前回 risk-execution は『INC-2026-0527-001 の paper/live 完全分離方針と矛盾』としたが、INC-2026-0527-001 は『paper の状態が live supervisor に混入する経路』への対処であり、KS による全停止とは概念レベルが異なる。前回の論述はやや無理筋。devil-advocate の整理が正確。"
+    },
+    {
+      "finding_id": "RE-305",
+      "original_severity": "medium",
+      "devil_advocate_severity": "medium",
+      "verifier_severity": "medium",
+      "evidence_check": "(1) runner.py:1518-1534 で `_consecutive_poll_errors >= 5` で `oanda_connection_degraded` WARN のみ・shutdown/KS 発火なしを確認。(2) L1534 で `return` するため、後続の Kill Switch チェック (L1537)・heartbeat 処理 (L1481-1513)・`_check_live_health_alerts` (L1506) すべてがスキップされることを発見。これは原 finding に未記載の重大な副作用。(3) LIVE_ORDER_SILENCE_THRESHOLD_SEC=6h (L89) なので、6 時間連続で OANDA が落ちた場合、`live_orders_silent` アラートも発火せず、運用者は『プロセスは alive で WARN ログを出しているが、Email アラートはゼロ』という最悪の沈黙状態に陥る。証拠は正確だが、影響範囲の記述が原 finding ではやや過小。",
+      "reproduction_verified": true,
+      "agreement_with_da": "agree",
+      "rationale": "RE-305 単体では『プロセスが生きているが取引していない』状態の検知遅延だが、L1534 early return が `_check_live_health_alerts` を抑止することで『live_orders_silent も発火しない』連鎖を引き起こす。medium 維持で十分だが、原 finding が指摘した『早期通知の必要性』の根拠は『heartbeat 周期処理全体が早期 return でスキップされる』ことで強化される。",
+      "concerns_about_original": "原 finding は『live_orders_silent は 6 時間閾値で発火する』と記述しているが、これは『_check_live_health_alerts がそもそも呼ばれない (L1534 early return)』という事実を見落としている可能性がある。早期通知の必要性は原 finding の主張より高い。"
+    },
+    {
+      "finding_id": "RE-306",
+      "original_severity": "medium",
+      "devil_advocate_severity": "medium",
+      "verifier_severity": "medium",
+      "evidence_check": "(1) runner.py:964-978 を確認。L977 `_last_position_reconcile_at = now` が L978 `_reconcile_live_positions()` 呼出より前にあり、後続の例外でも更新済みになる。(2) runner.py:1012-1022 で例外時に `logger.warning('position_reconcile_skipped')` + return のみ、_last_position_reconcile_at の巻き戻し無しを確認。L970 のコメントに『失敗時に毎周期リトライして API を叩き続けない』設計意図ありを確認。証拠は正確。",
+      "reproduction_verified": true,
+      "agreement_with_da": "agree",
+      "rationale": "POSITION_RECONCILE_INTERVAL_SEC のデフォルトは要追加確認だが、コメントから 10 分以上と推測される。OANDA の数秒のスパイク (典型的 502/503) で stale 検知が完全停止 10 分というペナルティは過大。提案された『失敗時のみ更新しない + 連続失敗カウンタ + 閾値超過時のみ間隔延長』は妥当な改善。medium 維持。",
+      "concerns_about_original": "なし。前回の論述は正確。修正案も筋が良い。"
+    },
+    {
+      "finding_id": "RE-307",
+      "original_severity": "low",
+      "devil_advocate_severity": "low",
+      "verifier_severity": "low",
+      "evidence_check": "(1) ptrc.py:128-164 の _fire_ptrc_audit を確認。L164 で `task.add_done_callback(_pending_tasks.discard)` のみで t.exception() のチェック無しを確認。(2) risk_supervisor.py:204-226 の _spawn_audit_task は L214-226 で `_on_done` callback 内で `t.exception()` を logger.error に出力する非対称を確認。(3) _fire_risk_alert (L90-116) も同様に done callback でエラーログ無し。証拠は正確。",
+      "reproduction_verified": true,
+      "agreement_with_da": "agree",
+      "rationale": "本番経路では常に event loop が存在するため except RuntimeError パスは通らない。done callback のエラーログ欠如は『AuditLogger.record() が write 失敗で例外を投げた場合に痕跡が残らない』隠れた可観測性リスクだが、AuditLogger 側で例外時に logger.exception を打つ実装 (risk_supervisor.py:207 のコメント参照) になっているため、二重防衛としては妥当だが必須ではない。low 維持。",
+      "concerns_about_original": "なし。提案 (risk_supervisor と同パターンに揃える) も 1 行修正で済み妥当。"
+    },
+    {
+      "finding_id": "RE-308",
+      "original_severity": "low",
+      "devil_advocate_severity": "low",
+      "verifier_severity": "low",
+      "evidence_check": "(1) email_notifier.py:298-307 で live_strategy_rejected_by_gate が kind='live_gate_rejection' に分離されていることを確認。コメント (L300-306) に『_EMAIL_THROTTLE_INTERVAL_SEC に登録しないことで throttle 不可化』と明記。(2) _EMAIL_THROTTLE_INTERVAL_SEC (L314-324) に live_gate_rejection が登録されていないことを確認。(3) _SMTP_MAX_ATTEMPTS=3 のリトライ機構を確認。bulk_import_rehearsal_2026_0529.md は logs/ に存在しない可能性 (要確認) だが、量産投入時の SMTP rate-limit 連鎖リスク自体は実在する。",
+      "reproduction_verified": true,
+      "agreement_with_da": "agree",
+      "rationale": "現状 60+ 戦略を一斉 Gate=False 投入するシナリオは運用上めったに無い。Gate 拒否は事前検証で防げるため、量産投入時に Gate 拒否で大量メールが飛ぶこと自体が運用ミス。直接的取引損失なし。ただし SMTP 4.7.0 等で連鎖被害が出ると kill_switch_activated 等のクリティカル通知が巻き添えになるため、daily summary 降格 / 集約は合理的な改善。low 維持。",
+      "concerns_about_original": "logs/bulk_import_rehearsal_2026_0529.md の参照は要確認 (実在しなければ evidence として弱い)。ただし量産投入シナリオ自体は ATLAS-LOOP の文脈で実在するため finding の本質は維持。"
+    },
+    {
+      "finding_id": "RE-309",
+      "original_severity": "low",
+      "devil_advocate_severity": "low",
+      "verifier_severity": "low",
+      "evidence_check": "(1) ptrc.py:532-590 で _check_max_daily_loss の実装を確認。L560-561 で daily_realized_pnl + daily_unrealized_pnl の合算評価。(2) ptrc.py:546-558 で RE-002 設計コメントが既に詳細に記載されていることを確認 (DA が指摘した通り、既にコメント済み)。(3) risk_supervisor.py:817-833 で build_risk_state が daily_unrealized_pnl=0 を渡す設計を確認。証拠は正確だが、ptrc.py 側コメントの存在を原 finding が見落としており指摘の根拠が部分的に弱まる。",
+      "reproduction_verified": true,
+      "agreement_with_da": "agree",
+      "rationale": "ptrc.py L546-558 に既に RE-002 設計判断の詳細コメントが存在しており、原 finding が指摘した『コード/コメントの不整合』は実質既に解消されている。実動作への影響なし。情報的指摘として low 維持。",
+      "concerns_about_original": "原 finding は『ptrc.py 側のコメントは将来の方針変更時に...と書かれている』としているが、これは L558 の『なお本式が unrealized を加算する構造自体は残す』の話であり、設計意図の説明は L546-557 で十分明示されている。原 finding はコメントを read-through できていない可能性。"
+    }
+  ],
+  "missed_findings": [
+    {
+      "id": "RE-MISSED-301",
+      "severity": "medium",
+      "title": "fill_processor の inc_fill が一度も呼ばれず fx_fills_total メトリクスが本番で常に 0",
+      "evidence": [
+        "trading_platform/core/monitoring/metrics.py:88-92 (fx_fills_total 定義)",
+        "trading_platform/core/monitoring/metrics.py:457-464 (inc_fill 実装)",
+        "trading_platform/core/execution_engine/fill_processor.py:130-200 (process_fill 経路に inc_fill 呼出なし)",
+        "grep結果: inc_fill 呼出は trading_platform 全体で 0 件 (定義以外)"
+      ],
+      "rationale": "原 finding の observability_asymmetry.fx_fills_total で『要追加調査』と保留されていたが、grep で inc_fill 呼出が定義以外で 0 件であることを実証。Phase 1 では原 finding の側注で『調査推奨』とされていたが、本セッションで確認した結果 fx_fills_total は本番で恒久的に 0 のまま (= 約定数の Prometheus 監視が dead)。これは DM-204 と同型の dead metric 問題で、AUDIT-2026-0525-001 で同種の事象が high として扱われた前例がある。tests/integration/test_dm204_metrics_collector_production_wiring.py:159-162 は metrics 注入の存在を assert するが、実際の inc_fill 呼出は test しないため AST レベルでも検出されない死角。medium 相当。",
+      "suggested_fix": "fill_processor.process_fill の L170 (transition_to(FILLED) 直後) に `if _metrics is not None: _metrics.inc_fill(strategy_id=order.strategy_id, instrument=order.instrument)` を追加。あるいは FillEvent publish 経路で集中加算。"
+    },
+    {
+      "id": "RE-MISSED-302",
+      "severity": "medium",
+      "title": "OANDA 接続劣化時に _check_live_health_alerts と _maybe_reconcile_live_positions が連鎖的にスキップされる",
+      "evidence": [
+        "trading_platform/core/unified_runner/runner.py:1518-1534 (account_info 失敗で L1534 return)",
+        "trading_platform/core/unified_runner/runner.py:1481-1513 (heartbeat 処理が L1534 より後)",
+        "trading_platform/core/unified_runner/runner.py:1506 (_check_live_health_alerts)",
+        "trading_platform/core/unified_runner/runner.py:1510 (_maybe_reconcile_live_positions)"
+      ],
+      "rationale": "RE-305 の本質的影響を補強する未指摘事象。account_info 失敗時の早期 return が、後続の heartbeat 処理ブロック (L1481-1513) を完全にスキップする。heartbeat 処理には `_check_live_health_alerts` (live_orders_silent / exposure_near_cap) と `_maybe_reconcile_live_positions` が含まれるため、OANDA 接続劣化中は『沈黙検知』と『定期照合』が両方とも止まる。6 時間以上の OANDA 障害で運用者は何の Email アラートも受け取らず、プロセスは alive で WARN ログだけ出している最悪の沈黙状態に陥る。RE-305 を medium として独立指摘したが、この『連鎖スキップ』を加味すると合計影響は medium-high 相当。",
+      "suggested_fix": "(a) heartbeat ブロックを L1518 の account_info 取得より前に移動する (heartbeat は account_info 不要)、または (b) account_info 失敗時の早期 return を廃止し subsequent 処理が安全に動作するようガード強化、または (c) 連続失敗 N 回で active RiskAlert を発出 (RE-305 の修正案 a)。"
+    },
+    {
+      "id": "RE-MISSED-303",
+      "severity": "low",
+      "title": "_resolve_live_trade_id でフォールバック採用時に entry_rollback ロジックが発火しない",
+      "evidence": [
+        "trading_platform/core/unified_runner/strategy_slot.py:736-759 (_handle_entry 内のフォールバック分岐)",
+        "trading_platform/core/unified_runner/strategy_slot.py:792-799 (Paper フォールバック経路)",
+        "trading_platform/core/unified_runner/strategy_slot.py:749-759 (entry_rollback_no_trade_id 分岐)"
+      ],
+      "rationale": "L749 の entry_rollback は `if not self.state.open_trade_id:` 条件。RE-302 の経路 (Live で get_open_trades が空配列を返した場合) では L795 で state.open_trade_id = fill.broker_order_id (OANDA Order ID = 非空) が代入されるため、L749 のロールバック条件が成立せず、不正な open_trade_id を保持した状態で record_fill (L766) に到達する。これは RE-302 の派生で『rollback safety net が機能しない』理由を補強。RE-302 の修正で同時に解消されるため独立修正は不要だが、評価時の見落とし観点として記録。",
+      "suggested_fix": "RE-302 の is_live ガード追加で同時解消される。追加で『open_trade_id 採用後の妥当性チェック』を入れるなら、OANDA Order ID は通常 < 数百で文字列、Trade ID は別系列、というスキーマ差で誤判定可能性も検討。"
+    }
+  ],
+  "audit_0529_003_fix_review_addendum": {
+    "h_01_additional_concerns": "_shutdown_requested=True 設定後の L1566 return はテスト済みで正常 (poll_cycle 終了 → _should_stop=True → loop exit)。ただし `_request_shutdown` 関数 (signal handler) と `_shutdown_requested` 直接代入の 2 経路が並存しており、`_shutdown_reason` の上書き保護 (L1558-1559: `if self._shutdown_reason is None`) は妥当だが、SIGTERM 後に KS が発動した場合に reason='signal_interrupt' が保持され KS 由来の停止理由がログから消える微細な観測性問題あり。実害なし。",
+    "c_02_additional_concerns": "live_gate_rejection の throttle 撤廃で起動時に N 通の Email バーストが発生する設計は意図通りだが、SMTP 失敗時の `_send_email_async` リトライ (3 回 × backoff 1-2 秒) と組み合わさるため、最悪 N × 3 + α 通の SMTP 試行が走る。Gmail SMTP free tier の 30/hr 制限を超過しうる量産シナリオは RE-308 で指摘済み。"
+  },
+  "ptrc_bypass_paths_check": {
+    "checked_paths": [
+      "strategy_slot.py:_execute_entry の PTRC 呼出 (L652 evaluate) — risk_supervisor None フォールバックあり (L644 空 state)、これは paper のみで有効 (L357 effective_supervisor 分岐)",
+      "broker_gateway.submit / submit_with_limited_retry (L157, L283) — PTRC 通過後の order を受ける、bypass 経路なし",
+      "OrderSubmissionGuard.submit_with_guard (L678) — PTRC 通過後 snapshot 永続化のみ、bypass 経路なし"
+    ],
+    "bypass_paths_found": "なし。PTRC bypass は構造的に存在しない。"
+  },
+  "trade_id_resolution_paths_check": {
+    "_resolve_live_trade_id": "RE-301/RE-302 の対象。両 finding で網羅済み。",
+    "close_trade_calls": [
+      "strategy_slot.py:914 (_handle_exit_inner)",
+      "strategy_slot.py:1786 (graceful shutdown)"
+    ],
+    "modify_trade_calls": "grep結果: 本番コードで modify_trade 呼出なし",
+    "get_trade_calls": [
+      "strategy_slot.py:978 (_handle_exit_inner の close_trade フォールバック)",
+      "strategy_slot.py:1677 (_recover_stale_trade_pnl)"
+    ],
+    "additional_concerns": "全 close_trade / get_trade 呼出は state.open_trade_id (= _resolve_live_trade_id の結果) を引数に取るため、RE-301/RE-302 を起点として全経路にバグが伝播する。修正のレバレッジが高い。"
+  },
+  "summary": {
+    "agreements": 9,
+    "disagreements": 0,
+    "missed": 3,
+    "key_concerns": [
+      "RE-301/RE-302 は run_unified.py 本番経路で発火する高優先度バグ。INC-2026-0526-001 / INC-2026-0527-001 / RE-201 と同型の問題ベクタが runtime _resolve_live_trade_id に未適用なまま残存。must_fix。",
+      "RE-MISSED-301 (fx_fills_total dead): 原 finding が observability_asymmetry で『要追加調査』とした項目を実証。inc_fill 呼出が production 経路で 0 件。Phase 1 で見落とされた本番監視 dead point。",
+      "RE-MISSED-302 (OANDA 接続劣化時の連鎖スキップ): RE-305 の本質的インパクトを補強。account_info 失敗の早期 return が live_orders_silent と position_reconcile を両方止める。",
+      "RE-303 は本番 (run_unified.py) では発火しないため devil-advocate の low 格下げが妥当。main.py 廃止プロセス (PA-307 連動) で根本解消。",
+      "RE-304 の paper 全停止は [change:spec] レベルの設計判断であり、原 finding の medium はやや過大。devil-advocate の low が適正。",
+      "AUDIT-2026-0529-003 H-01/C-01/C-02 修正は技術的に正しい。ただし C-02 は SMTP rate-limit 二次被害 (RE-308) を残しており、量産投入運用前に集約方針を要決定。"
+    ],
+    "severity_distribution_verifier": {
+      "high": 2,
+      "medium": 4,
+      "low": 6
+    },
+    "severity_distribution_devil_advocate": {
+      "high": 2,
+      "medium": 3,
+      "low": 4
+    },
+    "severity_distribution_original": {
+      "high": 2,
+      "medium": 4,
+      "low": 3
+    }
+  }
+}

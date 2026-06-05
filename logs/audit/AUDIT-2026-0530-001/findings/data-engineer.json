@@ -1,0 +1,191 @@
+{
+  "agent": "data-engineer",
+  "scope": "FTS データ層 (commit 9998a7a 事後検証)",
+  "audit_id": "AUDIT-2026-0530-001",
+  "fts_commit_reviewed": "9998a7a",
+  "fts_head_commit": "d1e73b1",
+  "post_fix_verification": {
+    "DE-303_poll_failure_alert": "OK with concerns: (1) one-shot _poll_alert_active のみで再発火条件が「成功 1 回」だけ。連続障害が数日続くと初報以降は永遠に追加通知なし(RE-305 の 30 倍数周期再発火パターンと不整合; user は initial 1 通の見落としで全期間 silent)。 (2) POLL_FAILURE_ALERT_THRESHOLD=30 は poll_interval=60s 想定で 30 分。H4 戦略でも poll_interval は同じ 60s なので時間は同じ; OK。 (3) email_notifier kind は live_anomaly 集約 (900s throttle) で DM-306 と整合。",
+    "DE-304_dynamic_count": "OK with concerns: (1) 失敗時 _last_poll_time 非更新により次回成功時 backlog が累積で広がるが、上限 200 でクランプされる。H1 で 200 = 8 日 = ほぼ復旧後の OANDA 5000-bar API limit (5000 H1 ≈ 7 ヶ月) の範囲内なので OK。 (2) ただし backlog が ceiling を超えた場合の救済は backfill_missing 経路 (未実装) に依存する旨 docstring に明記済みだが実装は存在しない (DE-401 で別途指摘)。 (3) 戦略ごとに timeframe が異なるが key=(instrument, granularity) で独立管理されており整合。",
+    "DE-306_weekend_seconds": "OK with concerns: (1) DST 非考慮。OANDA の実市場閉鎖は NY 17:00 (Eastern Time) 基準で、Summer Time (3-11月) は UTC 21:00 close / Winter Time (11-3月) は UTC 22:00 close。実装は通年 UTC 22:00 固定なので、Summer Time 期間中は ±1 時間の境界ずれが発生する。実害: 金曜 21:00-22:00 UTC のバー gap が誤 FAIL/PASS する境界ケース。 (2) 祝日 (クリスマス・元日) のOANDA特別閉鎖は完全に非考慮。これらは年 2-3 日のため小さいが、effective_gap が当該日に max_gap を超えて誤 FAIL する。 (3) DE-401 で別途記載。test_friday_23_to_monday_00_pass_case で weekend_secs=47h を返すが raw_gap=25h で意味的に変。caller の max(0,...) クランプに依存しており、新規 caller が直接使うと負の effective gap という誤解を生む。 (4) start-7d/end+7d の固定 14 日広域走査は微細な非効率だが正しい。",
+    "DE-301_period_gate": "INSUFFICIENT: (1) gate は scripts/import_atlas_strategy.py のみで execute される。strategies/imported/{strategy_id}/runner_config.json の execution_mode を paper→live に手動編集すれば完全 bypass される (実例: ATLAS-2026-0508-069 が paper として既存; ファイル 1 行編集で live 化可能)。 (2) discovery.py:135 は runner_config.json::execution_mode を読むだけで period 検証なし。 (3) loader.py:430 load_strategy も period 検証なし。 (4) gate のスコープが import 経路に限定されており、構造的予防として不十分。 (5) DE-401 で別途指摘。",
+    "DE-311_docstring_only": "OK with concerns: (1) docstring のみで実装変更なし。「本番経路は StateManager 担当」という説明は正しいが、main.py 経路 (FastAPI dev) の StateStore は依然として InMemoryBackend のみ。 (2) AioRedisBackend 実装計画文書 (ADR / TODO) なし。「次回 audit-loop で実施」とコミットメッセージにあるが、追跡可能な issue/TODO entry が無い。 (3) settings.py が production+memory 起動拒否済みとの主張は要再確認 (本ラウンドでは未検証)。"
+  },
+  "findings": [
+    {
+      "id": "DE-401",
+      "severity": "high",
+      "area": "feature_store",
+      "title": "DE-301 period gate が import-time 限定で runtime bypass 経路 3 種",
+      "description": "DE-301 修正は scripts/import_atlas_strategy.py 内 _check_live_period_gate のみで実行される。以下の経路で完全に bypass される: (1) **runner_config.json の手動編集**: strategies/imported/{strategy_id}/runner_config.json::execution_mode を paper→live に書き換えるだけ。discovery.py:135 _parse_runner_config は execution_mode を読むだけで period 検証なし。実例: ATLAS-2026-0508-069 (ema_slow_period=800) は現在 paper だが、1 行編集で live 化可能。 (2) **手動コピー**: `cp -r ATLAS/strategies/X trading_platform/strategies/imported/X` で gate を完全に迂回。 (3) **test fixture / e2e**: テストや手動セットアップで戦略ディレクトリを生成しても loader.py の load_strategy には period gate なし。これらの経路は AUDIT-2026-0529-001 の修正範囲外。warmup ドリフトリスクは 22 LIVE 戦略中現在は無いが、構造的予防にはなっていない。",
+      "evidence": [
+        "scripts/import_atlas_strategy.py:591-674 (gate is import-only)",
+        "trading_platform/core/unified_runner/discovery.py:124-159 (_parse_runner_config has no period check)",
+        "trading_platform/core/strategy_engine/loader.py:430-534 (load_strategy has no period check)",
+        "trading_platform/strategies/imported/ATLAS-2026-0508-069/runner_config.json (execution_mode=paper, but config.json::ema_slow_period=800 — 1-line edit promotes to live without gate)"
+      ],
+      "reproduction": "(1) `sed -i 's/\"execution_mode\": \"paper\"/\"execution_mode\": \"live\"/' trading_platform/strategies/imported/ATLAS-2026-0508-069/runner_config.json` (2) python -m trading_platform.core.unified_runner で UnifiedRunner 起動 → discovery が ema_800 を LIVE として認識し、period 検証なしで warmup → MAX_WARMUP_BARS=5000 cap で EWM 残差 ~3.78e-6 が parity 1e-10 を超過しドリフト永続化。",
+      "suggested_fix": "loader.py::load_strategy() 内に LIVE mode + max_period > MAX_LIVE_SAFE_PERIOD で StrategyLoadError raise を追加。strategies/imported/* の戦略 config から period 系キーを再抽出する _extract_max_period_from_config() を loader 側にも公開して共用する。あるいは feature_store 登録時 (register()) で execution_mode を見て LIVE+大 period を ValueError にする (最後の防衛線)。",
+      "parity_impact": "yes - warmup cap で EWM 初期残差ドリフトが BT vs Live で発生。boundary signal の entry/exit 分岐リスク。",
+      "regression_of": "DE-301",
+      "post_fix_defect": true
+    },
+    {
+      "id": "DE-402",
+      "severity": "high",
+      "area": "feature_store",
+      "title": "DM-302 観測計装が本番経路 (UnifiedRunner / main.py) で dead — OANDABroker に metrics 未注入",
+      "description": "DM-302 は OANDABroker.__init__ に `metrics: Any = None` パラメータを追加し、_record_api_metric で計装する設計。しかし本番の 3 経路すべてで `OANDABroker(api_key=..., account_id=..., base_url=...)` のみ呼ばれ、metrics= が未指定: (1) runner.py:343 UnifiedRunner._initialize (本番 LIVE 経路), (2) main.py:335 FastAPI dev 経路, (3) forward_test.py:239 forward test。結果として OANDA API latency / status は本番一切記録されず、alerting_rules.yml の FxOandaApiLatencyHigh アラートは依然 dead path。AUDIT-2026-0529-001 で「本番呼出 0 件 → dead alert」を解消したと主張したが、broker 側に注入されていないため計装は実質 paper でのみ機能 (paper でも別ルートのため記録されない)。DM-302 は実質的に未完了。",
+      "evidence": [
+        "trading_platform/core/unified_runner/runner.py:343-347 (metrics= 未指定)",
+        "trading_platform/main.py:335-339 (metrics= 未指定)",
+        "trading_platform/forward_test.py:239-243 (metrics= 未指定)",
+        "trading_platform/broker/oanda_adapter/client.py:159-170 (metrics=None デフォルトで receive)",
+        "trading_platform/broker/oanda_adapter/client.py:841 (`if self._metrics is None: return` で計装スキップ)"
+      ],
+      "reproduction": "(1) UnifiedRunner を本番起動 (2) OANDA API を叩く操作 (warmup / poll_latest / submit_order 等) を実施 (3) `curl localhost:8000/metrics | grep fx_oanda_api_latency_ms` → 0 件 (4) Prometheus FxOandaApiLatencyHigh アラートは観測不能。",
+      "suggested_fix": "runner.py:343, main.py:335, forward_test.py:239 で `metrics=self._metrics` を追加 (合計 3 行)。MetricsCollector が既存属性として保持されているため変更は最小。AST 検証テストを test_dm302_metrics_instrumentation.py に追加し、本番経路 3 箇所での注入を構造的に担保する。",
+      "parity_impact": "no (observation only)",
+      "regression_of": "DM-302",
+      "post_fix_defect": true
+    },
+    {
+      "id": "DE-403",
+      "severity": "high",
+      "area": "feature_store",
+      "title": "observe_feature_staleness のラベル誤用 + 測定値の意味不適合",
+      "description": "DM-302 修正の一環で live_store.py::update_bar() が `self._metrics.observe_feature_staleness(self.primary_tf, age_sec)` を呼ぶが、以下 2 件の defect: (1) **ラベル誤用**: `observe_feature_staleness(strategy_id, age_sec)` の第 1 引数は Prometheus label `strategy_id` (metrics.py:280)。これに `self.primary_tf` ('H1', 'H4' 等) を渡しているため、Prometheus 上では `fx_feature_staleness_sec{strategy_id='H1'}` という意味不明な時系列が生成される。strategy_id ごとの陳腐化を見れない。 (2) **意味誤り**: `age_sec` は 2 本目以降の主 TF バー間隔 (perf_counter で前回 update_bar からの経過秒) を測定。H1 戦略では常に ~3600s ± OANDA 配信遅延、H4 戦略では ~14400s が常時記録される。alerting_rules.yml::FxFeatureStorestaleHigh は `max(fx_feature_staleness_sec) > 60 for 3m` で発火するため、H1/H4 戦略を 1 つでも回すと第 2 バー到達時点で常時 FIRING 状態になる。M1 戦略でも境界 60s 直上で flap する。本来の意図 (= 現在時刻 - 最終バー時刻、ストリーム停止検知) と全く異なる semantics。",
+      "evidence": [
+        "trading_platform/data/feature_store/live_store.py:431-446 (age_sec = now - 前回 update_bar 時刻)",
+        "trading_platform/core/monitoring/metrics.py:838-850 (def observe_feature_staleness(self, strategy_id: str, age_sec: float))",
+        "trading_platform/core/monitoring/metrics.py:277-281 (Gauge ラベル=['strategy_id'])",
+        "deploy/prometheus/alerting_rules.yml:98-111 (FxFeatureStorestaleHigh: max(fx_feature_staleness_sec) > 60 for 3m)"
+      ],
+      "reproduction": "(1) LiveFeatureStore に H1 戦略を register (2) 2 本目のバーを update_bar → metrics.observe_feature_staleness('H1', 3600.0) (3) Prometheus に `fx_feature_staleness_sec{strategy_id='H1'} 3600` (4) max > 60 で FxFeatureStorestaleHigh が 3 分後に確定 FIRING。",
+      "suggested_fix": "(A) ラベル意図に合わせて strategy_id を渡す: LiveFeatureStore は戦略を知らないため、各戦略に紐づく LiveFeatureStore かどうかを再設計する必要がある (StrategySlot 経由で wrap)。 (B) semantics 修正: バー間隔ではなく『current_time - 最終バー時刻』をハートビート周期で観測する設計に変更 (HeartbeatChecker 系で staleness gauge を周期更新)。短期回避としては alerting_rules.yml の expr を `... > 7200 for 3m` (H4 でも余裕を持つ閾値) に上げ、ラベルを修正する。本問題は別 finding として devops-monitor へ展開推奨。",
+      "parity_impact": "no (observation only)",
+      "regression_of": "DM-302",
+      "post_fix_defect": true
+    },
+    {
+      "id": "DE-404",
+      "severity": "medium",
+      "area": "market_data",
+      "title": "OANDABroker submit_order / get_account_info / get_open_trades / get_candles でタイムアウト時 metrics drop",
+      "description": "cancel_order のみが `except TimeoutError: self._record_api_metric('cancel_order', None, None)` で timeout を計装する設計 (client.py:520-528)。一方で submit_order, get_account_info, get_open_trades, get_candles は `async with session.get/post() as resp` の happy path 内でしか metric を呼ばないため、aiohttp.ClientTimeout で asyncio.TimeoutError が raise されると resp に到達せず metric が記録されない (status=timeout も latency も drop)。結果として: (1) OANDA timeout の Prometheus 上の可視性が submit_order / candles 等で zero。 (2) FxOandaApiLatencyHigh も timeout 系では発火しない (rate(fx_oanda_api_responses_total{status_code='timeout'}) ベースの新規アラート設計が必要なら現状未整備)。 (3) DE-303 の poll_latest 失敗時も `count_requested=count` をログには出すが OANDA broker 層では metric を出さない (broker→provider 層で 1 か所欠落)。",
+      "evidence": [
+        "trading_platform/broker/oanda_adapter/client.py:368-373 (submit_order: _t0 → _record_api_metric は async with 内のみ)",
+        "trading_platform/broker/oanda_adapter/client.py:497-528 (cancel_order: TimeoutError 別 except で _record_api_metric('cancel_order', None, None) 計装あり)",
+        "trading_platform/broker/oanda_adapter/client.py:544-548 (get_account_info: timeout 経路で metric なし)",
+        "trading_platform/broker/oanda_adapter/client.py:595-599 (get_open_trades: 同)",
+        "trading_platform/broker/oanda_adapter/client.py:785-789 (get_candles: 同)"
+      ],
+      "reproduction": "(1) aiohttp session を timeout=0.001 で構築 (2) get_candles 呼出 → asyncio.TimeoutError raise (3) MetricsCollector の oanda_api_status カウンタは更新されていない。",
+      "suggested_fix": "cancel_order と同様、各 API メソッドに `except TimeoutError: self._record_api_metric(<endpoint>, None, None); raise` を追加 (5 メソッド × 5 行)。あるいは try/finally で latency を必ず記録するパターンに統一。後者の方が refactor として簡潔。",
+      "parity_impact": "no (observation only)",
+      "regression_of": "DM-302",
+      "post_fix_defect": true
+    },
+    {
+      "id": "DE-405",
+      "severity": "medium",
+      "area": "quality",
+      "title": "DE-306 _count_weekend_seconds が DST と OANDA holiday を非考慮",
+      "description": "DE-306 修正は OANDA 公式市場時間 (金曜 22:00 UTC 〜 日曜 22:00 UTC) ベースで計算するが、以下 2 点で実市場と乖離する: (1) **DST 非考慮**: OANDA の実市場閉鎖は NY 17:00 (Eastern Time) 基準。Summer Time (3 月第 2 日曜 〜 11 月第 1 日曜) は UTC 21:00 close、Winter Time は UTC 22:00 close。本実装は通年 UTC 22:00 固定。Summer Time 期間中 (年の約 8 ヶ月) は ±1 時間の境界ずれ。実害: 金曜 21:00-22:00 UTC バーの gap が Summer Time 期間中誤 PASS (実際は閉鎖中) または日曜 21:00-22:00 UTC バーの gap が Winter Time に誤 PASS。 (2) **祝日非考慮**: OANDA はクリスマス (12/25)・元日 (1/1)・聖金曜日 (Good Friday) 等で追加閉鎖あり。閉鎖時間帯は短いがバーに gap が出るため effective_gap > max_gap で FAIL する。年に 2-3 日影響。 (3) 副次的に、test_friday_23_to_monday_00_pass_case で weekend_secs=47h を返すが raw_gap=25h であり、戻り値が始終端区間に閉じていない (47h を信じる新規 caller がいると effective_gap が負になる)。caller の max(0,...) 防御に依存する semantic。",
+      "evidence": [
+        "trading_platform/data/quality/quality_engine.py:736-786 (UTC 22:00 固定)",
+        "tests/unit/test_de306_weekend_seconds.py:65-72 (47h を 25h 区間で返すが PASS 期待値の根拠が caller の max(0,...))"
+      ],
+      "reproduction": "DST 例: 2026-04-05 (Summer Time 期間中) の金曜 21:00 UTC → 日曜 22:00 UTC の bar gap を _check_gap に通すと、実 OANDA 閉鎖は金曜 21:00 UTC からだが計算は 22:00 開始のため 1h の閉鎖時間が引き算から漏れる → effective_gap > max_gap で FAIL。",
+      "suggested_fix": "(A) zoneinfo.ZoneInfo('America/New_York') を使い NY 17:00 を週末閉鎖の境界として計算する (DST 自動追従)。 (B) 既知の主要祝日リストを定数で持ち、該当日の 0:00-24:00 UTC を closure に追加する。 (C) 戻り値の semantics を docstring に明示 (「区間 [start, end] と週末閉鎖ウィンドウの重なり時間」と限定し、必ずしも end-start 以下とは限らない旨)。",
+      "parity_impact": "indirect - 誤 FAIL によりバー drop (DE-002 forced publish 経路なら parity 維持、drop なら drift)",
+      "regression_of": "DE-306",
+      "post_fix_defect": true
+    },
+    {
+      "id": "DE-406",
+      "severity": "medium",
+      "area": "market_data",
+      "title": "DE-303 連続失敗 RiskAlert の one-shot 設計で sleep 時間帯の sile­nt 期間が発生",
+      "description": "DE-303 は POLL_FAILURE_ALERT_THRESHOLD=30 (≒ 30 分) 連続失敗で RiskAlertEvent 発行、`_poll_alert_active=True` で再発火を抑止し、成功 1 回でリセット。これにより以下のシナリオが silent: (1) OANDA が夜間 (00:00-08:00 JST) に長時間断絶 → 30 分時点で 1 通配信、運用者就寝中で気付かず → 朝起きるまで再通知なし。Live は 8 時間ほぼ全停止。RE-305 (runner.py:1608-1631) は account_info で `consecutive_errors % 30 == 0` で再発火するパターンを採用しているが、DE-303 (data_provider.py:328-373) では採用されておらず inconsistent。 (2) EmailNotifier の live_anomaly throttle (900s = 15分) と組合せると、初報 1 通 + その後 silent → 翌朝アラート気付き。 (3) `live_orders_silent` 専用 kind は 12 時間 throttle なので、ユーザー要請に整合する別 kind を再設計する余地あり。",
+      "evidence": [
+        "trading_platform/core/unified_runner/data_provider.py:300-373 (_reset_poll_failure_state は成功時のみリセット、_poll_alert_active で one-shot)",
+        "trading_platform/core/unified_runner/runner.py:1608-1631 (RE-305 は `% 30 == 0` で periodic refire)",
+        "trading_platform/core/monitoring/email_notifier.py:343 (live_anomaly throttle=900s)"
+      ],
+      "reproduction": "(1) Mock OANDA broker で常時 ConnectionError raise (2) provider.poll_latest を 60 回連続呼出 (3) RiskAlertEvent は 1 件のみ (4) email_notifier も live_anomaly 集約で 1 通のみ。",
+      "suggested_fix": "DE-303 でも RE-305 と同様の `failures % POLL_FAILURE_ALERT_THRESHOLD == 0` パターンを採用し、30 回ごと (30/60/90/...) に再発火させる。または独立の live_data_outage kind を新設し throttle=3600s (1 時間に 1 通) 等の中間値を設定。設計判断は user (ユーザー要請が live_orders_silent=12h の流れと整合させるなら同等延長も可)。",
+      "parity_impact": "no",
+      "regression_of": "DE-303",
+      "post_fix_defect": true
+    },
+    {
+      "id": "DE-407",
+      "severity": "medium",
+      "area": "parity",
+      "title": "Parity test に asymmetric warmup ケース不在 - 高 period 戦略の Live ドリフトが検知不能",
+      "description": "tests/parity/* は両 store に同一 DataFrame を投入する対称シナリオのみ。実 Live では (1) ATLAS BT は数年分の履歴で全バー事前計算、(2) Live FeatureStore は warmup として MAX_WARMUP_BARS=5000 のみ取得し、それより前のバーは存在しない。EWM(adjust=False) は前段累積に依存するため、warmup 始点が異なれば最終値も異なる。DE-301 が論拠とする「EWM 残差 ~3.78e-6 @ period=800」を回帰検証するテストが存在しない。tests/parity/test_feature_store_parity_buffer_trim.py は buffer_size=200 の固定トリミングをテストするが、warmup 長 vs 全履歴の比較ではない。結果として: (a) ema_800 等の高 period 戦略を live 化した場合の parity drift が CI で検知できない、(b) DE-301 の MAX_LIVE_SAFE_PERIOD=384 という閾値設定の妥当性根拠が経験則のみで自動検証されていない。",
+      "evidence": [
+        "tests/parity/test_feature_store_parity.py:103-118 (両 store に同一 df 一括投入)",
+        "tests/parity/test_feature_store_parity_buffer_trim.py (buffer trim のみ、warmup 長 asymmetry なし)",
+        "trading_platform/core/unified_runner/runner.py:1413 (count = min(max(required, WARMUP_BARS), MAX_WARMUP_BARS=5000) で cap)",
+        "scripts/import_atlas_strategy.py:71-77 (MAX_LIVE_SAFE_PERIOD = 384 = 5000/13)"
+      ],
+      "reproduction": "(1) atlas_fs = _SimpleFeatureStore(全 30000 本 df), live_fs = LiveFeatureStore(buffer_size=5000) (2) live_fs に 直近 5000 本だけ update_bar (3) ema_800 を register (4) atlas_fs.get('ema_800', 29999) vs live_fs.get('ema_800', 4999) の差 → MAX_LIVE_SAFE_PERIOD=384 を上回る period で 1e-10 を超える。",
+      "suggested_fix": "tests/parity/test_feature_store_warmup_asymmetry.py 新設。fixture で 30000 本 df を生成、ATLAS に全 30000、Live に末尾 5000 本のみ投入、register('ema_X', period=X) を X=100..1000 でループし parity 差分が 1e-10 を維持できる period 上限を実測。DE-301 MAX_LIVE_SAFE_PERIOD の妥当性を boundary test で担保。",
+      "parity_impact": "yes - asymmetric warmup でドリフト発生条件の boundary を検証する test 不在",
+      "regression_of": null,
+      "post_fix_defect": false
+    },
+    {
+      "id": "DE-408",
+      "severity": "medium",
+      "area": "market_data",
+      "title": "DE-304 dynamic count で OANDA 5000-bar API 上限超過時の保護なし",
+      "description": "_calc_poll_count は POLL_LATEST_COUNT_CEILING=200 で頭打ちにするが、これは OANDA candle API の 5000-bar 上限よりはるかに小さい安全側。一方で問題は逆方向: backlog が 200 本超過した場合 (例: 数日 OANDA 切断後の復旧)、200 本しか取得できず最古の 200 本より前の確定バーは silent drop される。docstring には「これを超える gap は backfill_missing 経路 (別実装) でカバーすべき」とあるが、`backfill_missing` の実装は存在しない (grep でヒットなし)。よって長時間断絶からの復旧では LiveFeatureStore のバー列に gap が永続し、ATLAS BT との parity が崩れる。POLL_LATEST_COUNT_CEILING=200 を選んだ根拠は「H1 で 8 日」だが、現実のインシデント (5/20 〜 5/26 の約 6 日障害事例) を超えるかどうか境界に近い。",
+      "evidence": [
+        "trading_platform/core/unified_runner/data_provider.py:80-86 (CEILING=200 root cause)",
+        "trading_platform/core/unified_runner/data_provider.py:46-51 (docstring: backlog 超過は別実装に依存)",
+        "grep backfill_missing → ヒットなし (実装不在)"
+      ],
+      "reproduction": "(1) provider.poll_latest 成功 (2) _last_poll_time を 12 日前に偽装 (3) provider.poll_latest 呼出 (4) get_candles(count=200) 呼出 → 200 本のみ返る。それ以前の確定バーは drop。LiveFeatureStore のバー列が ATLAS と乖離。",
+      "suggested_fix": "(A) CEILING を 5000 に上げる (OANDA API 上限と一致、メモリ影響は 1 リクエスト分のため軽微)。 (B) または backfill_missing 経路を実装。 (C) backlog が CEILING を超えた検知時に CRITICAL RiskAlert + parity_breach メトリクスを発行 (現状は無音 drop)。",
+      "parity_impact": "yes - 長期断絶からの復旧で BT vs Live のバー列乖離",
+      "regression_of": "DE-304",
+      "post_fix_defect": true
+    },
+    {
+      "id": "DE-409",
+      "severity": "low",
+      "area": "cache",
+      "title": "_aux_raw_cache に TTL なし - 補助 TF DataFrame の trim 時にキャッシュ stale 残存可能性",
+      "description": "LiveFeatureStore._aux_raw_cache (live_store.py:202) は補助 TF features の計算結果を保持し、_realign_aux_features で再利用する。無効化条件は補助 TF DataFrame の末尾 timestamp + 長さ一致。バッファトリミング (line 424-427) で aux DataFrame の先頭が剥がれた場合、長さは変わるためキャッシュは無効化されるが、長さが変わらないトリミング (= 1 in 1 out) では timestamp が変わらない限り cache hit する。EWM(adjust=False) 系の補助 TF features は先頭剥離で結果が変わるため、stale cache が parity drift を誘発する潜在リスク。本シナリオは現状の MAX_BUFFER_SIZE=50000 + 補助 TF 用途では極めて稀だが、構造的に保証されていない。",
+      "evidence": [
+        "trading_platform/data/feature_store/live_store.py:202-204 (cache 状態)",
+        "trading_platform/data/feature_store/live_store.py:617-625 (cache_valid 判定: last_ts + len)",
+        "trading_platform/data/feature_store/live_store.py:424-427 (バッファトリミング)"
+      ],
+      "reproduction": "(1) 補助 TF バッファを effective_buffer_size 直前まで貯める (2) 末尾 1 本追加 + バッファ先頭 1 本剥離 (len 変化なし、末尾 ts 変化あり) → cache 無効化 (3) ただし末尾 ts も同一の状況は今は無いが、将来の補助 TF 同一秒バー (重複) で同条件を満たしうる。",
+      "suggested_fix": "cache_valid 判定に「先頭 timestamp」も追加し、トリミング検知を厳密化。低コスト (1 行追加)。",
+      "parity_impact": "potential - 補助 TF EWM 系で稀ケース下にドリフト",
+      "regression_of": null,
+      "post_fix_defect": false
+    },
+    {
+      "id": "DE-410",
+      "severity": "low",
+      "area": "feature_store",
+      "title": "_last_primary_bar_time が warmup 中の update_bar で観測され、初回正規バーで偽の age_sec が記録される",
+      "description": "live_store.py:435-446 で _now = time.monotonic(), age_sec = _now - _last_primary_bar_time。warmup (warmup() メソッド経由) も update_bar() を呼ぶ場合、warmup 中の 5000 本投入で _last_primary_bar_time が逐次更新される。warmup 完了から最初の通常 poll で update_bar された時点での age_sec は「warmup 最終バー処理時刻 → 初回 poll 配信時刻」となり、warmup 直後の通常バー処理タイミング (e.g., warmup 完了から 5 分後の M5 バー) では 300s 程度の偽の staleness を記録する。DE-403 のラベル誤用と組合せ、warmup→initial poll の遷移で偽 FIRING を生む。",
+      "evidence": [
+        "trading_platform/data/feature_store/live_store.py:215-219 (_last_primary_bar_time = None で初期化、update_bar で逐次更新)",
+        "trading_platform/data/feature_store/live_store.py:435-446 (warmup と通常 poll を区別しない)"
+      ],
+      "reproduction": "(1) warmup 5000 本投入 → _last_primary_bar_time = warmup 最終時刻 (2) 5 分間の poll loop アイドル (3) 通常 poll の最初の update_bar → age_sec ≈ 300s, observe_feature_staleness(300) → 偽の staleness。",
+      "suggested_fix": "warmup() メソッドでは _last_primary_bar_time を更新しない or warmup 完了時に None リセット。",
+      "parity_impact": "no",
+      "regression_of": "DM-302",
+      "post_fix_defect": true
+    }
+  ]
+}

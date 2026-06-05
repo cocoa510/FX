@@ -1,0 +1,60 @@
+{
+  "issue": "sandbox_memory_limit_test_hang",
+  "root_cause": "2重構造のデッドロック: (1) _SandboxWorker._loop が _results.put() を タイムアウトなしのブロッキング put で実行する (sandbox_runner.py:94)。テストが _results を MemoryError で満杯にした状態で call() を呼ぶと、_loop は dummy_func 実行後に _results.put(ok, result) でブロックする。Windows スレッドスケジューラがこのブロックを 40ms 以上に延ばす場合がある。(2) pyproject.toml に pytest-timeout のグローバル設定が存在しない。テストが何らかの理由でブロックした場合に永久に待ち続けるフェイルセーフがない。この 2 つが組み合わさると、Windows の粗いスレッドスケジューリングが ブロッキング put を数秒〜数十秒延長した場合に pytest プロセス全体がフリーズし、pytest-timeout がないため回収されず 10 時間以上の hang として観測される。",
+  "is_production_safety_bug": true,
+  "evidence": [
+    "atlas/validator/sandbox_runner.py:94: self._results.put(('ok', func(*args, **kwargs))) — timeout=None のブロッキング put",
+    "atlas/validator/sandbox_runner.py:107: self._results.put(('err', e), timeout=_PER_CALL_TIMEOUT_SEC) — CSR-005 で err 側は timeout 付きに修正済みだが ok 側は未修正",
+    "atlas/validator/sandbox_runner.py:118-137: _mem_poll は _results.put_nowait() を使うが _loop は blocking put を使う — 非対称な実装",
+    "pyproject.toml:31-34: [tool.pytest.ini_options] に timeout 設定なし — グローバルタイムアウトガードが存在しない",
+    "tests/unit/test_sandbox_memory_limit.py:43-61: test が _results に MemoryError を直接 put してから call() を呼ぶ — _loop の blocking put と競合する状態を作る",
+    "実測: Windows で _results が満杯の状態で _loop の blocking put が 40ms ブロックすることを確認 (Linux 比 40x 以上)",
+    "git show f6c5713f:atlas/validator/sandbox_runner.py — CSR-002 コミットで _mem_poll/_stop_event を追加したが _loop の blocking put は修正しなかった"
+  ],
+  "remediations": [
+    {
+      "option": "pyproject.toml に pytest-timeout のグローバル設定を追加",
+      "effort": "low",
+      "risk": "テストの実行時間上限が変わる（現在より厳格になる）",
+      "recommended": true,
+      "detail": "pyproject.toml の [tool.pytest.ini_options] に timeout = 30 を追加する。既に pytest-timeout プラグインはインストール済み。これにより個々のテストが 30 秒でタイムアウトし、hang が永久に続かなくなる。長時間テストは @pytest.mark.timeout(N) でオーバーライド可能。"
+    },
+    {
+      "option": "_loop の _results.put() を timeout 付きに変更",
+      "effort": "low",
+      "risk": "timeout 時に ok 結果が _results に届かず call() が SandboxCallTimeout になる（戦略が正常でも FAIL になりうる）",
+      "recommended": true,
+      "detail": "sandbox_runner.py:94 の self._results.put(('ok', func(*args, **kwargs))) を self._results.put(('ok', func(*args, **kwargs)), timeout=_PER_CALL_TIMEOUT_SEC * 2) に変更。これにより _loop のブロッキング put に 200ms の上限が設けられる。timeout した場合は logger.error で記録し、call() 側が SandboxCallTimeout で検知する。CSR-005 で err 側はすでに timeout=_PER_CALL_TIMEOUT_SEC に修正済み — ok 側も揃えるべき。"
+    },
+    {
+      "option": "test_memory_error_raised_when_rss_exceeds_limit に @pytest.mark.timeout を追加",
+      "effort": "low",
+      "risk": "なし（テスト固有のガード）",
+      "recommended": true,
+      "detail": "tests/unit/test_sandbox_memory_limit.py の test_memory_error_raised_when_rss_exceeds_limit に @pytest.mark.timeout(10) を追加する。このテストは通常 1 秒以内に完了するので 10 秒で十分。テスト固有の保護として最も即効性がある。"
+    },
+    {
+      "option": "Windows 環境でテストをスキップ",
+      "effort": "low",
+      "risk": "Windows での回帰検出が弱体化する",
+      "recommended": false,
+      "detail": "@pytest.mark.skipif(sys.platform == 'win32', reason='Windows thread scheduler hang risk') を追加。これは問題を解決せず隠蔽するだけなので推奨しない。Windows は本番環境なので Windows での動作保証が必要。"
+    },
+    {
+      "option": "_results Queue を maxsize=2 に拡大",
+      "effort": "medium",
+      "risk": "結果の不整合 (古い結果が次の call() に渡る) リスクが増加する",
+      "recommended": false,
+      "detail": "_results の maxsize を 1 から 2 に変更することで、_loop の put が満杯でブロックする頻度を下げられる。しかし根本的な解決にならず、結果の不整合バグを引き起こすリスクがある。オプション 2 の timeout 付き put の方が安全で確実。"
+    },
+    {
+      "option": "_loop を asyncio ベースに書き換え",
+      "effort": "high",
+      "risk": "大規模なリファクタリング、既存テストへの影響が大きい",
+      "recommended": false,
+      "detail": "スレッドモデルを asyncio coroutine に置き換えることで、GIL の影響を排除して協調的マルチタスクを実現する。ただし validator 全体の大規模リファクタリングが必要であり、リスクが高い。短期対策として推奨しない。"
+    }
+  ],
+  "recommended": "3 段階対策を順番に実施する。(1) 即時: pyproject.toml に timeout=30 を追加 (設定 1 行で hang が永続しなくなる)。(2) 短期: _loop の _results.put() に timeout=_PER_CALL_TIMEOUT_SEC*2 を追加 (CSR-005 で err 側は修正済み、ok 側も同一パターンで揃える、本番サンドボックスの安全性も向上)。(3) テスト側: test_memory_error_raised_when_rss_exceeds_limit に @pytest.mark.timeout(10) を追加 (テスト固有の直接ガード)。(1) と (3) のみで hang は解消される。(2) は本番 Stage 3 の デッドロック耐性強化として追加実施を推奨。",
+  "current_status": "現時点のテストは PASS している (9/9)。hang は特定の Windows スレッドスケジューリング条件下でのみ再現する。pyproject.toml に timeout がないため一度 hang すると回収不能になる。"
+}

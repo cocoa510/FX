@@ -1,0 +1,140 @@
+{
+  "agent": "qa-tester",
+  "scope": "FTS テスト (commit eccab9a 6 新規テスト + 新規)",
+  "audit_date": "2026-05-30",
+  "post_fix_verification": {
+    "new_6_test_files_quality": "concerns: [QT-501, QT-502, QT-503, QT-504, QT-505, QT-506, QT-507]",
+    "tests_contract_directory": "concerns: [QT-501] CI の専用 contract ゲートが tests/contract/ を収集しない"
+  },
+  "findings": [
+    {
+      "id": "QT-501",
+      "severity": "high",
+      "area": "CI / tests/contract/ ディレクトリ配置",
+      "title": "parity.yml の 'Run contract tests' ステップが tests/contract/ を永続 skip する",
+      "description": "parity.yml L76-81 の contract テストステップは `if [ -d tests/integration/contract ]; then pytest tests/integration/contract/ ...` を実行する。しかし新設された tests/contract/ は tests/integration/contract/ ではなく tests/contract/ に配置されており、ディレクトリ存在チェックが常時 False → `echo 'No contract tests directory; skipping'` になる。結果として test_oanda_broker_metrics_wired.py の 5 テストは専用 contract ゲートとしての役割を果たさず、`Run unit tests` ステップ (pytest tests/ --maxfail=10 ...) のみで実行される。このステップは --maxfail=10 で打ち切られるため、contract テストが他の失敗で隠れるリスクがある。また将来的に `tests/integration/contract/` を新設した場合、tests/contract/ は orphan として忘却される構造。",
+      "evidence": [
+        ".github/workflows/parity.yml:76-81",
+        "tests/contract/test_oanda_broker_metrics_wired.py:1"
+      ],
+      "reproduction": "ls tests/integration/ 内に contract/ が存在しないことを確認 → parity.yml の contract step が skip されることを確認",
+      "suggested_fix": "parity.yml の contract ステップのパス判定を `tests/contract` と `tests/integration/contract` 両方を走査する形に修正するか、REQUIRED_SITES として contract テストを明示的に testpaths に追加するか、ディレクトリを tests/integration/contract/ に移動する。",
+      "test_blind_spot": "contract テストが専用ゲートで実行されているという運用者の期待と実態が乖離している。既存ワークフローコメント (QT-007 第11次監査) が `tests/integration/contract` を正規パスと宣言しているが eccab9a では tests/contract/ に配置した。",
+      "regression_of": null,
+      "post_fix_defect": true
+    },
+    {
+      "id": "QT-502",
+      "severity": "medium",
+      "area": "tests/contract/test_oanda_broker_metrics_wired.py — REQUIRED_SITES 網羅漏れ",
+      "title": "scripts/live_signal_probe.py と scripts/live_order_test.py が REQUIRED_SITES に含まれていない",
+      "description": "test_oanda_broker_metrics_wired.py の REQUIRED_SITES には runner.py / main.py / forward_test.py / live_preflight.py の 4 ファイルのみ列挙されている。しかし scripts/live_signal_probe.py:57 と scripts/live_order_test.py:61 はどちらも `OANDABroker(api_key=..., account_id=..., base_url=...)` と metrics= を渡さずに生成している。contract テストが保護しようとした RE-401 配線漏れがこれら 2 スクリプトで現在も存在しており、CI で検出されない。live_signal_probe.py は OANDA 接続を使う診断ツールで本番環境でも利用されることがある。",
+      "evidence": [
+        "scripts/live_signal_probe.py:57",
+        "scripts/live_order_test.py:61",
+        "tests/contract/test_oanda_broker_metrics_wired.py:34-39"
+      ],
+      "reproduction": "python -c \"import ast; src=open('scripts/live_signal_probe.py').read(); ... OANDABroker 呼び出しに metrics= がない\"",
+      "suggested_fix": "REQUIRED_SITES に scripts/live_signal_probe.py と scripts/live_order_test.py を追加し、かつ該当スクリプト内の OANDABroker 生成箇所に metrics= を配線する (または運用診断スクリプトは計装対象外と判断して明示的に docstring に記載する)。",
+      "test_blind_spot": "contract テストが新規ファイル追加時に自動拾えない構造（手動 REQUIRED_SITES 列挙方式）。",
+      "regression_of": null,
+      "post_fix_defect": true
+    },
+    {
+      "id": "QT-503",
+      "severity": "medium",
+      "area": "tests/unit/test_re411_submit_order_timeout_metric.py — 後方互換テストの矛盾",
+      "title": "test_submit_order_no_metrics_no_op が metrics=None を許容するが contract テストが metrics=None を禁止しており設計矛盾が表面化",
+      "description": "test_re411_submit_order_timeout_metric.py:127-134 の `test_submit_order_no_metrics_no_op` は `OANDABroker(...) # metrics 未注入` を使い `TimeoutError` が伝播することを検証している。これ自体は後方互換テストとして正当だが、tests/contract/test_oanda_broker_metrics_wired.py は `metrics=None` リテラルを禁止 (L90-93) しており、テスト群として送るメッセージが矛盾する。また test_re411 の最後のテストは `metrics=` キーワード引数自体を渡さない形で OANDABroker を生成しており、contract テストが検査する REQUIRED_SITES ファイルではないためこのテスト自体は CI を通過するが、「metrics= は必須である」という contract の意図を弱体化させる。",
+      "evidence": [
+        "tests/unit/test_re411_submit_order_timeout_metric.py:127-134",
+        "tests/contract/test_oanda_broker_metrics_wired.py:86-93"
+      ],
+      "reproduction": "test_submit_order_no_metrics_no_op が metrics 未注入で OANDABroker を生成 → contract テストの REQUIRED_SITES にない → contract テストは通過する → 設計矛盾は CI で検出されない",
+      "suggested_fix": "テストファイル内で `metrics=None` を明示的に渡すか、コメントで「テスト用の後方互換パスとして意図的に metrics 未注入」と記載し、contract テストの対象外であることを明示する。",
+      "test_blind_spot": "contract テストが本番経路ファイルのみを対象にしており、テストコード内での OANDABroker 未配線は素通りする。",
+      "regression_of": null,
+      "post_fix_defect": false
+    },
+    {
+      "id": "QT-504",
+      "severity": "medium",
+      "area": "tests/integration/test_pa401_main_eventbus_startup_order.py — テスト名 vs 検証内容の乖離",
+      "title": "test_live_gate_rejection_publish_reaches_subscribers がゲート拒否の本番経路を踏まない",
+      "description": "テスト名は「LIVE Gate 拒否の publish が subscribe 済みハンドラに届く統合確認」と宣言しているが、実際は (1) research モードで実行 → Gate 拒否は発生しない、(2) `initialize()` 完了後に手動で `_ensure_eventbus_and_notifier_started()` を呼び subscriber を登録、(3) `_event_bus.publish(RiskAlertEvent(...))` を手動で呼ぶ、という順序になっている。つまり「LIVE Gate 拒否のコード経路 (L627-635 in main.py)」は一切踏んでおらず、単に EventBus の publish/subscribe が機能することを確認するだけのテストになっている。PA-401 の実際の修正点（initialize 内の early start → Gate 拒否時の publish が drop されない）は検証されていない。",
+      "evidence": [
+        "tests/integration/test_pa401_main_eventbus_startup_order.py:154-189",
+        "trading_platform/main.py:627-635"
+      ],
+      "reproduction": "research モードでは load_all_strategies が Gate 拒否を引き起こさない (strategies_dir が空なので 0 件ロード) → live_strategy_rejected_by_gate は発火しない",
+      "suggested_fix": "実際に Gate 拒否が発生する経路を踏むテストを追加する: (1) production 設定 + escape hatch または (2) StrategyLoadError.rejected に LIVE 戦略を含む state を monkeypatch で注入して initialize() を実行する。あるいはテスト名を「EventBus の publish/subscribe が initialize 後に機能すること」に修正して期待を正直に表現する。",
+      "test_blind_spot": "main.py:627-635 の Gate 拒否時 early_start + publish 経路がテストで踏まれていない (Phase 4.5 観点: 本番経路を踏むか)。",
+      "regression_of": null,
+      "post_fix_defect": false
+    },
+    {
+      "id": "QT-505",
+      "severity": "low",
+      "area": "tests/integration/test_pa412_escape_hatch_warning.py — structlog 出力の環境依存",
+      "title": "test_escape_hatch_sets_flag_and_emits_critical_log の capsys 検証が structlog 設定に依存",
+      "description": "conftest.py で `setup_logging('WARNING')` が実行されており、structlog の PrintLogger / ConsoleRenderer 設定が確定している。テスト `test_escape_hatch_sets_flag_and_emits_critical_log` は `capsys.readouterr()` で stdout/stderr を捕捉して 'PA-412' タグを確認する。しかし structlog は設定モードによって stdout ではなく logging.StreamHandler 経由での出力になる場合があり、pytest の capsys は logging ハンドラの出力を捕捉しない (pytest の caplog を使う必要がある)。現在の setup_logging 設定が PrintLogger (stdout 直書き) か StreamHandler 経由かに依存しており、CI 環境変更時に偽緑/偽赤のリスクがある。",
+      "evidence": [
+        "tests/integration/test_pa412_escape_hatch_warning.py:59-88",
+        "tests/conftest.py:46"
+      ],
+      "reproduction": "setup_logging('WARNING') の実装が structlog の ProcessorFormatter + StreamHandler を使う設定に変わると capsys で出力を捕捉できなくなり、assert 'PA-412' in combined が常時 False になる",
+      "suggested_fix": "capsys の代わりに `caplog` (pytest の logging 捕捉) + `caplog.set_level(logging.CRITICAL)` を使うか、あるいは structlog の bound_logger を MagicMock で差し替えて log メソッド呼び出しを直接確認する。または `_escape_hatch_active=True` フラグの確認のみに絞り、ログ内容は別の logger mock テストに分離する。",
+      "test_blind_spot": "structlog → pytest 出力捕捉の信頼性が環境依存。",
+      "regression_of": null,
+      "post_fix_defect": false
+    },
+    {
+      "id": "QT-506",
+      "severity": "low",
+      "area": "tests/unit/test_de403_feature_staleness_semantics.py — プライベートフィールド直接操作",
+      "title": "test_staleness_positive_when_bar_overdue が _last_primary_bar_time を直接書き換えておりリファクタリング耐性ゼロ",
+      "description": "TestStalenessPositiveOnDelay.test_staleness_positive_when_bar_overdue (L134) と test_staleness_zero_when_bar_arrives_early (L153) は `store._last_primary_bar_time = simulated_past` で LiveFeatureStore の内部 monotonic タイムスタンプを直接書き換えている。このアプローチは (a) `_last_primary_bar_time` が将来 __slots__ 化・property 化・rename されると即座に AttributeError になる、(b) time.monotonic() をパッチせず実時間に依存するため CI マシンの負荷次第で staleness 計算がずれる可能性がある (許容誤差 ±0.5s で対応しているが粗い)。同様の手法が test_de403 の 2 箇所で使われており、一貫性はあるが内部実装依存テストであることには変わらない。",
+      "evidence": [
+        "tests/unit/test_de403_feature_staleness_semantics.py:134",
+        "tests/unit/test_de403_feature_staleness_semantics.py:153"
+      ],
+      "reproduction": "LiveFeatureStore._last_primary_bar_time を Property に変更 → AttributeError: can't set attribute",
+      "suggested_fix": "time.monotonic を `unittest.mock.patch('time.monotonic', ...)` でパッチして制御された時刻を返すようにし、内部フィールドへの直接代入を廃止する。または freeze_time ライブラリを使う。",
+      "test_blind_spot": "内部フィールド直接書き換えによりリファクタリング耐性が低い。",
+      "regression_of": null,
+      "post_fix_defect": false
+    },
+    {
+      "id": "QT-507",
+      "severity": "low",
+      "area": "tests/unit/test_de403_feature_staleness_semantics.py — 設計矛盾を容認するテスト",
+      "title": "test_strategy_id_not_set_to_tf_name_only が strategy_id=TF名 の設計上の課題を容認する形でテストを書いている",
+      "description": "TestPrometheusLabels.test_strategy_id_not_set_to_tf_name_only (L215-237) は観察名に「旧設計バグ再発防止」と書かれているが、実際は LiveFeatureStore が strategy_id を保持しないために primary_tf 名 ('H1' 等) を strategy_id 引数に渡す現状設計を「正しい」として assert している。metrics.py の observe_feature_staleness docstring (L861-868) も同じ設計上の課題を ADVISORY として記載している。このテストは「将来 strategy_id を正しく渡せるようになったとき」に失敗する: `mc._gauges['feature_staleness_H1_H1']` という奇妙なキーが生成されることを期待している。テストが設計上の負債を固定化している。",
+      "evidence": [
+        "tests/unit/test_de403_feature_staleness_semantics.py:215-237",
+        "trading_platform/core/monitoring/metrics.py:861-868"
+      ],
+      "reproduction": "LiveFeatureStore に strategy_id 保持機能を追加 → live_store.py が正しい strategy_id を渡す → 'feature_staleness_H1_H1' キーが生成されなくなる → テスト失敗",
+      "suggested_fix": "このテストの意図をコメントで明確化するか、TODO として設計上の課題を追跡するか、テスト名を「LiveFeatureStore が strategy_id を保持しないため TF 名が strategy_id 代用になっていること」に変更して設計上の制約として明示する。",
+      "test_blind_spot": "設計負債を 'expected behavior' として固定化しており、改善時に偽陰性になる。",
+      "regression_of": null,
+      "post_fix_defect": false
+    }
+  ],
+  "summary": {
+    "total_findings": 7,
+    "by_severity": {
+      "critical": 0,
+      "high": 1,
+      "medium": 3,
+      "low": 3,
+      "informational": 0
+    },
+    "phase_45_effectiveness": {
+      "asyncmock_overuse": "新規 6 テスト中で AsyncMock 過剰差替え (RE-201 同型偽緑) は検出されなかった。test_re_missed_401 の patch.object(..., _ensure_session, return_value=session) は Python 3.8+ が async def を自動 AsyncMock 化するため動作する。",
+      "production_path_coverage": "test_re402 (5件), test_re_missed_401 (8件), test_re411 (4件), test_de403 (9件) はいずれも本番コードの実装メソッドを直接呼んでおり偽緑リスクは低い。QT-504 で指摘した test_pa401 の 1 テストが本番経路の一部を踏んでいない。",
+      "boundary_coverage": "test_re_missed_401 は HTTP 404/500/502/503/504/401/403/429/TimeoutError の多段階を parametrize でカバーしており網羅性が高い。test_re402 は BrokerUnavailableError 経路 / matching=[] 経路 / close 失敗 / close 成功 / get_open_trades 2 回目失敗 の 5 ケースをカバー。境界値網羅は良好。",
+      "same_type_regression": "QT-301/302/303 同型 (AsyncMock で本番経路バイパス) の再発は確認されなかった。"
+    }
+  }
+}

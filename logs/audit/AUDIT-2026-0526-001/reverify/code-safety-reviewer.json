@@ -1,0 +1,82 @@
+{
+  "verifier": "code-safety-reviewer",
+  "verified_at": "2026-05-26",
+  "atlas_head_commit": "feb111ee",
+  "summary": "6件中6件を実コードで確認。CSR-201/202/204/205/206 の引用行はいずれも実在し severity も妥当。CSR-203 は SANDBOX_BUILTINS L27/L45 行番号完全一致。type(self).mro() が Stage1 をパスする機構を実 AST 解析で検証し findings の主張を裏付けた。__subclasses__ アクセス等は FORBIDDEN_DUNDER_ATTRS でブロック確認済み。defense-in-depth gap 判定は妥当。confirmed=5, adjusted=1 (CSR-203 AST解析補強), refuted=0。",
+  "verifications": [
+    {
+      "id": "CSR-201",
+      "claim": "context_builder.py:548 の bare except がログ無しで例外握りつぶし",
+      "claim_accuracy": "ACCURATE",
+      "severity_verdict": "CONFIRMED_MEDIUM",
+      "current_code_quote": "L546:     try:\nL547:         df = pd.read_parquet(parquet_path, engine='pyarrow')\nL548:     except Exception:\nL549:         return None",
+      "line_accuracy": "except Exception: は L548。findings 引用 L548 と完全一致。bare except 本文にログ記録なし。",
+      "verdict": "confirmed",
+      "notes": "実コード確認済み (context_builder.py L546-549)。try ブロックは pd.read_parquet のみで except 節に logger 呼び出し存在しない。CLAUDE.md 例外ルール明確違反。severity MEDIUM 妥当。"
+    },
+    {
+      "id": "CSR-202",
+      "claim": "_mc_kernels.py:82 の is_kernel_available() で bare except がログ無しで False を返す",
+      "claim_accuracy": "ACCURATE",
+      "severity_verdict": "CONFIRMED_LOW",
+      "current_code_quote": "L82:     except Exception:\nL83:         return False",
+      "line_accuracy": "except Exception: は L82。findings 引用 L82 と完全一致。",
+      "verdict": "confirmed",
+      "notes": "実コード確認済み (_mc_kernels.py L78-83)。is_kernel_available() は cuPy プローブ関数。想定外例外もサイレント False 扱い。GPU 利用不可時 CPU フォールバック動作のため本番実害なし。severity LOW 妥当。"
+    },
+    {
+      "id": "CSR-203",
+      "claim": "sandbox_builtins.py:45 で type が SANDBOX_BUILTINS に含まれ type(self).mro() が Stage1 静的解析をパスする。ただし __subclasses__() 等の後続操作は多層防御でブロックされ実 RCE は成立しない。",
+      "claim_accuracy": "ACCURATE",
+      "severity_verdict": "CONFIRMED_MEDIUM",
+      "current_code_quote": "L27: SANDBOX_BUILTINS: dict = {\nL45:     'type': type, 'id': id, 'hash': hash,",
+      "line_accuracy": "type は L45、SANDBOX_BUILTINS 宣言は L27。findings の引用行と完全一致。",
+      "verdict": "adjusted",
+      "mro_stage1_bypass_verified": true,
+      "mro_ast_analysis": "type(self).mro() を AST 解析すると ast.Attribute(attr='mro') が生成される。FORBIDDEN_DUNDER_ATTRS は '__mro__'（ダンダー付き）のみ収録しており 'mro'（ダンダーなし）は存在しないため Stage1 でブロックされない。findings の主張は正確。",
+      "defense_in_depth_verified": true,
+      "defense_analysis": "type(self).mro()[-1].__subclasses__() の全 Attribute ノードを AST 解析した結果、末端 __subclasses__ は FORBIDDEN_DUNDER_ATTRS に収録されており Stage1 でブロック確認。getattr() 経由の迂回は FORBIDDEN_BUILTINS に getattr が収録されているためブロック済み。findings の RCE 不成立の結論は正確。",
+      "notes": "adjusted の理由: findings は全体的に正確だが、本検証で mro Stage1 パス経路の具体的メカニズム（attr='mro' vs '__mro__' の非対称）を実 AST 解析で補強確認。severity MEDIUM 妥当。修正推奨（type を SANDBOX_BUILTINS から削除、または mro() Stage1 ルール追加）は有効。"
+    },
+    {
+      "id": "CSR-204",
+      "claim": "runner.py:566 の _norm_or_zero() で normalizer パラメータに型アノテーションが欠落",
+      "claim_accuracy": "ACCURATE",
+      "severity_verdict": "CONFIRMED_LOW",
+      "current_code_quote": "L564: def _norm_or_zero(\nL565:     value: float | None,\nL566:     normalizer,  # noqa: ANN001 - callable (float) -> float\nL567: ) -> float:",
+      "line_accuracy": "normalizer 引数は L566。findings 引用 L566 と完全一致。noqa: ANN001 コメントで意図的に型アノテーション省略。",
+      "verdict": "confirmed",
+      "notes": "実コード確認済み (runner.py L564-567)。normalizer パラメータに型アノテーションなし。CLAUDE.md 型ヒントルール違反。Callable[[float], float] として明示すべき。実害なし。severity LOW 妥当。"
+    },
+    {
+      "id": "CSR-205",
+      "claim": "sandbox_builtins.py:27 で SANDBOX_BUILTINS が bare dict 型で宣言されている",
+      "claim_accuracy": "ACCURATE",
+      "severity_verdict": "CONFIRMED_LOW",
+      "current_code_quote": "L27: SANDBOX_BUILTINS: dict = {",
+      "line_accuracy": "SANDBOX_BUILTINS: dict = { は L27。findings 引用 L27 と完全一致。",
+      "verdict": "confirmed",
+      "notes": "実コード確認済み (sandbox_builtins.py L27)。dict[str, Any] でなく bare dict 型アノテーション。CLAUDE.md 型ヒントルール違反。なお同ファイル L19 に from __future__ import annotations は適切に存在。実害なし。severity LOW 妥当。"
+    },
+    {
+      "id": "CSR-206",
+      "claim": "vectorbt_engine.py:998 の OOS 検証例外処理でログは存在するが oos_metrics 空辞書のまま Layer1Result が通過し呼び出し元が OOS 欠落を認識できない",
+      "claim_accuracy": "ACCURATE",
+      "severity_verdict": "CONFIRMED_LOW",
+      "current_code_quote": "L998:     except Exception as e:\nL999:         logger.warning('OOS検証エラー', error=str(e))\nL1000:         oos_metrics = {}",
+      "line_accuracy": "except Exception as e は L998、logger.warning は L999、oos_metrics={} は L1000。findings 引用 L998 と完全一致。",
+      "verdict": "confirmed",
+      "notes": "実コード確認済み (vectorbt_engine.py L998-1000)。logger.warning は呼ばれているが OOS データ欠落が呼び出し元に透明でない問題は実在。findings の記述は正確。severity LOW 妥当（Gate 判定への直接影響なし）。"
+    }
+  ],
+  "count_summary": {
+    "total_findings": 6,
+    "confirmed": 5,
+    "adjusted": 1,
+    "refuted": 0,
+    "errors_found_in_first_team_findings": 0,
+    "line_number_mismatches": 0,
+    "severity_adjustments": 0,
+    "note": "CSR-203 を adjusted に分類: findings の主張は全て正確だが mro() の Stage1 パス経路を実 AST 解析で具体的に検証・補強した。第1チームの findings に誤りはなかった。"
+  }
+}

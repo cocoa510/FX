@@ -1,0 +1,444 @@
+{
+  "reviewer": "code-safety-reviewer (Phase 4.5)",
+  "review_date": "2026-05-30",
+  "fixes_reviewed": [
+    {
+      "finding_id": "QA-301",
+      "diff_files": [
+        "ATLAS/scripts/backfill_v6_2_0_soft_score.py (new)",
+        "ATLAS/strategies/*/backtest/result.json (607 updated)"
+      ],
+      "checks": {
+        "1_production_callsite_reached": {
+          "verdict": "pass",
+          "grep_evidence": "ATLAS/logs/backfill_v6_2_0_soft_score.json confirmed: completed_at=2026-05-30T01:59:32Z target_count=1453 ok=607 skip_no_tier2=846 flipped=15",
+          "notes": "One-shot [change:spec] step-6 tool. Already executed successfully."
+        },
+        "2_initialization_order": {
+          "verdict": "n/a",
+          "lifecycle_trace": "File I/O script, no lifecycle",
+          "notes": "n/a"
+        },
+        "3_main_runner_symmetry": {
+          "verdict": "n/a",
+          "main_py_status": "n/a",
+          "runner_py_status": "n/a",
+          "notes": "ATLAS-only script, unrelated to FTS dual-implementation"
+        },
+        "4_external_system_sync": {
+          "verdict": "pass",
+          "external_systems": [
+            "ATLAS result.json files"
+          ],
+          "cleanup_paths": [
+            "_save_result_atomic(): .tmp->replace() + .bak2 backup"
+          ],
+          "notes": "Atomic write prevents corruption on interruption. No OANDA/Redis/PG connections."
+        },
+        "5_escape_hatch_side_effect": {
+          "verdict": "n/a",
+          "feature_flags": [],
+          "notes": "n/a"
+        },
+        "6_metric_label_semantics": {
+          "verdict": "n/a",
+          "metrics_changed": [],
+          "label_check": "n/a",
+          "semantics_check": "n/a",
+          "notes": "No Prometheus instrumentation in backfill script"
+        },
+        "7_backfill_plan": {
+          "verdict": "pass",
+          "change_type": "[change:spec] step-6 execution (EFFECTIVE_WEIGHT_FLOOR 0.70->0.90)",
+          "backfill_script": "ATLAS/scripts/backfill_v6_2_0_soft_score.py",
+          "backfill_deferred": false,
+          "notes": "assert METRICS_SCHEMA_VERSION==TARGET_SCHEMA guards against schema mismatch. 15 flipped entries have soft_score_delta=0.0 with overall_passed change - likely is_duplicate re-evaluation in _process_one, not a script logic error."
+        }
+      },
+      "overall_verdict": "pass",
+      "issues_for_implementer": [
+        "[WARNING_ADVISORY] 15 flipped entries show overall_passed change without soft_score change. Likely caused by is_duplicate re-evaluation in _process_one. Document in spec_change_log.md if intentional."
+      ],
+      "recommended_action": "PASS. Recommend documenting flip cause in spec_change_log.md."
+    },
+    {
+      "finding_id": "RE-401",
+      "diff_files": [
+        "trading_platform/core/unified_runner/runner.py",
+        "trading_platform/main.py",
+        "trading_platform/forward_test.py",
+        "scripts/live_preflight.py",
+        "trading_platform/broker/oanda_adapter/client.py",
+        "tests/contract/test_oanda_broker_metrics_wired.py (new)"
+      ],
+      "checks": {
+        "1_production_callsite_reached": {
+          "verdict": "pass",
+          "grep_evidence": "runner.py:351 metrics=self._metrics; main.py:427 metrics=self._metrics; forward_test.py:246 metrics=self._metrics; live_preflight.py:41 metrics=metrics. All 4 OANDABroker instantiation sites confirmed. client.py:961 dead-path eliminated.",
+          "notes": "Contract test enforces structural guarantee across all instantiation sites."
+        },
+        "2_initialization_order": {
+          "verdict": "pass",
+          "lifecycle_trace": "self._metrics created in __init__ before OANDABroker in both runner.py and main.py. No ordering issue.",
+          "notes": "n/a"
+        },
+        "3_main_runner_symmetry": {
+          "verdict": "pass",
+          "main_py_status": "main.py:427 metrics=self._metrics injected",
+          "runner_py_status": "runner.py:351 metrics=self._metrics injected",
+          "notes": "forward_test.py and live_preflight.py also updated. All 4 sites covered."
+        },
+        "4_external_system_sync": {
+          "verdict": "n/a",
+          "external_systems": [
+            "OANDA API (read-only metrics instrumentation)"
+          ],
+          "cleanup_paths": [],
+          "notes": "No external state change."
+        },
+        "5_escape_hatch_side_effect": {
+          "verdict": "n/a",
+          "feature_flags": [],
+          "notes": "n/a"
+        },
+        "6_metric_label_semantics": {
+          "verdict": "pass",
+          "metrics_changed": [
+            "fx_oanda_api_status_total",
+            "fx_oanda_api_latency_seconds"
+          ],
+          "label_check": "endpoint label uses existing string constants consistent with alerting_rules.yml",
+          "semantics_check": "Injection activates existing _record_api_metric instrumentation. No label or semantic change.",
+          "notes": "n/a"
+        },
+        "7_backfill_plan": {
+          "verdict": "n/a",
+          "change_type": "[fix:bug] wiring only",
+          "backfill_script": "n/a",
+          "backfill_deferred": false,
+          "notes": "No result.json impact"
+        }
+      },
+      "overall_verdict": "pass",
+      "issues_for_implementer": [],
+      "recommended_action": "PASS"
+    },
+    {
+      "finding_id": "RE-402",
+      "diff_files": [
+        "trading_platform/core/unified_runner/strategy_slot.py",
+        "trading_platform/core/monitoring/email_notifier.py",
+        "trading_platform/core/unified_runner/runner.py (AlertLevel addition)",
+        "tests/fault/test_re402_entry_rollback_oanda_cleanup.py (new)"
+      ],
+      "checks": {
+        "1_production_callsite_reached": {
+          "verdict": "pass",
+          "grep_evidence": "strategy_slot.py:762 if self.is_live: _attempt_orphan_close_after_rollback added. runner.py:727 risk_alert_emitter=self._emit_risk_alert injected. runner.py:1298 entry_rollback_orphan: AlertLevel.CRITICAL registered. email_notifier.py _RISK_ALERT_KINDS entry_rollback_orphan with 43200s throttle.",
+          "notes": "Fires only when is_live=True. Paper/dev paths unaffected."
+        },
+        "2_initialization_order": {
+          "verdict": "pass",
+          "lifecycle_trace": "gateway and risk_alert_emitter injected at StrategySlot creation. None guard at strategy_slot.py:1059.",
+          "notes": "n/a"
+        },
+        "3_main_runner_symmetry": {
+          "verdict": "pass",
+          "main_py_status": "main.py path has is_live=False by design; orphan close not triggered",
+          "runner_py_status": "runner.py:727 risk_alert_emitter injected",
+          "notes": "is_live guard makes dual-implementation a non-issue."
+        },
+        "4_external_system_sync": {
+          "verdict": "pass",
+          "external_systems": [
+            "OANDA API (get_open_trades, close_trade)"
+          ],
+          "cleanup_paths": [
+            "get_open_trades() -> filter by comment==strategy_id -> close_trade(target.trade_id) -> check filled/stale",
+            "On close failure: CRITICAL RiskAlert entry_rollback_orphan -> human intervention via email"
+          ],
+          "notes": "Best-effort close of OANDA orphan position. Human escalation on failure. Fulfills RE-402 external state sync requirement."
+        },
+        "5_escape_hatch_side_effect": {
+          "verdict": "n/a",
+          "feature_flags": [],
+          "notes": "n/a"
+        },
+        "6_metric_label_semantics": {
+          "verdict": "pass",
+          "metrics_changed": [
+            "entry_rollback_orphan (new EmailNotifier kind)"
+          ],
+          "label_check": "kind=entry_rollback_orphan registered in _RISK_ALERT_KINDS and _EMAIL_THROTTLE_INTERVAL_SEC (43200s)",
+          "semantics_check": "_build_live_anomaly_message reused for body, consistent with CRITICAL alert pattern",
+          "notes": "n/a"
+        },
+        "7_backfill_plan": {
+          "verdict": "n/a",
+          "change_type": "[fix:bug]",
+          "backfill_script": "n/a",
+          "backfill_deferred": false,
+          "notes": "n/a"
+        }
+      },
+      "overall_verdict": "pass",
+      "issues_for_implementer": [],
+      "recommended_action": "PASS"
+    },
+    {
+      "finding_id": "RE-MISSED-401",
+      "diff_files": [
+        "trading_platform/broker/oanda_adapter/client.py (TradeNotFoundError class, get_trade rewrite, close_trade pre_check rewrite)",
+        "tests/fault/test_re_missed_401_get_trade_exception_discipline.py (new)"
+      ],
+      "checks": {
+        "1_production_callsite_reached": {
+          "verdict": "pass",
+          "grep_evidence": "OANDABroker.close_trade() pre_check calls OANDABroker.get_trade() directly. BrokerGateway.close_trade() re-raises all exceptions (L432-438) so TradeNotFoundError/BrokerUnavailableError propagate to strategy_slot.py. BrokerGateway.get_trade() (L469-477) swallows to None but close_trade pre_check uses OANDABroker internal path - propagation is correct.",
+          "notes": "n/a"
+        },
+        "2_initialization_order": {
+          "verdict": "n/a",
+          "lifecycle_trace": "Exception class addition only. No lifecycle change.",
+          "notes": "n/a"
+        },
+        "3_main_runner_symmetry": {
+          "verdict": "pass",
+          "main_py_status": "OANDABroker.close_trade() is self-contained in client.py",
+          "runner_py_status": "Same OANDABroker code path via client.py",
+          "notes": "n/a"
+        },
+        "4_external_system_sync": {
+          "verdict": "pass",
+          "external_systems": [
+            "OANDA API (GET /v3/accounts/{id}/trades/{id}, PUT /v3/accounts/{id}/trades/{id}/close)"
+          ],
+          "cleanup_paths": [
+            "HTTP 404 -> TradeNotFoundError -> stale=NOT_FOUND (FTS state cleared, no PUT sent)",
+            "HTTP 5xx/timeout -> BrokerUnavailableError -> pre_check fails -> fall-through to normal PUT (A-2 post-hoc guard)"
+          ],
+          "notes": "Transient vs permanent exception separation correctly implemented."
+        },
+        "5_escape_hatch_side_effect": {
+          "verdict": "n/a",
+          "feature_flags": [],
+          "notes": "n/a"
+        },
+        "6_metric_label_semantics": {
+          "verdict": "pass",
+          "metrics_changed": [
+            "fx_oanda_api_status_total{endpoint=get_trade} (newly instrumented)"
+          ],
+          "label_check": "HTTP 404->4xx, 5xx->5xx, timeout->timeout normalization matches _record_api_metric:965-974",
+          "semantics_check": "_record_api_metric called with status=404 before TradeNotFoundError raised. No double-counting.",
+          "notes": "n/a"
+        },
+        "7_backfill_plan": {
+          "verdict": "n/a",
+          "change_type": "[fix:bug]",
+          "backfill_script": "n/a",
+          "backfill_deferred": false,
+          "notes": "n/a"
+        }
+      },
+      "overall_verdict": "pass",
+      "issues_for_implementer": [],
+      "recommended_action": "PASS"
+    },
+    {
+      "finding_id": "RE-411",
+      "diff_files": [
+        "trading_platform/broker/oanda_adapter/client.py (submit_order TimeoutError metric instrumentation)",
+        "tests/unit/test_re411_submit_order_timeout_metric.py (new)"
+      ],
+      "checks": {
+        "1_production_callsite_reached": {
+          "verdict": "pass",
+          "grep_evidence": "client.py:241-244 try/except block inside outer except Exception of submit_order. TimeoutError -> _record_api_metric(order, None, None) -> normalized_status=timeout. RE-401 metrics= injection applies to all production paths.",
+          "notes": "Fire-and-forget wrapper (try/except Exception: pass at line 245) prevents instrumentation failure from breaking production flow."
+        },
+        "2_initialization_order": {
+          "verdict": "n/a",
+          "lifecycle_trace": "Instrumentation code only. No lifecycle change.",
+          "notes": "n/a"
+        },
+        "3_main_runner_symmetry": {
+          "verdict": "pass",
+          "main_py_status": "Single OANDABroker class in client.py; change applies globally",
+          "runner_py_status": "Same",
+          "notes": "n/a"
+        },
+        "4_external_system_sync": {
+          "verdict": "n/a",
+          "external_systems": [],
+          "cleanup_paths": [],
+          "notes": "Metrics instrumentation only. No external state change."
+        },
+        "5_escape_hatch_side_effect": {
+          "verdict": "n/a",
+          "feature_flags": [],
+          "notes": "n/a"
+        },
+        "6_metric_label_semantics": {
+          "verdict": "pass",
+          "metrics_changed": [
+            "fx_oanda_api_status_total{endpoint=order, status_code=timeout} (previously always 0)"
+          ],
+          "label_check": "status_code=None -> normalized_status=timeout confirmed at _record_api_metric:965-966",
+          "semantics_check": "isinstance(e, TimeoutError) correctly handles Python 3.11+ asyncio.TimeoutError==TimeoutError. aiohttp.ClientError uses status_code=500->5xx (acceptable).",
+          "notes": "n/a"
+        },
+        "7_backfill_plan": {
+          "verdict": "n/a",
+          "change_type": "[fix:bug]",
+          "backfill_script": "n/a",
+          "backfill_deferred": false,
+          "notes": "n/a"
+        }
+      },
+      "overall_verdict": "pass",
+      "issues_for_implementer": [],
+      "recommended_action": "PASS"
+    },
+    {
+      "finding_id": "PA-401 + PA-412",
+      "diff_files": [
+        "trading_platform/main.py (_ensure_eventbus_and_notifier_started helper, _escape_hatch_active flag)",
+        "trading_platform/core/monitoring/email_notifier.py (escape_hatch kind registration, entry_rollback_orphan kind)",
+        "tests/integration/test_pa401_main_eventbus_startup_order.py (new)",
+        "tests/integration/test_pa412_escape_hatch_warning.py (new)"
+      ],
+      "checks": {
+        "1_production_callsite_reached": {
+          "verdict": "fail",
+          "grep_evidence": "email_notifier.py L420-447 elif chain handles: kill_switch / kill_switch_cancel_failed / position_reconciler / position_mismatch / live_anomaly / live_orders_silent / live_gate_rejection / unrealized_warning / entry_rollback_orphan. NO branch exists for kind=escape_hatch. _RISK_ALERT_KINDS maps platform_escape_hatch_active -> escape_hatch kind, but dispatcher falls through to else:return -> silent drop. Email never delivered.",
+          "notes": "PA-401 EventBus/EmailNotifier early-start logic is correct. Only PA-412 email delivery path is dead."
+        },
+        "2_initialization_order": {
+          "verdict": "pass",
+          "lifecycle_trace": "_ensure_eventbus_and_notifier_started() uses _eventbus_started_early/_email_notifier_started flags for idempotency. main.py:1142 start() loop uses getattr(self, _eventbus_started_early, False) to skip re-start. Double-start and double-subscribe correctly prevented.",
+          "notes": "getattr default=False is safe for tests that bypass __init__ via __new__."
+        },
+        "3_main_runner_symmetry": {
+          "verdict": "pass",
+          "main_py_status": "main.py has _ensure_eventbus_and_notifier_started() helper added",
+          "runner_py_status": "runner.py already fixed in AUDIT-2026-0529-003 C-01 (same idempotency pattern)",
+          "notes": "No dual-implementation drift introduced."
+        },
+        "4_external_system_sync": {
+          "verdict": "n/a",
+          "external_systems": [],
+          "cleanup_paths": [],
+          "notes": "EventBus/EmailNotifier lifecycle management only"
+        },
+        "5_escape_hatch_side_effect": {
+          "verdict": "fail",
+          "feature_flags": [
+            "PLATFORM_ALLOW_MAIN_PRODUCTION_LIVE"
+          ],
+          "notes": "escape hatch correctly sets _escape_hatch_active=True, calls _ensure_eventbus_and_notifier_started(), and publishes platform_escape_hatch_active RiskAlertEvent. However, email_notifier.py dispatcher has no elif kind==escape_hatch: branch -> Email delivery silently dropped. PA-412 objective (Email alert to operator) is NOT achieved."
+        },
+        "6_metric_label_semantics": {
+          "verdict": "n/a",
+          "metrics_changed": [],
+          "label_check": "n/a",
+          "semantics_check": "n/a",
+          "notes": "n/a"
+        },
+        "7_backfill_plan": {
+          "verdict": "n/a",
+          "change_type": "[fix:bug]",
+          "backfill_script": "n/a",
+          "backfill_deferred": false,
+          "notes": "n/a"
+        }
+      },
+      "overall_verdict": "fail_with_issues",
+      "issues_for_implementer": [
+        {
+          "severity": "WARNING_BLOCKING",
+          "issue": "email_notifier.py _handle_risk_alert dispatcher missing elif kind == escape_hatch: branch",
+          "location": "trading_platform/core/monitoring/email_notifier.py L447 (just before else: return)",
+          "detail": "_RISK_ALERT_KINDS registers platform_escape_hatch_active -> escape_hatch, but elif chain has no handler for kind=escape_hatch. Falls through to else:return -> silent drop. PA-412 Email notification to operator is completely dead path.",
+          "fix": "Add after elif kind == entry_rollback_orphan: block: elif kind == escape_hatch: subject, body = self._build_live_anomaly_message(event). Also add escape_hatch: 0.0 to _EMAIL_THROTTLE_INTERVAL_SEC (fire-once, no throttle).",
+          "line": 447
+        }
+      ],
+      "recommended_action": "FIX REQUIRED before regression tests: Add escape_hatch kind handler in email_notifier.py _handle_risk_alert dispatcher. PA-401 initialization ordering fix is correct and can proceed independently."
+    },
+    {
+      "finding_id": "DE-403",
+      "diff_files": [
+        "trading_platform/core/monitoring/metrics.py (observe_feature_staleness: primary_tf kwarg added)",
+        "trading_platform/data/feature_store/live_store.py (staleness semantics: next-bar-delay)",
+        "deploy/prometheus/alerting_rules.yml (TF-specific thresholds)",
+        "tests/unit/test_de403_feature_staleness_semantics.py (new)"
+      ],
+      "checks": {
+        "1_production_callsite_reached": {
+          "verdict": "pass",
+          "grep_evidence": "live_store.py:449 observe_feature_staleness(self.primary_tf, staleness_sec, primary_tf=self.primary_tf) confirmed. LiveFeatureStore at runner.py:697, main.py:676, forward_test.py:157 all with metrics= injected.",
+          "notes": "All production paths reach the updated staleness semantics calculation."
+        },
+        "2_initialization_order": {
+          "verdict": "pass",
+          "lifecycle_trace": "self._last_primary_bar_time=None on first bar: staleness instrumentation skipped by guard if self._metrics is not None and self._last_primary_bar_time is not None.",
+          "notes": "n/a"
+        },
+        "3_main_runner_symmetry": {
+          "verdict": "pass",
+          "main_py_status": "main.py:676 LiveFeatureStore(metrics=self._metrics) active",
+          "runner_py_status": "runner.py:697 LiveFeatureStore(buffer_size=..., metrics=self._metrics) active",
+          "notes": "Both production paths instrumented equally."
+        },
+        "4_external_system_sync": {
+          "verdict": "n/a",
+          "external_systems": [
+            "Prometheus (Gauge update only)"
+          ],
+          "cleanup_paths": [],
+          "notes": "Read-only instrumentation"
+        },
+        "5_escape_hatch_side_effect": {
+          "verdict": "n/a",
+          "feature_flags": [],
+          "notes": "n/a"
+        },
+        "6_metric_label_semantics": {
+          "verdict": "fail",
+          "metrics_changed": [
+            "fx_feature_staleness_sec (added primary_tf label, changed age_sec semantics to next-bar-delay)"
+          ],
+          "label_check": "observe_feature_staleness first positional arg (strategy_id) receives self.primary_tf at live_store.py:450. LiveFeatureStore has no strategy_id attribute. Prometheus strategy_id label still contains TF name. metrics.py:859 docstring acknowledges this as intentional design. Per-strategy slicing remains impossible.",
+          "semantics_check": "age_sec semantics change (bar-interval -> next-bar-delay: max(0, now - expected_next_bar_at)) correctly implemented using TF_SECONDS dict. alerting_rules.yml TF-specific thresholds (M15:1800s H1:7200s H4:28800s = bar_interval*2) use primary_tf label. Primary fix objective (eliminate constant FIRING on H1/H4 strategies) is achieved.",
+          "notes": "strategy_id label containing TF name is intentional per docstring, but label name is misleading. Core alerting fix works correctly."
+        },
+        "7_backfill_plan": {
+          "verdict": "n/a",
+          "change_type": "[fix:bug] metrics semantics correction",
+          "backfill_script": "n/a",
+          "backfill_deferred": false,
+          "notes": "Real-time instrumentation only. No result.json impact."
+        }
+      },
+      "overall_verdict": "fail_with_issues",
+      "issues_for_implementer": [
+        {
+          "severity": "WARNING_ADVISORY",
+          "issue": "fx_feature_staleness_sec strategy_id label still contains TF name, not actual strategy ID",
+          "location": "trading_platform/data/feature_store/live_store.py:449-452 and trading_platform/core/monitoring/metrics.py:859",
+          "detail": "observe_feature_staleness(self.primary_tf, staleness_sec, primary_tf=self.primary_tf) passes TF name as strategy_id argument. Prometheus strategy_id label = H1/H4/M15. Per-strategy slicing remains impossible despite label name. Primary alerting fix works correctly via primary_tf label branching in alerting_rules.yml.",
+          "fix": "Option A: Add strategy_id: str = unknown parameter to LiveFeatureStore.__init__() and pass actual strategy_id from runner.py/main.py instantiation sites. Option B: Update docstring to explicitly state strategy_id label contains TF name when strategy context unavailable. Regression tests can proceed since alerting fix achieves primary objective."
+        }
+      ],
+      "recommended_action": "WARNING_ADVISORY: Regression tests can proceed. Document strategy_id label constraint clearly in metrics.py and live_store.py."
+    }
+  ],
+  "summary": {
+    "total_fixes_reviewed": 7,
+    "pass": 5,
+    "fail_with_issues": 2,
+    "fail_revert": 0,
+    "overall_assessment": "5/7 fixes PASS (QA-301 RE-401 RE-402 RE-MISSED-401 RE-411). 2 with issues: [1] PA-401+PA-412 WARNING_BLOCKING: email_notifier.py _handle_risk_alert missing elif kind==escape_hatch: branch causes PA-412 Email alert silent-drop when PLATFORM_ALLOW_MAIN_PRODUCTION_LIVE escape hatch activated. FIX REQUIRED before regression tests. [2] DE-403 WARNING_ADVISORY: fx_feature_staleness_sec strategy_id label still contains TF name (per-strategy slicing impossible) but primary objective (eliminate constant FIRING via TF-specific thresholds in alerting_rules.yml) is achieved. Regression tests can proceed for DE-403."
+  }
+}

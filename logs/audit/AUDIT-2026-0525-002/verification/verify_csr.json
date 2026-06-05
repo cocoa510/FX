@@ -1,0 +1,61 @@
+{
+  "verifier": "code-safety-reviewer",
+  "mandate": "find_errors",
+  "session": "AUDIT-2026-0525-002 second-team verification",
+  "date": "2026-05-26",
+  "results": [
+    {
+      "id": "CSR-101",
+      "report_claim": "high->medium downgrade. RCE not reproducible via FORBIDDEN_BUILTINS.",
+      "verdict": "report_error_understated",
+      "corrected_severity": "critical",
+      "empirical": "NEW VECTOR CONFIRMED: def generate_signal(self, bar, features, imp_func=__import__): imp_func(os).system(PWNED). Stage1 check_syntax PASSED (passed=True, no errors). Stage3 run_sandbox PASSED + SANDBOX_ESCAPED.txt created on disk with content ATLAS_STAGE3_RCE_CONFIRMED. Root cause: FORBIDDEN_BUILTINS only checks ast.Call nodes. __import__ as ast.Name in default argument is not a Call node and bypasses check. SANDBOX_BUILTINS[__import__] = real __import__ provides callable. DA tested (a)-(e) correctly but missed non-Call Name vector.",
+      "rationale": "RCE is reproducible via __import__ default arg exploit. CSR-101 severity must be critical not medium."
+    },
+    {
+      "id": "CSR-102",
+      "report_claim": "medium, validated true. 2-segment chain_parts gap confirmed.",
+      "verdict": "confirmed",
+      "corrected_severity": "medium",
+      "empirical": "import math as a; a.os() -> PASSED (chain_parts[1:-1]=[]). numpy/pandas have no direct .os public attr. No exploitable path in ALLOWED_MODULES found.",
+      "rationale": "Gap confirmed but no practical exploit. Fix recommended."
+    },
+    {
+      "id": "CSR-103",
+      "report_claim": "medium, validated true. sandbox_runner _load_strategy_class missing __module__ filter.",
+      "verdict": "confirmed",
+      "corrected_severity": "medium",
+      "empirical": "sandbox_runner.py:765-772 confirmed: no __module__ check, no multi-class error. runner.py:259-281 confirmed: has both. ALLOWED_ATLAS_SUBMODULES limits real risk.",
+      "rationale": "Confirmed. Port runner.py fix to sandbox_runner.py."
+    },
+    {
+      "id": "CSR-106",
+      "report_claim": "medium, validated true. L921/L1101/L1144 bypass notify_fill causing shadow drift.",
+      "verdict": "confirmed",
+      "corrected_severity": "medium",
+      "empirical": "L921: strategy.on_fill({FLAT}) direct + close_position_by_id separate, no notify_fill. L1101: same. L1144: same. L1062 entry: state.notify_fill correct. L1258 end_of_data: notify_fill_shadow_only correct. L1330 comment says migrated but 3 paths are not. Parity PASS explained: shadow is Live/Paper only, not BT computation.",
+      "rationale": "Confirmed. Shadow drift in Live confirmed. Medium appropriate."
+    },
+    {
+      "id": "NEW-CSR-001",
+      "report_claim": "Not in original report - newly discovered",
+      "verdict": "new_finding",
+      "corrected_severity": "high",
+      "title": "FORBIDDEN_BUILTINS Name node blind spot",
+      "empirical": "All FORBIDDEN_BUILTINS (exec/eval/open/getattr/setattr/delattr/hasattr/globals/locals/vars/compile/__import__) bypass Stage1 when used as ast.Name non-Call nodes. Confirmed bypasses: (1) def f(x=__import__) default arg -> Stage1 PASS + Stage3 RCE, (2) _imp = __import__ class var -> Stage1 PASS + Stage3 RCE mechanism confirmed, (3) lambda m=__import__ -> Stage1 PASS. eval/exec stored as default arg also bypass Stage1 but blocked at Stage3 (not in SANDBOX_BUILTINS).",
+      "rationale": "Fix: add ast.Name walk checking FORBIDDEN_BUILTINS names in non-Call contexts."
+    }
+  ],
+  "csr_101_final_conclusion": {
+    "verdict": "report_error_understated",
+    "downgrade_correct": false,
+    "rce_reproducible": true,
+    "attack_vector": "imp_func=__import__ default arg in generate_signal method. Stage3 run_sandbox executed echo command and wrote file to disk.",
+    "severity_correction": "critical",
+    "da_partial_correctness": "DA correctly blocked (a)-(e). Failed to test non-Call Name contexts for __import__.",
+    "immediate_fixes": [
+      "atlas/validator/syntax_checker.py: Add ast.Name node detection for FORBIDDEN_BUILTINS outside Call func context",
+      "atlas/common/sandbox_builtins.py:29: Evaluate removing __import__ from SANDBOX_BUILTINS"
+    ]
+  }
+}

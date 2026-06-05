@@ -1,0 +1,59 @@
+{
+  "session_id": "AUDIT-2026-0530-001",
+  "session_start": "2026-05-30T09:30:00Z",
+  "session_end": "2026-05-30T11:20:00Z",
+  "limit_minutes": 300,
+  "threshold_pct": 94,
+  "target": "both",
+  "severity_threshold": "critical",
+  "max_rounds": 10,
+  "max_fixes_per_round": 5,
+  "mode": "dry-run",
+  "user_intent": "徹底調査モード - AUDIT-2026-0529-001 修正コミット (ATLAS 2 + FTS 1) の事後検証 + 退行 + 新規欠陥",
+  "current_round": 1,
+  "verdict": "NOT_converged (must_fix high 6 件残、うち 5 件は昨日コミット起因の post_fix_defect)",
+  "atlas_commit": "15d62e62",
+  "fts_commit": "9998a7a (最新コード) / d1e73b1 (HEAD)",
+  "rounds": [
+    {
+      "round": 1,
+      "findings_total": 68,
+      "validated_true": 68,
+      "validated_false": 0,
+      "downgraded": 13,
+      "upgraded": 1,
+      "severity_post_validation": {"critical": 0, "high": 6, "medium": 25, "low": 37},
+      "fixed": 0,
+      "deferred": 68,
+      "verdict": "調査のみ（dry-run）。修正は未実施。"
+    }
+  ],
+  "must_fix": {
+    "RE-401_or_DM-402": "OANDABroker(metrics=) 未注入 - DM-302 計装が本番 dead (3 行修正、3 チーム独立発見) [post_fix_defect]",
+    "PA-401": "PA-303 修正の RiskAlertEvent が main.py で silently drop - EventBus 未起動時 publish [post_fix_defect, AUDIT-0529-003 C-01 同型再発]",
+    "RE-402": "entry_rollback で OANDA 上のポジション孤児化 - RE-301/302 修正の逆方向再発 [post_fix_defect, INC-0526 同型]",
+    "PA-412": "PA-103 escape hatch + PA-401 二重顕在化 [post_fix_defect, PA-401 修正と連動]",
+    "PA-407": "二重実装の構造的負債が拡大 - main.py vs runner.py [PA-307 main.py 廃止 ADR 前倒し提案]",
+    "DE-403": "FxFeatureStorestaleHigh が H1/H4 戦略で常時 FIRING - DM-302 修正の observe_feature_staleness ラベル誤用 + semantics 誤り [post_fix_defect]"
+  },
+  "post_fix_defects_count": 5,
+  "duplicate_consolidations": [
+    {"canonical": "RE-401 or DM-402", "duplicates": ["DE-402", "RE-401 or DM-402"], "subject": "OANDABroker metrics= 未注入"},
+    {"canonical": "RE-411", "duplicates": ["DE-404", "DM-403"], "subject": "submit_order TimeoutError metric drop"},
+    {"canonical": "PA-407 (root cause)", "instances": ["PA-401", "PA-412"], "subject": "二重実装の構造的負債"}
+  ],
+  "design_decisions_required": {
+    "DESIGN-C-001": "RE-305 復旧まで継続通知 vs live_orders_silent 12h throttle の調整 (blocking: DM-404, DE-406)"
+  },
+  "regression_check": {
+    "ATLAS_05ae8595_QA301": "PARTIAL OK with 4 concerns (CSR-401/402, QA-401〜404)。手順 6 (backfill) 未実施は仕様違反だが実害 0",
+    "ATLAS_15d62e62_CSR": "PARTIAL OK with CSR-404 (validate_instrument/timeframe 適用漏れ)",
+    "FTS_9998a7a_24_items": "重大な post_fix_defect 5 件混入 (20.8% 不合格率)"
+  },
+  "root_causes": [
+    "修正フェーズに code-safety-reviewer の事前 diff 検証が組込まれていない",
+    "二重実装 (main.py vs runner.py) の負債が ADR 化されず修正のたびに片側のみ更新が再発",
+    "[change:spec] 手順 6 (backfill) が連続 deferred (QA-201 → QA-301)、実施計画が文書化されていない"
+  ],
+  "summary_report": "logs/audit/summary_AUDIT-2026-0530-001.md"
+}

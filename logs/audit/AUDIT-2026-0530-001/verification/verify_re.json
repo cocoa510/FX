@@ -1,0 +1,215 @@
+{
+  "verifier": "risk-execution-engineer (round 2)",
+  "audit_id": "AUDIT-2026-0530-001",
+  "fts_commit_reviewed": "9998a7a",
+  "fts_workdir_head": "6c35cda (hourly log snapshot; code identical to 9998a7a)",
+  "verifications": [
+    {
+      "finding_id": "RE-401",
+      "original_severity": "medium",
+      "devil_advocate_severity": "medium",
+      "verifier_severity": "medium",
+      "evidence_check": "確認: client.py:154-171 で metrics=Any=None を受け self._metrics に格納。client.py:838-842 で if self._metrics is None: return が no-op。runner.py:343-347 / main.py:335-339 / forward_test.py:239-243 の全 3 箇所で OANDABroker(api_key=..., account_id=..., base_url=...) と metrics= 未指定で生成。事実完全一致。",
+      "reproduction_verified": true,
+      "agreement_with_da": "agree",
+      "rationale": "観測のみで取引フローは無影響。ただし RE-411 と複合すると DM-302 全 5 メソッドの計装が完全 dead。SRE 観点では INC-2026-0526 type の sliver failure 早期検知が不可能。3 行修正で即解消可能。must_fix と整合。",
+      "concerns_about_original": "なし。DM-302 計装が本番完全 dead という主張は実コードで完全に再現できる。"
+    },
+    {
+      "finding_id": "RE-402",
+      "original_severity": "high",
+      "devil_advocate_severity": "high",
+      "verifier_severity": "high",
+      "evidence_check": "確認: strategy_slot.py:806-824 BrokerUnavailableError 経路は LIVE 時 `return` のみで OANDA close なし (815 行 `return`)。strategy_slot.py:828-842 LIVE matching=[] 経路は `return` のみ (842 行)。strategy_slot.py:749-759 entry_rollback は state.open_trade_id=None / open_units=None / intended_direction=\"FLAT\" にクリアするのみで OANDA 側への close_trade 発行はない。runner.py:1063-1146 divergence B (unmatched_broker_trades) は WARN ログ + risk_alert publish のみで自動 close なし (CLAUDE.md 「不整合は自動修正しない」原則)。POSITION_RECONCILE_INTERVAL_SEC=10min × HEARTBEAT 周期 15 polls × 60s = 最大 15-25 分は孤児 trade が放置される。事実完全一致。",
+      "reproduction_verified": true,
+      "agreement_with_da": "agree",
+      "rationale": "孤児 trade は SL/TP 未設定で市場に晒される。PTRC は孤児 exposure を知らない (account_risk_state.add_exposure は entry_rollback でロールバック済み) ため次バーで二重建玉可能。OANDA 一時障害 (5/26 INC-0526 と同型) で必ず発火。能動 close または最低 CRITICAL RiskAlert 追加が必須。fix order: RE-404 retry を先に入れて RE-402 の発火頻度を抑え、その上で RE-402 の能動回復を実装するのが順当。",
+      "concerns_about_original": "なし。記述された 5 つの evidence (line 692-738/749-759/824/870-882/runner.py 1122-1146) はすべて実コードで確認できる。divergence B 経路がアラートのみで自動 close しない設計判断 (CLAUDE.md 原則) は正しいが、それが結果として『孤児 trade を能動的に作る』経路と直列に並んでいることが構造的欠陥。"
+    },
+    {
+      "finding_id": "RE-403",
+      "original_severity": "high",
+      "devil_advocate_severity": "medium",
+      "verifier_severity": "medium",
+      "evidence_check": "確認: strategy_slot.py:884 で max(matching, key=lambda t: t.open_time) で最新 1 件のみ採用。strategy_slot.py:862-868 のコメントで 「排他制御 (claimed_trade_ids 相当のランナー横断 set) は次回 audit-loop で検討」と明記。一方 strategy_slot.py:495 で `not self.state.open_trade_id` の前提があり、1-position-per-slot 制約が _handle_entry の入口で効いている。さらに同一スロット内で _handle_entry は単一 async タスクで直列実行されるため、二重 fill は同一スロットからは構造的に起こりにくい。imported 戦略ディレクトリで pyramiding/multi_entry 機能を持つ戦略は確認できない (grep でヒットなし)。",
+      "reproduction_verified": true,
+      "agreement_with_da": "agree",
+      "rationale": "現行 Live 22 戦略には pyramiding なし、PTRC 1-position 制約あり、_handle_entry は単一スロット内で直列 await で実行されるため、再現には『同一 strategy_id を異なるプロセス/ランナーから同時起動』のような構造的に許されないシナリオが必要。Live 即時リスクは低く medium が妥当。将来 pyramiding 戦略投入時の must_fix としてマークすべき。",
+      "concerns_about_original": "high 評価は『pyramiding 戦略不在を確認していない』と finding 自身が認めており、自己矛盾。devil-advocate の格下げが妥当。"
+    },
+    {
+      "finding_id": "RE-404",
+      "original_severity": "medium",
+      "devil_advocate_severity": "medium",
+      "verifier_severity": "medium",
+      "evidence_check": "確認: strategy_slot.py:806-808 で get_open_trades を 1 度だけ呼び、リトライなし。strategy_slot.py:855-860 で comment 完全一致のみマッチ判定。strategy_slot.py:869-882 で matching=[] は無条件 entry_rollback 経路へ合流。OANDA clientExtensions の async propagation で約定直後 (< 500ms) は trade.client_extensions が空 dict のケースが現実的に存在しうる。事実完全一致。",
+      "reproduction_verified": true,
+      "agreement_with_da": "agree",
+      "rationale": "RE-402 の発火頻度を能動的に上げる経路。RE-301 fallback 撤廃 (正しい修正) の副作用として race window が露出している。最小コストの追加修正 (backoff 0.2s/0.5s/1.0s で 3 回リトライ) で RE-402 発火頻度を大きく抑えられる。must_fix で RE-402 より先に修正すべき。",
+      "concerns_about_original": "なし。RE-402 と RE-404 の chain bug pair 認識は正しい。"
+    },
+    {
+      "finding_id": "RE-405",
+      "original_severity": "low",
+      "devil_advocate_severity": "low",
+      "verifier_severity": "low",
+      "evidence_check": "確認: runner.py:827 `open_trades = await self._broker.get_open_trades()` (gateway 非経由)、runner.py:1045 `open_trades = await self._broker.get_open_trades()` (gateway 非経由)。broker_gateway.py:440-467 で BrokerUnavailableError ラップ実装あり。runner 側の except Exception で BrokerUnavailableError もキャッチされるため動作壊れず。事実完全一致。",
+      "reproduction_verified": true,
+      "agreement_with_da": "agree",
+      "rationale": "動作上の不具合なし。型情報利用による精密ハンドリング (oanda_connection_degraded vs その他) が将来できなくなる technical debt のみ。一貫性のため gateway 経由化が望ましいが優先度低。",
+      "concerns_about_original": "なし。"
+    },
+    {
+      "finding_id": "RE-406",
+      "original_severity": "medium",
+      "devil_advocate_severity": "medium",
+      "verifier_severity": "medium",
+      "evidence_check": "確認: email_notifier.py:294 account_position_mismatch / 296 exposure_near_cap / 300 position_reconcile_mismatch / 316 oanda_connection_lost / 321 oanda_connection_degraded / 326 market_data_poll_failure すべて live_anomaly kind に集約。email_notifier.py:343 live_anomaly throttle=900.0 秒。事実完全一致 (live_orders_silent のみ専用 kind に分離済みだがそれ以外 6 種が衝突)。",
+      "reproduction_verified": true,
+      "agreement_with_da": "agree",
+      "rationale": "OANDA 障害時に 6 種類のアラートが 15 分間に 1 通しか配信されない構造。INV-2026-0528-001 と同型の構造的問題で first-of-type バイパス または kind 分離が解。trade flow 無影響だが運用観測の縮退は実害。",
+      "concerns_about_original": "なし。devil-advocate の INV-2026-0528-001 と同型と認識は正しい。"
+    },
+    {
+      "finding_id": "RE-407",
+      "original_severity": "medium",
+      "devil_advocate_severity": "medium",
+      "verifier_severity": "medium",
+      "evidence_check": "確認: runner.py:937 で _check_live_health_alerts が live_orders_silent 発火、runner.py:1613-1614 で RE-305 が同じ live_orders_silent 発火。email_notifier.py:295 で live_orders_silent → live_orders_silent kind、email_notifier.py:349 で throttle=43200.0s (12h)。事実完全一致。",
+      "reproduction_verified": true,
+      "agreement_with_da": "agree",
+      "rationale": "意味の異なる 2 事象 (沈黙検知 vs OANDA 連続失敗エスカレ) が 12h throttle を共有。RE-305 を専用 alert_type に分離するのが正しい解。RE-407/408/409 は 1 つの修正でまとめて解決可能。",
+      "concerns_about_original": "なし。"
+    },
+    {
+      "finding_id": "RE-408",
+      "original_severity": "low",
+      "devil_advocate_severity": "low",
+      "verifier_severity": "low",
+      "evidence_check": "確認: runner.py:1608-1611 で 30 の倍数発火条件、email_notifier.py:349 で live_orders_silent throttle=43200s (12h)。設計意図 (運用者に通知し続ける) と実挙動 (12h に 1 通) が不整合。事実完全一致。",
+      "reproduction_verified": true,
+      "agreement_with_da": "agree",
+      "rationale": "Prometheus / 構造化ログには記録されるが Email の意味では escalation が機能しない。コミットメッセージの記述が誤解を招く。RE-407 と一体修正が望ましい。",
+      "concerns_about_original": "なし。"
+    },
+    {
+      "finding_id": "RE-409",
+      "original_severity": "low",
+      "devil_advocate_severity": "low",
+      "verifier_severity": "low",
+      "evidence_check": "確認: runner.py:1275-1290 _ALERT_LEVEL_BY_TYPE に live_orders_silent: WARNING が 1282 行で登録。runner.py:1311 で .get(alert_type, AlertLevel.WARNING) フォールバック。RE-305 (1613 行) が同じ live_orders_silent を発火するため level=WARNING。事実完全一致。",
+      "reproduction_verified": true,
+      "agreement_with_da": "agree",
+      "rationale": "_check_live_health_alerts と RE-305 で同一 alert_type なので level も統一されている (一貫性自体は OK)。ただし「取引完全停止」のエスカレ通知としては CRITICAL 相当が妥当。RE-407 で alert_type 分離した上で CRITICAL に設定すべき。",
+      "concerns_about_original": "なし。"
+    },
+    {
+      "finding_id": "RE-410",
+      "original_severity": "medium",
+      "devil_advocate_severity": "medium",
+      "verifier_severity": "medium",
+      "evidence_check": "確認: metrics.py:838 `def observe_feature_staleness(self, strategy_id: str, age_sec: float)` で Prometheus label name=strategy_id (847-850 行)。live_store.py:439 `self._metrics.observe_feature_staleness(self.primary_tf, age_sec)` で第 1 引数に primary_tf (例 \"H1\") を渡している。事実完全一致。",
+      "reproduction_verified": true,
+      "agreement_with_da": "agree",
+      "rationale": "Prometheus メトリクスのセマンティクスが壊れ、FxFeatureStorestaleHigh アラートが個別戦略の staleness を検知できない。LiveFeatureStore は複数戦略で共有されうるため strategy_id ラベル化自体が設計ミス。観測点を strategy_slot 側に移すか、metrics API を tf ラベルに変更する必要あり (alerting_rules.yml の by 句も追従)。",
+      "concerns_about_original": "なし。これは observation だけでなく Prometheus ラベル設計の根本的な誤りで、DM-302 修正セッションでの構造的欠陥。"
+    },
+    {
+      "finding_id": "RE-411",
+      "original_severity": "low",
+      "devil_advocate_severity": "low",
+      "verifier_severity": "low",
+      "evidence_check": "確認: client.py:368-389 submit_order: `async with session.post(url, json=body) as resp:` を try なし。submit_order の外側 try (206-222) は例外を catch して raise するが _record_api_metric は呼ばない。client.py:520-528 cancel_order のみ try/except TimeoutError + _record_api_metric(..., None, None)。client.py:543-562 get_account_info / 594-602 get_open_trades / 783-790 get_candles で同様に resp.status 取得前に raise すれば metric 未記録。事実完全一致。",
+      "reproduction_verified": true,
+      "agreement_with_da": "agree",
+      "rationale": "RE-401 が解消されない限り独立した効果はない (どのみち metrics=None で no-op)。RE-401 と batch fix が効率的。fx_oanda_api_status_total{status_code=\"timeout\"} が永久 0 に張り付く構造。",
+      "concerns_about_original": "なし。"
+    },
+    {
+      "finding_id": "RE-412",
+      "original_severity": "low",
+      "devil_advocate_severity": "low",
+      "verifier_severity": "low",
+      "evidence_check": "確認: main.py に check_kill_switch 呼出ゼロ件 (grep 確認)、main.py:752-805 で CircuitBreaker + KillSwitch を生成し register_components で halt パス注入。EventBus 経由の halt/cancel 設計のため runner.py:1647-1664 の H-01 同型の無限ループは構造的に発生しない。事実完全一致。",
+      "reproduction_verified": true,
+      "agreement_with_da": "agree",
+      "rationale": "RE-303 (low) 再評価は正しい。main.py 経路は別実装で H-01 修正の対象外。PA-307 (main.py 廃止 ADR) が進めば再評価。",
+      "concerns_about_original": "なし。"
+    }
+  ],
+  "missed_findings": [
+    {
+      "id": "RE-MISSED-401",
+      "severity": "medium",
+      "title": "OANDABroker.get_trade が transient outage と 404 を同じ None で返す → close_trade 経路で『誤 stale 判定』",
+      "evidence": [
+        "trading_platform/broker/oanda_adapter/client.py:564-572 (get_trade: resp.status != 200 (5xx/timeout 含む) で None 返却。例外ハンドリング無し)",
+        "trading_platform/core/execution_engine/broker_gateway.py:469-477 (gateway.get_trade は except Exception → None ラップで本物の OANDA 404 と区別不能)",
+        "trading_platform/broker/oanda_adapter/client.py:654-665 (close_trade pre_check で get_trade が例外を投げた場合は fail-safe に PUT 経路へ落とすが、5xx で None 返却の場合は line 671-683 で stale_detected=True / trade_state=NOT_FOUND と判定)",
+        "trading_platform/core/unified_runner/strategy_slot.py:996-1013 (stale_detected=True なら PUT を送らず _recover_stale_trade_pnl を呼び state を補正してリターン)"
+      ],
+      "rationale": "OANDA が 503/504/timeout を返した場合、get_trade は None を返し close_trade pre_check は『trade が存在しない (NOT_FOUND)』として PUT をスキップする。実際には trade はまだ OPEN だが FTS は『stale=決済済み』として state.open_trade_id をクリアする。次バーで戦略が同方向の再エントリーを試みると 2 重建玉になる。RE-402 と同型の orphan trade を別経路 (exit 側) で生成しうる。修正案: get_trade で resp.status >= 500 / timeout を `raise BrokerTransientError` に分岐させ、close_trade pre_check で当該例外時は『pre_check_failed → 通常 PUT 経路に fall-through』へ変更する。"
+    },
+    {
+      "id": "RE-MISSED-402",
+      "severity": "low",
+      "title": "OANDABroker submit_order の外側 except Exception で error_count++ するが _record_api_metric 未呼出 → 429/RateLimit/aiohttp.ClientResponseError 等が success kind=success に紛れる",
+      "evidence": [
+        "trading_platform/broker/oanda_adapter/client.py:206-222 (submit_order 外側 try/except: error_count++ + raise のみで _record_api_metric なし)",
+        "trading_platform/broker/oanda_adapter/client.py:370-373 (内側で resp.status を取得した後にしか _record_api_metric が呼ばれない)"
+      ],
+      "rationale": "TimeoutError 以外でも、aiohttp.ClientConnectorError / ClientResponseError などレスポンス取得前の例外が submit_order で raise されると status=timeout 以外の分類で扱われるべきだが、現在は metric にすら記録されない。RE-411 のスコープ拡張。"
+    },
+    {
+      "id": "RE-MISSED-403",
+      "severity": "medium",
+      "title": "OANDABroker.get_open_positions / get_account_info / get_candles で resp.status != 200 時に metric 記録後でも raise ConnectionError(data) し data に APIキーや内部情報が混入する可能性",
+      "evidence": [
+        "trading_platform/broker/oanda_adapter/client.py:549-550 (`raise ConnectionError(f\"口座情報取得失敗: {data}\")` data はレスポンス JSON full)",
+        "trading_platform/broker/oanda_adapter/client.py:600-601 (同上)",
+        "trading_platform/broker/oanda_adapter/client.py:737-738 (同上)",
+        "trading_platform/broker/oanda_adapter/client.py:790-791 (同上)"
+      ],
+      "rationale": "OANDA 5xx / 400 系で返るエラーレスポンス body は通常エラーコードのみだが、middleware や proxy で改ざんされた場合や API キー漏洩を伴うエラーパスが将来追加された場合に str(data) が **logger 経由で構造化ログ全層に伝播**する。エラーメッセージは errorMessage / errorCode 等の白リストフィールドのみに絞るべき。security low - medium 程度の前向きの hardening。"
+    },
+    {
+      "id": "RE-MISSED-404",
+      "severity": "low",
+      "title": "9998a7a で追加された RE-305 (live_orders_silent) は account_info 連続失敗の文脈で発火するが、_consecutive_poll_errors は account_info 取得失敗のみで増加し submit_order 失敗では増えない → 『取引が完全に止まっている』判定は不正確",
+      "evidence": [
+        "trading_platform/core/unified_runner/runner.py:1559-1567 (account_info try/except のみで _consecutive_poll_errors++)",
+        "trading_platform/core/unified_runner/runner.py:1602-1631 (RE-305 メッセージ: 『取引ループは継続中だが新規 fill 不能』)"
+      ],
+      "rationale": "account_info 取得は OANDA の Read 系 API、submit_order は Write 系で独立した障害モードを持ちうる。account_info が成功していても submit_order が連続失敗する経路 (例: 注文ロジック関連の reject) は RE-305 で検知できない。逆に account_info だけが API 制限で失敗していても submit_order 自体は通る場合もある。アラート意味論として『取引完全停止』は誤導的。実害は低いが、運用者が誤った優先度で対応するリスクあり。"
+    },
+    {
+      "id": "RE-MISSED-405",
+      "severity": "low",
+      "title": "BrokerGateway.get_trade が例外を None で握りつぶす → strategy_slot.py:1028 の close_trade_zero_price フォールバック経路で 0 price のまま retry し続ける",
+      "evidence": [
+        "trading_platform/core/execution_engine/broker_gateway.py:469-477 (get_trade except Exception → return None)",
+        "trading_platform/core/unified_runner/strategy_slot.py:1028-1031 (close_trade fallback で trade_detail is None なら close_price 維持)",
+        "trading_platform/core/unified_runner/strategy_slot.py:1040-1047 (close_price==0 なら『ポジションを維持し次バーで再試行』)"
+      ],
+      "rationale": "OANDA 一時障害中は永久に close_price=0 で抜けられず、ポジションが滞留しうる。RE-MISSED-401 と同根の『None による曖昧化』問題。RE-402 の orphan と双方向に対応する exit 側の対称欠陥。"
+    }
+  ],
+  "summary": {
+    "agreements": 12,
+    "disagreements": 0,
+    "missed": 5,
+    "key_concerns": [
+      "RE-402 (high) は実コード + 設計原則 (CLAUDE.md『不整合は自動修正しない』) の組み合わせで構造的に発生する。能動 close 実装が CLAUDE.md 原則と衝突するため、最低 CRITICAL RiskAlert + 運用者即時介入の通知強化が現実解。",
+      "RE-404 → RE-402 の chain bug pair 認識は devil-advocate が正しく捉えている。fix 順序は RE-404 retry → RE-402 active close/alert。",
+      "RE-401 / RE-411 + 新規 RE-MISSED-401 / RE-MISSED-402 / RE-MISSED-405 は『例外ハンドリングを None / [] / 空文字列に握りつぶす』同型の欠陥群。BrokerGateway 層で例外分類を一律に強制する型システム改修 (DM-302 計装と RE-302 BrokerUnavailableError の延長線上) が構造的解。",
+      "RE-MISSED-401 は『stale_detected が誤って True になり、まだ OPEN の trade を FTS state から消す』経路で、RE-402 の逆方向 (exit 時の orphan 化) を作りうる。RE-402 と同等の優先度で評価検討すべき。",
+      "RE-410 は『Prometheus label semantic mismatch』で、DM-302 修正セッションの構造的欠陥として AST テストで再発防止が望ましい。"
+    ],
+    "verification_methodology": [
+      "全 12 件で finding の evidence file:line を実コードで Read し一致を確認",
+      "RE-402 の reproduction シナリオは strategy_slot.py の broker error 経路 + runner.py reconcile 経路 + email_notifier throttle を直列でトレースし孤児 trade の保持時間 (最大 15-25 分) を算定",
+      "RE-403 の Live 影響評価は trading_platform/strategies/imported/ 配下 22 戦略の runner_config.json + pyramiding 機能の grep + _handle_entry 入口 (strategy_slot.py:495 not self.state.open_trade_id) で構造的に二重 entry が抑止されることを確認",
+      "missed_findings は 9998a7a 差分 (client.py / broker_gateway.py / strategy_slot.py / runner.py) + 周辺の close_trade / get_trade 経路の例外ハンドリング統一性を grep + 個別 Read で点検"
+    ]
+  }
+}

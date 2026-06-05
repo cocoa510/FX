@@ -1,0 +1,99 @@
+{
+  "validator": "devil-advocate",
+  "cluster": "csr_security",
+  "session": "AUDIT-2026-0525-002",
+  "validation_date": "2026-05-25",
+  "results": [
+    {
+      "id": "CSR-101",
+      "original_severity": "high",
+      "validated": "downgraded",
+      "adjusted_severity": "medium",
+      "reproducible": false,
+      "adoption_level": "should_consider",
+      "rationale": {
+        "summary": "攻撃 __import__(dynamic_string).system(...) は Stage1 AST 静的解析で確実にブロックされる。SANDBOX_BUILTINS への __import__ 残留は理論的リスクであるが実際の攻撃経路は閉じている。",
+        "evidence": [
+          "sandbox_builtins.py:29 — __import__: __import__ が SANDBOX_BUILTINS に含まれることは実測確認済み",
+          "syntax_checker.py:51-56 — FORBIDDEN_BUILTINS = frozenset({'exec', 'eval', 'compile', 'open', '__import__', ...}) に __import__ が明示的に含まれる",
+          "syntax_checker.py:244 — 'root_obj is None and func_name and func_name in FORBIDDEN_BUILTINS' の条件で __import__(...) 呼び出しを検出しブロック",
+          "syntax_checker.py:324-325 — _extract_call_info: ast.Name ノードは (node.id, None, node.id) を返す。__import__(chr(111)+chr(115)) の func は ast.Name(id='__import__') であり root_obj=None, func_name='__import__' となる",
+          "つまり __import__(chr(111)+chr(115)).system('id') の AST は Call(func=Attribute(value=Call(func=Name(id='__import__')), attr='system')) であり、内側の __import__(...) Call が ast.walk で発見され L244 で FORBIDDEN_BUILTINS チェックにヒット → Stage1 FAIL"
+        ],
+        "attack_path_analysis": {
+          "stage1_ast": "BLOCKED — __import__ という Name ノードの Call が FORBIDDEN_BUILTINS で検出される。動的文字列引数 chr(111)+chr(115) はランタイム値であり AST では引数の値ではなく関数名ノードが判定対象のため、動的文字列による迂回は不可能",
+          "stage2_if": "到達不可（Stage1 FAILのため）",
+          "stage3_sandbox": "到達不可（Stage1 FAILのため）",
+          "stage4_runtime": "到達不可（Stage1 FAILのため）"
+        },
+        "remaining_risk": "__import__ を SANDBOX_BUILTINS に残す必要性の正当化「from __future__ import annotations に必須」は CPython 3.11 では実際には不要（PEP 563 注釈は __import__ を呼ばない）。SANDBOX_BUILTINS から除去しても Stage3/4 の exec_module は Python import protocol が内部で __import__ を呼ぶが、これは __builtins__ dict ではなく CPython 内部 C レベルで処理されるため動作継続する。除去により防御深度は向上するが、現状でも攻撃は Stage1 で止まる。",
+        "downgrade_reason": "CSR-001 finding では RCE が実証可能（実際にサンドボックス外でシステムコールを実行できる）という主張だが、実コードで Stage1 に __import__ 呼び出しの FORBIDDEN_BUILTINS チェックが存在することを確認した。再現不可と判定し high から medium に格下げ。ただし SANDBOX_BUILTINS からの __import__ 除去は防御深度向上のため should_consider として維持する。"
+      }
+    },
+    {
+      "id": "CSR-102",
+      "original_severity": "medium",
+      "validated": "true",
+      "adjusted_severity": "medium",
+      "reproducible": true,
+      "adoption_level": "should_consider",
+      "rationale": {
+        "summary": "2セグメント連鎖チェック漏れは実在する。ただし実害はインポート禁止チェック（_check_imports）と FORBIDDEN_MODULES root_obj チェック（L256）の2重防衛が大幅に緩和している。",
+        "evidence": [
+          "syntax_checker.py:274-277 — chain_parts = full_path.split('.'); bad = next((p for p in chain_parts[1:-1] if p in FORBIDDEN_MODULES), None)",
+          "full_path='a.os' の場合 chain_parts=['a','os'], chain_parts[1:-1]=[] で bad=None → CSR-102 の指摘通り2セグメントを検出しない",
+          "しかし _check_imports (L174-217) が import 文を走査し、'import os as a' または 'from os import ...' は top_module='os' が FORBIDDEN_MODULES に含まれるため L191-212 で blocking される",
+          "また L256 'root_obj in FORBIDDEN_MODULES' チェック: a.os() の root_obj='a' は FORBIDDEN_MODULES 非該当でスルーするが、os() の直接呼び出しは root_obj='os' がヒット",
+          "実際の攻撃シナリオ 'import atlas_mod as a; a.os.system()' は: (1) atlas_mod の import 自体が ALLOWED_ATLAS_SUBMODULES チェック (L204) で atlas 配下の安全サブモジュールのみ許可 → atlas.backtest 等の実行系は既に CSR-001 で遮断済み (2) 仮に通過しても 3セグメント a.os.system() は chain_parts[1:-1]=['os'] で bad='os' が検出される",
+          "2セグメント漏れが実際に悪用可能な残存経路: 非 atlas かつ非 FORBIDDEN の import 済みモジュールの属性が FORBIDDEN_MODULES に一致するケース。現実的な攻撃構成が限定的"
+        ],
+        "verdict": "脆弱性は実在するが既存の多層防御（_check_imports による import ブロック + 3セグメント以上でのチェック + ALLOWED_ATLAS_SUBMODULES）により実害リスクは低い。chain_parts[1:] への修正は単純かつリスクゼロの改善であり採用すべき。"
+      }
+    },
+    {
+      "id": "CSR-103",
+      "original_severity": "medium",
+      "validated": "true",
+      "adjusted_severity": "medium",
+      "reproducible": true,
+      "adoption_level": "should_consider",
+      "rationale": {
+        "summary": "sandbox_runner.py:765-772 の _load_strategy_class は CSR-007 修正（複数 Strategy サブクラス定義の曖昧エラー + __module__ フィルタ）が未反映であることを実コードで確認した。",
+        "evidence": [
+          "sandbox_runner.py:765-772 — 'for _name, obj in vars(module).items(): if isinstance(obj, type) and issubclass(obj, Strategy) and obj is not Strategy: return obj' — 最初に見つかったサブクラスを即 return する実装",
+          "runner.py:259-281 — CSR-007 修正済み: strategy_classes = [attr for attr_name in dir(module) ... if getattr(attr, '__module__', None) == module.__name__]; len(strategy_classes) > 1 で BacktestError",
+          "sandbox_runner.py には (1) __module__ == module.__name__ によるインポート由来クラス除外がない (2) 複数クラス定義時の曖昧エラーがない の2点が未適用",
+          "実際の攻撃シナリオ: 戦略ファイルが atlas.common.models.Strategy を import した上で別の Strategy サブクラスも定義している場合、import 由来のクラスが先に発見されて意図しないクラスがロードされる可能性。ただし Stage3/4 の動作検証で実際の誤動作は露出するため最終的な影響は限定的"
+        ],
+        "verdict": "runner.py との同一修正適用は正当な改善。ただし sandbox_runner は Stage3/4 の動作確認を行うためここでの誤判定はテスト段階で検出される。real-world 影響は低リスクだが runner.py との整合性保持のため修正すべき。"
+      }
+    },
+    {
+      "id": "CSR-106",
+      "original_severity": "medium",
+      "validated": "true",
+      "adjusted_severity": "medium",
+      "reproducible": true,
+      "adoption_level": "should_consider",
+      "rationale": {
+        "summary": "3つのエグジット経路（L921 gap_stop_loss / L1101 signal_flat / L1144 sl_tp）が strategy.on_fill() を直接呼び _dispatch_shadow() を経由しないことを実コードで確認した。shadow position_manager への FLAT 伝播が欠落する。ただし data-engineer の parity 全65件 PASS との矛盾は説明可能。",
+        "evidence": [
+          "event_simulator.py:921-927 — strategy.on_fill({...FLAT...}) 直接呼び出し後、state.position_manager.close_position_by_id() を個別呼び出し。state.notify_fill() / _dispatch_shadow() 経由なし",
+          "event_simulator.py:1101-1107 — 同上 (signal_flat 経路)",
+          "event_simulator.py:1144-1150 — 同上 (sl_tp 経路)",
+          "event_simulator.py:296-318 — notify_fill() の正規実装: strategy.on_fill(fill) + self._dispatch_shadow(fill) の両方を呼ぶ",
+          "event_simulator.py:332-352 — _dispatch_shadow(): FLAT 方向で self.position_manager.on_fill(FillEvent.from_legacy_dict(fill)) を呼ぶ",
+          "event_simulator.py:1258 — end_of_data 経路は notify_fill_shadow_only() を正しく使用している",
+          "event_simulator.py:1062 — エントリー経路は state.notify_fill(strategy, {...}) を正しく使用している",
+          "event_simulator.py:1330-1332 — コメント『exit 側の shadow 伝播は call site の notify_fill に移管した』と宣言しているが、3経路は未移管のまま"
+        ],
+        "parity_test_contradiction_analysis": {
+          "claim": "data-engineer が tests/parity を全65件 PASS と実測している",
+          "explanation": "parity テストは L2 event_simulator の数値出力（trade_log / metrics / PF / Sharpe 等）を旧実装と比較するものと推定される。shadow position_manager（OANDAHedgingManager）はバックテスト計算には使用されず FTS Live/Paper トレードの position state 追跡専用。よって shadow への FLAT 伝播欠落はバックテスト数値には影響せず parity テストが PASS することは矛盾しない。問題はバックテスト数値ではなく Live 運用時の OANDAHedgingManager の position state が exit で更新されない点にある",
+          "actual_risk": "Live/Paper トレード時に shadow position_manager がエグジットを認識せずポジションが open のまま残存するドリフトが発生しうる。ただし FTS の実際の Live 注文管理が shadow に依存しているかどうかは event_simulator 単体では判断不可"
+        },
+        "verdict": "コードレベルでの finding は正確。parity テスト PASS との矛盾は shadow が BT 計算外であることで説明可能。severity medium は妥当。修正は notify_fill() 経由に統一する直接的な改善であり採用すべき。"
+      }
+    }
+  ]
+}

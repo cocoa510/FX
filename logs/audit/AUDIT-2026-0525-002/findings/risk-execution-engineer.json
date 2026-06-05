@@ -1,0 +1,75 @@
+{
+  "agent": "risk-execution-engineer",
+  "session": "AUDIT-2026-0525-002",
+  "scope": "PTRC / Execution Engine / Kill Switch / State Store (dry-run, 調査のみ)",
+  "findings": [
+    {
+      "id": "RE-101",
+      "severity": "high",
+      "area": "risk_engine/ptrc.py + unified_runner (RE-001 incomplete_fix)",
+      "title": "RE-001 fail-safe が Live EUR_USD 戦略 (ATLAS-2026-0511-059) を恒久的に全 REJECT — 根本原因(OandaCurrencyConverter 未配線)は未修正で「dead-end 回避」の commit 主張と矛盾",
+      "description": "RE-001 (commit 3dbf087) は Live (OANDA_ENVIRONMENT=live) かつ StaticCurrencyConverter のとき `_unsafe_static_in_live` を立て、account 通貨(JPY)と異なる quote の注文を evaluate() 冒頭で fail-safe REJECT する。リスク誤算の進行を止める方向は正しい。しかし本番経路で PreTradeRiskControl は runner.py:291 / main.py:81 で引数なし生成され、currency_converter は常に StaticCurrencyConverter にフォールバックする。OandaCurrencyConverter は trading_platform/ のどこにも instantiate/注入されておらず(コメント・docs にのみ存在)、`_unsafe_static_in_live` は Live で常に True になる。実運用 .env は OANDA_ENVIRONMENT=live で、ATLAS-2026-0511-059 (EUR_USD, runner_config.json execution_mode=live, fixed_units=10000) が現に live デプロイされている。このため EUR_USD は quote=USD != account=JPY となり 0.5 ゲートで毎エントリー REJECT され、当該 live 戦略は完全沈黙する。commit メッセージは『構築時 RuntimeError の dead-end を避け安全な JPY ペアの稼働を止めない』と述べるが、本来守るべき当該 live 非JPY戦略にとっては実質 dead-end であり、根本原因(動的換算器の配線欠如)は未解決のまま。さらに REJECT は strategy_slot.py:642-653 で WARNING ログ + orders_rejected++ のみで、運用者向けの専用アラート (risk_alert / Email) を発出しない。結果『live 戦略が恒久的に死んでいるのに誰も気づかない』サイレント障害になる。影響範囲: imported 60 戦略中 非JPYクォートは GBP_USD×6 / EUR_USD×5 / AUD_USD×1 = 12 件、うち live モードは 059 (EUR_USD) の 1 件。",
+      "evidence": [
+        "trading_platform/core/risk_engine/ptrc.py:151-161 (_unsafe_static_in_live 判定)",
+        "trading_platform/core/risk_engine/ptrc.py:218-254 (0.5 fail-safe REJECT ゲート)",
+        "trading_platform/core/unified_runner/runner.py:291 (PreTradeRiskControl() 引数なし生成)",
+        "trading_platform/main.py:81 (PreTradeRiskControl() 引数なし生成)",
+        ".env:OANDA_ENVIRONMENT=live (ENV 行なし)",
+        "trading_platform/strategies/imported/ATLAS-2026-0511-059/runner_config.json (execution_mode=live, EUR_USD)",
+        "trading_platform/core/unified_runner/strategy_slot.py:640-653 (PTRC reject 時アラートなし)",
+        "OandaCurrencyConverter は grep で trading_platform/ 内に注入箇所ゼロ (currency_converter.py の class 定義のみ)"
+      ],
+      "suggested_fix": "(1) 根本解決: 本番経路 (runner._init / main) で OandaCurrencyConverter を構築し PreTradeRiskControl と PortfolioManager に注入する。OANDA pricing (/v3/accounts/{id}/pricing) または既存 price_cache を投入し、fallback=None で fail-safe を維持。これにより非JPYクォート戦略が正しいレートで評価され RE-101 の dead-end が解消する。(2) 暫定運用: 動的換算器が無いまま live を続けるなら、RE-001 REJECT 時に専用 risk_alert (例 ptrc_static_converter_live_reject) を 1 回 dispatch し、運用者へ『非JPY戦略が無効化されている』ことを能動通知する。(3) 起動時ガード: OANDA_ENVIRONMENT=live かつ非JPYクォートの live 戦略がロードされているのに StaticCurrencyConverter のままなら startup で loud に WARN/拒否する fail-fast を追加。",
+      "category": "incomplete_fix"
+    },
+    {
+      "id": "RE-102",
+      "severity": "medium",
+      "area": "risk_engine + risk_supervisor (RE-002 設計評価)",
+      "title": "日次損失ハードリミット(10%)が realized-only かつ集計含み損に対する blocking ゲートがゼロ — 相関ドローダウン時に含み損が膨らむ中で新規エントリーが通り続ける構造リスク",
+      "description": "RE-002 (commit 6f5b4cb) は『日次損失ハードリミットは realized-only、含み損保護は (1)ブローカーSL (2)account合算WARNレイヤーが担う』と明文化した。批判的評価: per-strategy daily_unrealized_pnl は build_risk_state で常に 0 のまま PTRC に渡り(risk_supervisor.py:630-639)、PTRC の _check_max_daily_loss は実質 realized + 新規SL想定のみで判定する(ptrc.py:447-460)。さらに新規発注の事前ゲート can_open_position も daily_realized_pnl_total / per-strategy realized のみを見る(risk_supervisor.py:407-433)。集計含み損に反応する経路は _evaluate_unrealized_warning だけだが、これは is_unrealized_warning_active を立てて Email を出すのみで『新規発注ブロックは行わない』(risk_supervisor.py:858-947)。結果、複数ポジションが同時に逆行する相関ドローダウン(例: 全JPYクロス同時急落)では、含み損が口座の10%を大きく超えても確定損が出ない限り KS は発動せず、PTRC も can_open_position も新規エントリーを通し続ける。各トレードのブローカーSLは1件単位の最悪損失を上限化するが、同時多発の集計エクスポージャーは止めない。これは docs 化で『正当化』された残存リスクであり、前回 medium として現状維持がユーザー承認済みである点は尊重する。ただし監査として、含み損集計に対する hard な新規発注スロットリング(例: combined PnL が KS閾値の95%超で can_open_position を拒否=WARNと同閾値で blocking化)が一切無いことは、実弾運用での tail risk として再評価対象に値する。再現条件: 同方向相関の複数 live ポジション保有中に急激な逆行で未実現損が -10% 超、確定損は閾値未満、かつ各ポジションSLが未約定 — この間 PTRC/can_open_position は新規を承認し続ける。",
+      "evidence": [
+        "trading_platform/core/unified_runner/risk_supervisor.py:630-639 (daily_unrealized_pnl を 0 のまま渡す)",
+        "trading_platform/core/risk_engine/ptrc.py:447-460 (_check_max_daily_loss は realized + SL 想定)",
+        "trading_platform/core/unified_runner/risk_supervisor.py:407-433 (can_open_position は realized のみ)",
+        "trading_platform/core/unified_runner/risk_supervisor.py:858-947 (_evaluate_unrealized_warning は非ブロッキング、Email のみ)",
+        "trading_platform/core/unified_runner/risk_supervisor.py:832-849 (_evaluate_kill_switch は realized のみ)"
+      ],
+      "suggested_fix": "現状維持の方針判断は尊重するが、WARN 発動と同じ combined(実現+未実現)閾値で can_open_position に soft-block(新規エントリーのみ拒否、既存決済は許可)を追加することを [change:spec] として再評価提案する。KS のような全停止/flapping は避けつつ、相関ドローダウン中の『含み損が膨らむ中での新規追加』だけを止められる。最低限、is_unrealized_warning_active が True の間は新規エントリーを拒否する 1 行ゲートでも tail risk を大幅低減できる。実装する場合は realized-only を pin する既存テスト test_build_risk_state_unrealized_pnl_is_realized_only_rev1 とは別レイヤー(supervisor gate)なので衝突しない。",
+      "category": "regression"
+    },
+    {
+      "id": "RE-103",
+      "severity": "low",
+      "area": "risk_engine/ptrc.py (DM-001 audit wiring, RE-001 同梱)",
+      "title": "PTRC 拒否の Audit Log 記録が参照保持なしの fire-and-forget create_task で、GC により記録が欠落しうる",
+      "description": "RE-001 commit (3dbf087) に同梱された DM-001 の PTRC 拒否 Audit Log 配線 _fire_ptrc_audit は、loop.create_task(_audit_logger.record(entry)) を呼ぶだけでタスク参照を保持せず add_done_callback も付けない(ptrc.py:92)。asyncio はタスクへ弱参照しか持たないため、record() の await(JSONL fsync 込み I/O)完了前にタスクが GC されると記録が静かに失われうる。PTRC 拒否は監査要件(CLAUDE.md『リスク拒否理由は必ず Audit Log に記録』)であり、特に RE-101 のような fail-safe REJECT や KS 中拒否の証跡が欠けると事後分析・規制対応で問題になる。負荷が高くイベントループが詰まった局面ほど GC 圧が上がり欠落確率が増す逆相関の悪さがある。再現条件: 多数の PTRC 拒否が短時間に集中し、record() の I/O が遅延している間に呼出元の evaluate() が完了しタスクへの強参照が消える状況。",
+      "evidence": [
+        "trading_platform/core/risk_engine/ptrc.py:60-92 (_fire_ptrc_audit、loop.create_task の戻り値を破棄)",
+        "trading_platform/core/risk_engine/ptrc.py:92 (loop.create_task(_audit_logger.record(entry)))"
+      ],
+      "suggested_fix": "生成したタスクをモジュール/インスタンスレベルの集合 (例: _pending_audit_tasks: set) に add し、task.add_done_callback(_pending_audit_tasks.discard) で完了時に除去する標準パターンに変更する。または record() を同期 enqueue + 専用 writer タスクのキューに積む方式にして fire-and-forget の GC リスク自体を排除する。",
+      "category": "new"
+    },
+    {
+      "id": "RE-104",
+      "severity": "low",
+      "area": "execution_engine/broker_gateway.py + oanda_adapter (retry 冪等性のエッジ)",
+      "title": "OANDA duplicate clientExtensions.id REJECT が PERMANENT/UNKNOWN として失敗扱いされ、原注文が実約定済みのとき local 状態と乖離する(reconciler 依存)",
+      "description": "再送冪等性は clientExtensions.id=order.order_id で担保され(client.py:343)、OANDA は同一 ID 再送を REJECT する設計。しかし submit_with_limited_retry の再送で『初回は実は約定していたが応答が timeout(RETRYABLE)で返った』ケースでは、再送が duplicate として status!=201 で返る(client.py:367-381)。この応答は _classify_error_message により PERMANENT もしくは UNKNOWN に分類され、submit() は FAILED 遷移 or 結果返却し、呼出元 strategy_slot は fill.success=False で REJECTED 扱いにする(strategy_slot.py:666-676)。一方 OANDA 側では原注文が約定しポジションが開いている。すなわち『local=注文失敗 / broker=ポジション保有』の乖離が発生しうる。これは Position Reconciler が後追いで検知しアラート(自動修正なし=設計通り)する想定だが、reconciler 周期内は誤った flat 認識で次バーの新規エントリーが二重に積まれる窓が残る。retry_enabled は既定 False(Live 無変更)のため現状の実害は限定的だが、ADR-0003 Phase で True 化する前に明示対処が必要。",
+      "evidence": [
+        "trading_platform/broker/oanda_adapter/client.py:337-353 (clientExtensions.id 冪等性)",
+        "trading_platform/broker/oanda_adapter/client.py:364-381 (duplicate reject も汎用 4xx/失敗として返す)",
+        "trading_platform/core/execution_engine/broker_gateway.py:252-281 (success=False の分類→FAILED/結果返却)",
+        "trading_platform/core/unified_runner/strategy_slot.py:665-676 (fill 失敗で REJECTED)"
+      ],
+      "suggested_fix": "retry_enabled を True 化する前提条件として、duplicate clientOrderId REJECT を専用分類(例 DUPLICATE_ALREADY_FILLED)にし、検出時は失敗扱いせず get_open_trades / 当該 clientExtensions.id の約定有無を即時照会して fill に転じる『冪等吸収』を submit_with_limited_retry に実装する。最低限、duplicate reject 後は次回 reconciler 周期を待たず即時 position 照会をトリガするフックを追加する。",
+      "category": "new"
+    }
+  ],
+  "summary": {
+    "total": 4,
+    "by_severity": {"high": 1, "medium": 1, "low": 2},
+    "by_category": {"incomplete_fix": 1, "regression": 1, "new": 2}
+  }
+}

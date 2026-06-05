@@ -1,0 +1,82 @@
+[fix:bug] QA-501/503: backfill_v6_2_0_soft_score の invariant 同期欠陥を修正 + 15 戦略追跡 backfill
+
+AUDIT-2026-0530-002 で発見した直前 backfill (commit 9c83b9f5) 自体の post_fix_defect
+2 件を修正し、15 件 flip 戦略を追跡 backfill で再処理する。
+
+# 根因
+
+## QA-501 [HIGH, post_fix_defect] S-10 invariant 違反
+runner.py:1508 で Gate 反転時に gate_check["passed"] (後方互換 alias) と
+gate_check["overall_passed"] (canonical) の両方を同期するが、9c83b9f5 で導入した
+backfill スクリプトはこの同期を欠いていた。結果として 15 件中 11 件で
+`gate_check.passed=True / overall_passed=False / failed_conditions=[]` の不整合が
+残存し、oncall が gate_check を直読みすると「Gate PASS なのに overall FAIL ?」と
+混乱する状態だった。
+
+第1チーム実測 (QA-501): 3 戦略 (0506-026, 0508-037, 0509-005) の result.json で
+S-10 invariant 違反を確認。FTS Live 影響は result_parser.py:L211-216 の AND
+合成で 0 だが、将来この保護が削除された場合に顕在化するリスク。
+
+## QA-503 [HIGH, post_fix_defect] H-NEW-1 (layer2.passed) invariant 違反
+runner.py:1443/1477/1502 は overall_passed 反転時に layer2.passed も同期するが
+9c83b9f5 の backfill はこの同期を欠いていた。event_simulator 側の緩い passed=True
+が信頼されるべきでない (H-E 第4次監査) のに、backfill 後の result.json で
+`layer2.passed=True / overall_passed=False` の anti-pattern が再現していた。
+
+# 修正内容
+
+## scripts/backfill_v6_2_0_soft_score.py 更新
+
+- **QA-501 修正**: `gate_check["passed"] = new_overall_passed` を同期 (新規)
+- **QA-503 修正**: `layer2["passed"] = new_overall_passed` を同期 (新規、error=None 時のみ)
+- **failed_conditions marker** を追加 (oncall 判断材料):
+  - Tier2 FAIL: `backfill_v6_2_0_soft_score_below_floor`
+  - is_duplicate 反転: `cluster_cap_exceeded` (runner.py:1513 と同じマーカー)
+  - その他: `backfill_v6_2_0_tier1_or_other_failure`
+- **--force フラグ**: METRICS_SCHEMA_VERSION=6.2.0 の戦略も再処理可能化
+- **--gids-from <FILE> フラグ**: 改行区切り GID ファイルから対象を読込
+- (既存 --all / --gid と排他、QA-501/503 追跡 backfill 用)
+
+## 追跡 backfill 実行結果
+
+`logs/flipped_v6_2_0_gids.txt` (15 件 flip 戦略 ID) を作成し以下を実行:
+
+```
+python -m scripts.backfill_v6_2_0_soft_score --gids-from logs/flipped_v6_2_0_gids.txt --force
+```
+
+- 対象: 15 戦略
+- 所要: 0.2 秒
+- status: ok 15 件 / error 0 件
+- 検証 (3 戦略 spot-check):
+  - ATLAS-2026-0506-026: overall_passed=False / gate.passed=False / layer2.passed=False
+                          / failed_conds=['cluster_cap_exceeded'] (is_duplicate 副作用)
+  - ATLAS-2026-0507-010: 同上 (cluster_cap_exceeded)
+  - ATLAS-2026-0508-037: overall_passed=False / gate.passed=False / layer2.passed=False
+                          / failed_conds=['backfill_v6_2_0_soft_score_below_floor']
+
+# 検証結果
+
+- ATLAS golden tests: 181/181 PASS (退行ゼロ)
+- ruff: scripts/backfill_v6_2_0_soft_score.py 違反 0
+
+# Phase 4.5 事前 diff 検証結果
+
+本 commit に対する Phase 4.5 7 項目チェックリスト検査:
+- 全項目 PASS (post_fix_defect の追跡修正のため初版の 7 項目検査で発見済の
+  問題を解消する一方向の修正)
+- WARNING_ADVISORY: 旧 backfill (9c83b9f5) の result.json.bak2 (612 件) と
+  本回の追加 .bak2 (15 件) の cleanup 手順が docstring に未記載
+  (CSR-503 既知課題、別 PR で対応)
+
+# 監査体制
+
+第1チーム 10 名 (専門家 7 + devil-advocate 3) → QA-501 / QA-503 を high 確定
+第2チーム なし (Phase 2 で十分検証されたため省略)
+Phase 4.5 事前 diff 検証 → 本 commit 自体は追加 BLOCKING なし
+
+監査ID: AUDIT-2026-0530-002
+正本: logs/audit/summary_AUDIT-2026-0530-002.md (FTS リポジトリ側参照)
+backfill ログ: logs/backfill_v6_2_0_soft_score.json
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>

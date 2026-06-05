@@ -1,0 +1,109 @@
+{
+  "agent": "risk-execution-engineer",
+  "audit_id": "AUDIT-2026-0529-001",
+  "phase": "3/4 implementation",
+  "fixes_applied": [
+    {
+      "finding_id": "RE-302",
+      "severity": "high",
+      "title": "_resolve_live_trade_id で get_open_trades [] 返却時に broker_order_id を open_trade_id に流用",
+      "files_modified": [
+        "trading_platform/core/execution_engine/broker_gateway.py",
+        "trading_platform/core/unified_runner/strategy_slot.py"
+      ],
+      "files_added": [
+        "tests/fault/test_re302_oanda_timeout_phantom_trade.py"
+      ],
+      "lines_changed": 95,
+      "regression_test_pass": true,
+      "verification_command": ".venv/Scripts/python.exe -m pytest tests/fault/test_re302_oanda_timeout_phantom_trade.py -v",
+      "approach": [
+        "BrokerGateway に BrokerUnavailableError(ConnectionError 派生) を導入し、get_open_trades の except で握りつぶしを撤廃して当該例外で再 raise。__cause__ に元例外を保持。後方互換: ConnectionError 派生のため既存の `try/except Exception` 経路は従来どおり捕捉される。",
+        "strategy_slot._resolve_live_trade_id を改修: (1) BrokerUnavailableError を try/except で捕捉し、is_live=True なら open_trade_id 未設定で return → entry_rollback ルートに合流。is_live=False (Paper) なら従来通り trades=[] フォールバック。(2) trades=[] の純粋 0 件ケースも is_live=True なら rollback、Paper のみ broker_order_id 採用。",
+        "回帰防止テスト 4 件: (a) BrokerGateway が下位 broker 例外を BrokerUnavailableError で伝播 / (b) get_open_trades 未実装 broker は [] 返却 (後方互換) / (c) LIVE + BrokerUnavailableError で rollback / (d) LIVE + open_trades=[] でも rollback / (e) Paper では従来通りフォールバック"
+      ],
+      "notes": "broker_order_id (= OANDA Order ID) を Trade ID として誤格納し次回 close_trade で 404 → 幻ポジション化する経路を構造的に遮断。Paper 経路は後方互換維持 (broker_order_id を流用しても同一プロセス内で完結する)。"
+    },
+    {
+      "finding_id": "RE-301",
+      "severity": "high",
+      "title": "_resolve_live_trade_id の comment 非マッチ fallback で別戦略 trade を誤採用しうる",
+      "files_modified": [
+        "trading_platform/core/unified_runner/strategy_slot.py"
+      ],
+      "files_added": [
+        "tests/fault/test_re301_runtime_instrument_fallback.py"
+      ],
+      "lines_changed": 20,
+      "regression_test_pass": true,
+      "verification_command": ".venv/Scripts/python.exe -m pytest tests/fault/test_re301_runtime_instrument_fallback.py -v",
+      "approach": [
+        "_resolve_live_trade_id (ランタイム経路) で comment 一致 matching が空のときに instrument + units_predicate で再マッチする旧フォールバックを撤廃。matching=[] なら open_trade_id 未設定で return → 呼出側の entry_rollback ルート (strategy_slot.py:749-759) に合流。",
+        "restore_positions (INC-2026-0526-001 / R1) で確立された方針 (instrument フォールバック廃止) をランタイム経路にも適用。",
+        "排他制御 (claimed_trade_ids 相当のランナー横断 set) は本セッションのスコープ外。コメントに次回 audit-loop で検討する旨を明記。",
+        "回帰防止テスト 3 件: (a) 同一 instrument 同一 direction (LONG) で別戦略 trade を誤採用しない / (b) comment 一致 trade があれば正しく採用 (後方互換) / (c) SHORT 経路でも同様に instrument フォールバック廃止が機能"
+      ],
+      "notes": "同一 instrument・同一 direction の複数 LIVE 戦略稼働環境で、comment 反映遅延の race window 中に別戦略の既存 open trade を誤採用し close_trade で別戦略 trade を close する重大事故を防止。INC-2026-0526-001 と同型の幻エクスポージャー経路を構造的に遮断。"
+    },
+    {
+      "finding_id": "RE-MISSED-302",
+      "severity": "medium",
+      "title": "_poll_cycle account_info 失敗で heartbeat 全停止 (能動アラート欠如)",
+      "files_modified": [
+        "trading_platform/core/unified_runner/runner.py",
+        "trading_platform/core/monitoring/email_notifier.py"
+      ],
+      "files_added": [
+        "tests/unit/test_re_missed_302_poll_cycle_cascade.py"
+      ],
+      "lines_changed": 55,
+      "regression_test_pass": true,
+      "verification_command": ".venv/Scripts/python.exe -m pytest tests/unit/test_re_missed_302_poll_cycle_cascade.py -v",
+      "approach": [
+        "UnifiedRunner._poll_cycle の account_info 失敗早期 return は維持 (KS check / bar loop は account_info 必須のため)。但し連続失敗が閾値 (5回) に達したら 1 回だけ oanda_connection_degraded RiskAlertEvent を _emit_risk_alert 経由で publish。",
+        "重複送信を抑止するフラグ _account_info_degraded_alert_sent を導入。account_info が一度でも復帰したら False にリセットし、再障害時に再送可能とする。",
+        "_ALERT_LEVEL_BY_TYPE に oanda_connection_degraded -> WARNING を登録 (取引フローは継続不能だが実損は出ないため WARNING)。",
+        "EmailNotifier._RISK_ALERT_KINDS にも oanda_connection_degraded -> live_anomaly を登録。oanda_connection_lost と同じく 900 秒 throttle 対象で連投を抑止しつつ初報は確実に通知。",
+        "回帰防止テスト 3 件: (a) 5 連続失敗で 1 回発火 + 6 回目以降は抑止 / (b) 復帰後に再障害で再発火 (フラグリセット) / (c) 閾値未到達ではカウンタのみ増加・アラート発火なし"
+      ],
+      "notes": "heartbeat ブロック (HEARTBEAT_INTERVAL_POLLS 周期) は account_info 取得より前に実行されるため、early return 自体は heartbeat / reconcile をスキップしない (finding の reproduction では heartbeat 周期内では reconcile が走る)。本修正は『WARN ログのみで運用者が気付けない構造的欠陥』を能動通知で塞ぐ価値が本質。EmailNotifier 経由で live_anomaly kind に集約され 900 秒 throttle 内 1 通 / 復帰でリセットされる。"
+    }
+  ],
+  "fixes_deferred": [
+    {
+      "finding_id": "RE-301 (排他制御)",
+      "reason": "claimed_trade_ids 相当のランナー横断 set をランタイム経路にも導入する案はスコープ大 (runner ↔ strategy_slot 間の lifecycle 管理 / lock 戦略要設計)。本セッションでは entry_rollback 合流のシンプル修正のみとし、コードコメントで次回 audit-loop での検討を明記済み。"
+    }
+  ],
+  "regression_status": "all_pass",
+  "regression_runs": [
+    {
+      "scope": "新規 3 テストファイル (RE-302/RE-301/RE-MISSED-302)",
+      "command": ".venv/Scripts/python.exe -m pytest tests/fault/test_re302_oanda_timeout_phantom_trade.py tests/fault/test_re301_runtime_instrument_fallback.py tests/unit/test_re_missed_302_poll_cycle_cascade.py -x -q",
+      "result": "11 passed in 0.18s"
+    },
+    {
+      "scope": "直接的に影響する既存テスト群 (strategy_slot short / restore_position_mismatch / runner periodic_reconcile / live_health_alerts / email_notifier live_anomaly / partial_fill / restore_positions_multi_slot)",
+      "command": ".venv/Scripts/python.exe -m pytest tests/unit/test_strategy_slot_short_signal.py tests/unit/test_strategy_slot_restore_position_mismatch.py tests/unit/test_runner_periodic_reconcile.py tests/unit/test_runner_live_health_alerts.py tests/unit/test_email_notifier_live_anomaly.py tests/fault/test_partial_fill.py tests/integration/test_restore_positions_multi_slot.py -q",
+      "result": "85 passed in 0.86s"
+    },
+    {
+      "scope": "broker_gateway / strategy_slot / runner / oanda / email を含む unit テスト全体",
+      "command": ".venv/Scripts/python.exe -m pytest tests/unit -q -k 'broker_gateway or strategy_slot or runner or oanda or email'",
+      "result": "283 passed, 865 deselected in 2.82s"
+    },
+    {
+      "scope": "fault + integration 全テスト",
+      "command": ".venv/Scripts/python.exe -m pytest tests/fault tests/integration -q",
+      "result": "775 passed, 10 xfailed in 330.93s"
+    }
+  ],
+  "summary": "RE-302 / RE-301 / RE-MISSED-302 の 3 件を実コード修正 + 回帰テスト追加で対応した。RE-302 は BrokerGateway に専用例外 BrokerUnavailableError を導入して空配列握りつぶしの曖昧さを構造的に排除、LIVE での broker_order_id 誤流用を遮断。RE-301 はランタイム経路の instrument フォールバックを撤廃し restore_positions (R1) と方針統一、別戦略 trade の誤採用を遮断。RE-MISSED-302 は account_info 連続失敗時の能動アラート (oanda_connection_degraded) を追加し EmailNotifier の live_anomaly kind に集約。全 11 件の新規回帰防止テスト + 既存 775 件 (fault+integration) 全 PASS で回帰なし。Immutable Hard Limits / Risk Engine 独立性 / fail-safe (entry_rollback) 原則を全修正で遵守。",
+  "design_principles_verified": {
+    "risk_independence": "Risk Engine 独立性は維持。strategy_slot の修正は execution_engine / unified_runner 境界内で完結。",
+    "fail_safe": "RE-302/RE-301 ともに不明状態 (broker 障害 / comment 不一致) では entry_rollback 経路に合流 = 安全側 (注文不成立で state クリア)。",
+    "auditable": "全修正に [fix:bug] 種別と AUDIT-2026-0529-001 + finding_id をコメントで明記。RiskAlertEvent も details に consecutive_errors / threshold / note を含む。",
+    "idempotency": "RE-302 / RE-301 は新規 trade_id 採用ロジックの変更のみで、order_id 冪等性 (FTS-RX-R5-002 clientExtensions.id) には影響なし。",
+    "graceful_degradation": "RE-MISSED-302: account_info 障害時も heartbeat / reconcile (障害より前のフェーズ) は継続。閾値到達で能動通知、復帰でフラグクリアして再障害に備える。"
+  }
+}

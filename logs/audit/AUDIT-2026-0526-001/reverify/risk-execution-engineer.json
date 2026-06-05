@@ -1,0 +1,51 @@
+{
+  "verifier": "risk-execution-engineer",
+  "summary": "RE-201〜RE-205 の全 5 件を dd2dd82（=現 HEAD 1949b35、両者間の trading_platform/・tests/ 差分ゼロ＝log snapshot のみ）で file:line を実際に開いて経験的再検証。結論: 5 件すべて confirmed。第1チームの主張ロジック・影響機序・緩和要因の記述に重大な誤りや飛躍は無く、severity も妥当。引用行は概ね正確だが RE-201 で軽微な行ズレあり（record_close 実呼出は 1689 で、引用『1675-1693』のレンジ内には収まるが起点 1675 は CLOSED 判定の if 行・実減算経路の起点ではない点を注記）。RE-202 の最重要主張『PTRC-Post は本番 UnifiedRunner 未配線』は unified_runner 配下を grep して ptrc_post/PostTradeRisk/evaluate_fill の参照ゼロを確認し正確、ptrc_post の参照は main.py/coordinator.py（dev/FastAPI 経路）のみ。単位不一致（units/JPY）も ptrc.py:659-668 が同型バグの既修正記録を持つことで裏付け。覆った件数 0、adjusted 0、refuted 0。",
+  "verifications": [
+    {
+      "id": "RE-201",
+      "claim_accuracy": "accurate",
+      "severity_verdict": "agree",
+      "current_code_quote": "strategy_slot.py:1675 `if closed_trade and closed_trade.state == \"CLOSED\":` … :1689 `risk_supervisor.record_close(self.strategy_id, units, pnl,)` （CLOSED 分岐内のみ）／ :1714 `else: logger.warning(\"stale_pnl_recovery_failed\", …)` ／ :1721 `except Exception: logger.exception(\"stale_pnl_recovery_error\", …)` ／ :1729-1733 `self.state.open_trade_id = None; self.state.open_entry_price = None; self.state.open_units = None; self.state.intended_direction = \"FLAT\"`（finally 相当・全分岐後に必ず実行）。risk_supervisor.record_close（:685-687）が total_exposure を `max(0.0, total_exposure - abs_units)` で減算する唯一の経路。tests/unit/test_runner_periodic_reconcile.py:86 `slot._recover_stale_trade_pnl = AsyncMock()` ／ :162 `AsyncMock(side_effect=RuntimeError(...))`。",
+      "verdict": "confirmed",
+      "notes": "主張通り。record_close は closed_trade.state==CLOSED の分岐内（1689）でのみ呼ばれ、else（非CLOSED/None, 1714-1720）・except（1721-1727）では一切 supervisor 減算が無く、関数末尾 1729-1733 で trade_id 等を無条件クリアするため再回収手段も喪失する。grep で確認した通り unified_runner 配下に clear_exposure 等の代替減算 API は存在せず（record_close のみ）、回収失敗時の幻 exposure は自己修復しない。divergence A（runner.py:890-896 で open_trade_id が broker_trade_map に不在）→ _recover_stale_trade_pnl トリガ（936-939）で get_trade が CLOSED を返せない（API 一時失敗・非CLOSED 応答）ケースは現実的に到達可能で、INC-2026-0526-001 と同型の経路。可視化は exposure_near_cap（runner.py:793-819）のアラートのみで自動是正なし＝主張通り。行ズレ: 引用『1675-1693』のうち実減算起点は 1689（1675 は CLOSED 判定 if）だがレンジ内に収まり実質正確。test の AsyncMock 差替えにより回収失敗時 exposure 減算が未検証である点も :86/:162 で確認。high 妥当（複数戦略蓄積で total_exposure 上限張り付き→全 live 新規 REJECT の沈黙に至る既往インシデント同型）。",
+      "evidence_line_accuracy": "accurate-minor-shift: record_close 実呼出は 1689（引用 1675-1693 のレンジ内・起点のみ説明上は CLOSED 判定行）。else 1714-1720 / except 1721-1727 / state クリア 1729-1733 はすべて完全一致。supervisor record_close 685-687 一致。test 86,153-162 一致。"
+    },
+    {
+      "id": "RE-202",
+      "claim_accuracy": "accurate",
+      "severity_verdict": "agree",
+      "current_code_quote": "ptrc_post.py:146-150 `exposure_ratio = (risk_state.total_exposure / portfolio.account_balance if portfolio.account_balance > 0 else float(\"inf\"))` ／ :151 `if exposure_ratio > HARD_LIMITS.max_total_exposure_ratio:`（Level2 entry_stop）／ :172 `exposure_critical = exposure_ratio > HARD_LIMITS.max_total_exposure_ratio`（Level3 複合判定の入力）。HARD_LIMITS.max_total_exposure_ratio は models/risk.py:192 `max_total_exposure_ratio: float = 8.0  # 8倍 (旧 3.0)`。ptrc.py:659-668 が PTRC-Pre 側で同型 `units_sum / account_balance` 単位不一致を notional 換算へ修正した記録（FTS-RX-R5-001 / PR3）。",
+      "verdict": "confirmed",
+      "notes": "単位不一致は実在: total_exposure（units 建て、risk_supervisor も coordinator も units 合計）を JPY 建て account_balance で除算しており、例 100000 units / 300000 JPY = 0.33 は閾値 8.0 を超えない。PTRC-Pre（ptrc.py）は FTS-RX-R5-001/PR3 で CurrencyConverter notional 換算へ修正済みだが PTRC-Post には未適用＝同型バグ残存、の主張は両ファイルの突合で正確。最重要の緩和要因『本番 UnifiedRunner 未配線』も grep（unified_runner 配下に ptrc_post/PostTradeRisk/PTRCPost/evaluate_fill の参照ゼロ）で裏付け、ptrc_post 参照は main.py / coordinator.py（dev・FastAPI 経路）のみ。daily_loss/slippage トリガは別軸で機能するため exposure 軸のみ dead、の限定も妥当。medium 妥当（本番未配線かつ exposure 軸限定の dead で、即時の安全機構喪失ではない）。",
+      "evidence_line_accuracy": "accurate: ptrc_post.py 146-165, 172-183 一致。ptrc.py 657-668 一致（_check_total_exposure の docstring が FTS-RX-R5-001 同型バグ修正を明記）。"
+    },
+    {
+      "id": "RE-203",
+      "claim_accuracy": "accurate",
+      "severity_verdict": "agree",
+      "current_code_quote": "currency_converter.py:159-188 convert(): :171 `if direct_key in self._price_cache: bid, ask = self._price_cache[direct_key]; return amount * ((bid + ask) / 2.0)` ／ :174 reverse_key 同様 ／ :180 fallback ／ :183-188 `logger.warning(\"OANDA 通貨レート未取得かつ fallback なし\", …); return None`。キャッシュ命中時はタイムスタンプ／TTL 検査なしで mid を返す。",
+      "verdict": "confirmed",
+      "notes": "主張通り。convert() は price_cache に値が在る限り（171-178）陳腐化を問わず mid を返し、None（fail-safe REJECT 誘発）は未シード かつ fallback なし時（180-188）のみ。レート鮮度（最終更新時刻）の TTL/陳腐化検知は実装に存在しない。fail-open（無評価通過）ではなく古値での評価継続＝INC-0526『固定 USD_JPY=150 で誤評価』の弱い再来リスク、という severity の格付け（medium・confidence medium）は妥当。再シード周期（heartbeat）依存の運用機序は runner.py 側の周期ロジックに整合的で飛躍なし。",
+      "evidence_line_accuracy": "accurate: currency_converter.py 159-188 一致（description 内で 159-181 と表記する箇所があるが evidence 配列は 159-188 で、関連コード全域をカバー・実質正確）。runner.py 1013-1032 / 1339-1341 は再シード周期側の参照で、本検証では convert() 本体（核心）を直接確認し主張成立。"
+    },
+    {
+      "id": "RE-204",
+      "claim_accuracy": "accurate",
+      "severity_verdict": "agree",
+      "current_code_quote": "risk.py:123 `is_circuit_breaker_active: bool = Field(default=False, …)`（plain Field・ガードなし）／ :130-140 `def __setattr__(...): if name == \"is_kill_switch_active\": …`（KS のみガード）。circuit_breaker.py:117 `self._risk_state.is_circuit_breaker_active = True`（_trip）／ :166 `self._risk_state.is_circuit_breaker_active = False`（cooldown）／ :172-173 `self._risk_state.is_circuit_breaker_active = False`（reset、手動）。",
+      "verdict": "confirmed",
+      "notes": "主張通り。__setattr__ ガードは is_kill_switch_active のみを対象（132 行の name 比較）で、is_circuit_breaker_active は plain Field のまま CircuitBreaker が直接代入。set_kill_switch のような classmethod 正規ルートも CB には無い。CB は cooldown 自動解除設計（166）で KS ほど致命的でなく、実害は『LLM/自動改善による直接 False 代入で CB 骨抜き』の理論リスクに留まる、の格付けは妥当。low 妥当（一貫性欠如・理論リスク、挙動不変の classmethod 化で解消可能）。",
+      "evidence_line_accuracy": "accurate: risk.py 123-140 一致。circuit_breaker.py 117 / 166 / 172-173 すべて一致。"
+    },
+    {
+      "id": "RE-205",
+      "claim_accuracy": "accurate",
+      "severity_verdict": "agree",
+      "current_code_quote": "fill_processor.py:114-135 冪等性: :116 `if broker_fill_id is not None:` :117 `fill_key = (order.order_id, broker_fill_id)` …重複時 no-op 吸収（121-134）。strategy_slot.py:704 `broker_fill_id=fill.broker_order_id or order.order_id`（エントリ経路、コメント 701-704 で空文字フォールバックを明記）／ :1146 同（PAPER 決済経路）。coordinator.py:486 `broker_fill_id=fill_result.broker_order_id or None`（coordinator は None フォールバック＝挙動が StrategySlot と異なる）。",
+      "verdict": "confirmed",
+      "notes": "主張通り。冪等性キーは (order_id, broker_fill_id)。StrategySlot 経路（704/1146）は broker_order_id 空時に order_id へフォールバックし (order_id, order_id) に縮退するため、同一注文の 2 件目以降の部分約定（本来 fill ごとに異なる transaction id を持つべき）が『重複』として no-op 吸収され加算消失しうる。OANDA market 注文は基本フル fill のため実害限定、broker_order_id 安定供給時は非発生、の限定も妥当で low 相当。補足: coordinator.py:486 は `or None` フォールバックのため、broker_order_id 空時は冪等性ガード自体が無効化（fill_key 生成スキップ）され縮退挙動が StrategySlot と異なる（縮退吸収は起きないが二重約定ガードが外れる別側面）。第1チーム評価は StrategySlot 経路の縮退に焦点を当てており、その記述は正確。",
+      "evidence_line_accuracy": "accurate: fill_processor.py 114-135 一致。strategy_slot.py 701-705（704）/ 1146 一致。coordinator.py 481-487（486 が broker_fill_id 受け渡し）一致。"
+    }
+  ]
+}

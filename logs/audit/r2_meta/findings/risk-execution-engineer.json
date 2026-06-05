@@ -1,0 +1,125 @@
+{
+  "agent": "risk-execution-engineer",
+  "scope": ["PR31", "PR32", "PR34", "PR35", "PR29/PR30 (supplementary KS reason check)"],
+  "findings": [
+    {
+      "id": "RE-001",
+      "severity": "critical",
+      "pr": "PR34",
+      "area": "C-1 unrealized_warning Email delivery wiring",
+      "title": "本番 UnifiedRunner で emit_alert 未配線のため unrealized_warning が Event Bus に到達せず Email が依然届かない (C-1 根本未解消)",
+      "description": "PR34 は email_notifier.py の _RISK_ALERT_KINDS に unrealized_warning_activated/deactivated を登録し silently drop の『下流の症状』を解消した。しかし C-1 の本質である『深夜含み損が確実に通知されるか』の配線は未解消。GlobalRiskSupervisor._dispatch_alert は コンストラクタ注入の self._emit_alert 経由でのみ RiskAlertEvent を Event Bus に流す設計だが、本番経路 runner.py:264 は `GlobalRiskSupervisor()` を emit_alert 無しで構築している (cancel_open_orders も未注入)。その結果 _emit_alert は永続的に None となり、_dispatch_alert は risk_supervisor.py:913-915 で logger 出力のみで return し、unrealized_warning_activated の RiskAlertEvent は一度も publish されない。EmailNotifier は RISK_ALERT を購読している (email_notifier.py:219) が、イベント自体が来ないため発火しない。kill_switch_activated は runner.py:592 で _dispatch_alert を経由せず runner ループから直接 publish するため Email が届くが、unrealized_warning には同等の直接 publish 経路が存在しない。よって PR34 マージ後も本番では深夜含み損 Email は届かない。単体テストは emit_alert を fixture 注入 (test_global_kill_switch.py:46) または _on_risk_alert を直接呼ぶ (test_unrealized_warning_email.py) ため、この本番配線欠落を検出できず false-green になっている。",
+      "evidence": [
+        "trading_platform/core/unified_runner/runner.py:264",
+        "trading_platform/core/unified_runner/risk_supervisor.py:913",
+        "trading_platform/core/unified_runner/risk_supervisor.py:480",
+        "trading_platform/core/unified_runner/risk_supervisor.py:778",
+        "trading_platform/core/monitoring/email_notifier.py:219",
+        "trading_platform/core/unified_runner/runner.py:592"
+      ],
+      "verdict": "fix_incomplete",
+      "suggested_fix": "runner.py:264 で GlobalRiskSupervisor を構築する際に emit_alert (RiskAlertEvent を event_bus.publish する callable) を注入する。または kill_switch_activated と同様に runner ループ内で unrealized_warning の発動/解除エッジを検出して RiskAlertEvent を直接 publish する。併せて『GlobalRiskSupervisor が emit_alert 配線済みで unrealized_warning_activated が EmailNotifier に到達する』ことを実 Event Bus (InMemoryEventBus) で検証する architecture/integration テストを追加し false-green を塞ぐ。なお同構築で cancel_open_orders も未注入のため KS 発動時の in-flight 注文キャンセルも本番で動作しない可能性があり、別途確認を推奨。"
+    },
+    {
+      "id": "RE-002",
+      "severity": "high",
+      "pr": "PR30",
+      "area": "H-2 KS reason metric label (supplementary check)",
+      "title": "force_activate(reason) が _activate へ reason を渡さず inc_kill_switch_triggered() が常に reason=unknown を発火、H-2 の観測目的が end-to-end で未達",
+      "description": "PR29 (metrics reason ラベル + allowlist) と PR30 (coordinator triggers キー修正で trigger_reason を算出し force_activate(reason=...) へ渡す) は個別には正しい。しかし算出された reason は force_activate (circuit_breaker.py:451-486) で logger.critical に出力されるのみで、await self._activate() に reason が渡されない。_activate (circuit_breaker.py:309-323) は _metrics.inc_kill_switch_triggered() を引数なしで呼ぶため reason は default 'unknown' に丸まる。よって fx_kill_switch_triggered_total{reason} は PTRC-Post 起因の KS でも常に reason='unknown' のまま出力され、H-2 が解消しようとした『KS reason が常に ptrc_post_unknown』という観測の盲点が metric 層では未解消。さらに本番 UnifiedRunner の主 KS 経路 GlobalRiskSupervisor._activate_kill_switch (risk_supervisor.py:823) は inc_kill_switch_triggered を一切呼ばず metric を加算しない。test_kill_switch_reason_label.py は inc_kill_switch_triggered(reason=...) を直接呼ぶ単体テストのみで、発動フロー全体での reason 伝播を検証していないため false-green。注: KS の発動・停止挙動そのものは正しく機能し、これは観測 (Prometheus) 層のみの欠陥。",
+      "evidence": [
+        "trading_platform/core/risk_engine/circuit_breaker.py:485",
+        "trading_platform/core/risk_engine/circuit_breaker.py:323",
+        "trading_platform/core/risk_engine/circuit_breaker.py:309",
+        "trading_platform/core/unified_runner/risk_supervisor.py:823",
+        "tests/unit/test_kill_switch_reason_label.py:29"
+      ],
+      "verdict": "fix_incomplete",
+      "suggested_fix": "_activate に reason 引数を追加し (default 'unknown')、force_activate と evaluate_and_activate から reason を伝播させて inc_kill_switch_triggered(reason=reason) を呼ぶ。GlobalRiskSupervisor._activate_kill_switch でも metric を加算する (現状 metric 未注入なら注入)。発動フロー全体 (coordinator → force_activate → _activate → metric) で正しい reason ラベルが出力されることを検証する統合テストを追加。"
+    },
+    {
+      "id": "RE-003",
+      "severity": "medium",
+      "pr": "PR34",
+      "area": "C-1 throttle design: activated/deactivated 同一 kind",
+      "title": "per-kind throttle が activated と deactivated を同一 kind 'unrealized_warning' で扱うため、発動の 5 分以内の自動解除通知が抑止され運用者が解除を認知できない",
+      "description": "_RISK_ALERT_KINDS は unrealized_warning_activated と unrealized_warning_deactivated の双方を kind='unrealized_warning' にマップし、_should_throttle は kind 単位の _last_sent_at で 300 秒間の重複を抑止する。このため activated を送信した直後 (PR32 ヒステリシスにより combined が 95%→80% へ短時間で回復した等) 5 分以内に deactivated が発生すると deactivated メールが throttle で drop される。結果として運用者は『WARN 発動』を受信したまま『WARN 解除』を受け取れず、口座が回復済みでも警戒状態が継続中だと誤認しうる。順方向 (発動) の抑止より影響は小さい (解除は好ましいニュース) が、状態認知の不整合を生む。検証: activated→deactivated を連続発火させると send=1 / throttled=1 となり deactivated が drop されることを実コードで確認済み。",
+      "evidence": [
+        "trading_platform/core/monitoring/email_notifier.py:268",
+        "trading_platform/core/monitoring/email_notifier.py:280",
+        "trading_platform/core/monitoring/email_notifier.py:299"
+      ],
+      "verdict": "new_defect",
+      "suggested_fix": "throttle キーを alert_type 単位 (activated と deactivated を別キー) にするか、deactivated は throttle 対象外にする。または activated 送信時に対応する deactivated を必ず 1 通は通す保証ロジックを入れる。"
+    },
+    {
+      "id": "RE-004",
+      "severity": "low",
+      "pr": "PR34",
+      "area": "C-1 deactivation message details (daily_reset path)",
+      "title": "日次リセット deactivation の details に combined_pnl_jpy / limit_jpy が無く、正常な日次解除が『詳細欠落』件名の異常メールとして配信される",
+      "description": "PR32 の daily_reset 解除 dispatch (risk_supervisor.py:673) は details={reset_reason, previous_total_daily_pnl_jpy} のみで combined_pnl_jpy / limit_jpy を含まない。_build_unrealized_warning_message (email_notifier.py) は combined is None or limit is None で『[FTS 警戒解除] 未実現損益警告 解除 (詳細欠落)』のフォールバック件名を返し logger.warning(unrealized_warning_details_missing) を出す。これは予定された正常な日次解除であるにもかかわらず障害のように見える誤通知。crash はせず alert_type は本文に出るため severity は low。実コードで daily_reset deactivation details を builder に渡すと詳細欠落フォールバックに落ちることを確認済み。なお deactivation 本文の解除閾値表示が {deactivation_threshold!r} (repr) で None 混入時 'None' を表示する点も軽微。",
+      "evidence": [
+        "trading_platform/core/unified_runner/risk_supervisor.py:673",
+        "trading_platform/core/monitoring/email_notifier.py:594",
+        "trading_platform/core/monitoring/email_notifier.py:600"
+      ],
+      "verdict": "new_defect",
+      "suggested_fix": "daily_reset 解除 dispatch の details に combined_pnl_jpy(=0.0 リセット後)/limit_jpy/deactivation_threshold_jpy を含めるか、reset_reason='daily_reset' を builder で正常解除メッセージとして専用分岐する。"
+    },
+    {
+      "id": "RE-005",
+      "severity": "medium",
+      "pr": "PR35",
+      "area": "H-17 MISMATCH strategy identification",
+      "title": "実体が Live の USD/JPY H4 LONG trend_following 戦略 (0505-367/0505-424) が SMA MISMATCH (actual=downtrend) のまま Live 経路に残存、PR42 へ後ろ倒しで M-D2 期限 (2026-05-27) を超過しうる",
+      "description": "PR35 は H-17 の名指し戦略 0511-009 を正しく Paper へ降格 (runner_config.json execution_mode=paper, runner.py:375 で PaperBroker ルーティングを実コード確認済) し、0510-002 は実体が AUDUSDPureRangeMeanRevH4Strategy (方向非依存 Mean Reversion かつ既に paper) のため退避対象外と妥当に再分類した。この 0510-002 の再分類自体は正当。ただし sma_live_verification_2026_0523.md:22 は『0510-002 USD/JPY LONG H4』を MISMATCH(actual=downtrend) と記載しており、strategy_id ラベルの誤りが背後にある。実際に USD/JPY H4 long_only trend_following で execution_mode=live の戦略 (例: ATLAS-2026-0505-367, ATLAS-2026-0505-424) が存在し、SMA downtrend が継続していればこれらが真の MISMATCH Live 露出。PR35 は USD/JPY H4 LONG trend-follow の MISMATCH 判定を R3 PR42 (rollback_criteria.md 更新, 期限 2026-06-21) へ明示的に先送りしているが、v2 監査 M-D2 は MISMATCH 戦略の意思決定期限を 2026-05-27 (3 日以内) に設定している。文書化された deferral ではあるが、トレンド依存の USD/JPY H4 LONG Live 戦略の MISMATCH リスクが期限を超えて未対応のまま残る可能性があり、人間による確認が必要。",
+      "evidence": [
+        "trading_platform/strategies/imported/ATLAS-2026-0511-009/runner_config.json:3",
+        "trading_platform/strategies/imported/ATLAS-2026-0510-002/runner_config.json:9",
+        "docs/sma_live_verification_2026_0523.md:22",
+        "trading_platform/strategies/imported/ATLAS-2026-0505-367/runner_config.json",
+        "trading_platform/strategies/imported/ATLAS-2026-0505-424/runner_config.json",
+        "docs/runbook/mismatch_strategy_revival.md"
+      ],
+      "verdict": "doc_gap",
+      "suggested_fix": "verify_sma_live_values.py で MISMATCH と判定される全 Live 戦略を strategy_id ベースで網羅列挙し、USD/JPY H4 LONG trend_following で Live かつ downtrend 継続中の戦略 (0505-367/0505-424 等) が M-D2 期限 (2026-05-27) 内に意思決定されるか人間オーナーに確認。PR42 へ先送りする場合も期限超過リスクを runbook に明記。"
+    },
+    {
+      "id": "RE-006",
+      "severity": "low",
+      "pr": "PR30",
+      "area": "H-2(b) coordinator triggers test design",
+      "title": "test_coordinator_ptrc_post_triggers.py がプロダクションメソッドを呼ばず triggers 集約ロジックを再実装して検証 (回帰検出力が限定的)",
+      "description": "PR30 のテストヘルパー _invoke_handle_action (tests/unit/test_coordinator_ptrc_post_triggers.py) は coordinator.py:542-573 のロジックを別実装でコピーして検証しており、実プロダクションメソッドを呼んでいない。コメントでも『coordinator.py:542-571 のロジックを再現する小さなヘルパー』と明記。現状はヘルパーと本体が一致 (本体 coordinator.py:552-563 を実コード確認済) するが、本体が将来変更されてもテストヘルパーが追従しない限り回帰を検出できない。『旧キー復活回帰検出』テストもヘルパーを検証しており本体の trigger キーへの退行を捕捉しない。triggers キー修正自体は本体で正しく実装されており機能は正常。",
+      "evidence": [
+        "tests/unit/test_coordinator_ptrc_post_triggers.py:40",
+        "trading_platform/core/execution_engine/coordinator.py:552"
+      ],
+      "verdict": "false_green",
+      "suggested_fix": "ExecutionCoordinator の実 PTRC-Post action 処理メソッド (_run_post_trade_risk 等) を直接呼び出し、mock した KillSwitch.force_activate へ渡る reason を assert する形にリファクタし、本体ロジックへの退行を検出可能にする。"
+    },
+    {
+      "id": "RE-007",
+      "severity": "low",
+      "pr": "PR31",
+      "area": "H-11 StrategyRiskState guard coverage",
+      "title": "redis_store 復元経路で StrategyRiskState.is_unrealized_warning_active は依然ガードなしで直接代入されている (将来検討と明記済)",
+      "description": "PR31 は AccountRiskState に __setattr__ ガード + set_guarded を追加し、is_kill_switch_active / is_unrealized_warning_active への直接代入を AttributeError 化、既存呼び出し (risk_supervisor.py 4 箇所 + redis_store.py:280-281) を set_guarded 経由に置換した。実コードとテストで防壁が機能することを確認 (9 テスト PASS、model_validate_json 復元後も防壁維持を検証済で false-green なし)。ただし redis_store.py:283 の StrategyRiskState.is_unrealized_warning_active は依然 sid_state.is_unrealized_warning_active = False の直接代入で、StrategyRiskState 自体はガードなし。コメントで『将来検討』と明記されており設計上の意図的スコープ限定。AccountRiskState の KS/WARN ガードという H-11 の主目的は達成しているため low。",
+      "evidence": [
+        "trading_platform/data/state_store/redis_store.py:283",
+        "trading_platform/core/unified_runner/risk_supervisor.py:105"
+      ],
+      "verdict": "doc_gap",
+      "suggested_fix": "StrategyRiskState の is_unrealized_warning_active もガード対象とするか、戦略単位の WARN は口座 KS ほど重大でないため現状の『発注ブロックなし・自動解除可』設計を ADR-0005 (PR59) で明記して意図的非ガードを正当化する。"
+    }
+  ],
+  "pr_verdicts": {
+    "PR31": "PASS (主目的達成) — AccountRiskState __setattr__ ガード + set_guarded が RiskState の実証済みパターンを踏襲し正しく機能。直接代入 AttributeError、classmethod 経由設定、model_validate_json 復元後も防壁維持を 9 テストで実検証 (false-green なし)。redis_store 復元経路も set_guarded 化済。既存 KS テスト改修はガード経由への正当な置換でガード弱体化なし。test_kill_switch_halt.py:58 を改修しなかったのは RiskState 防壁検証テストと正しく判別した妥当判断。残課題は StrategyRiskState 非ガード (RE-007, low)。",
+    "PR32": "PASS — WARN 二段ヒステリシス (発動 95% / 解除 80%、解除閾値<発動閾値) を正しく実装。単方向チャタリングを test_chattering_does_not_occur_near_threshold で実検証。日次リセット deactivate は WARN のみ操作し is_kill_switch_active を一切触らず REV-1 契約 (KS は実現損益のみ・WARN は未実現で自動解除可) を維持。limit<0 assert で反転防止。PR31→PR32 の順序依存も commit 順で遵守。9 テスト PASS。",
+    "PR34": "FIX_INCOMPLETE — email_notifier.py 層 (kind 登録 / throttle / message builder) は計画通り実装され 10 テスト PASS。しかし C-1 の本質である『深夜含み損通知が確実に届く配線』が未達: 本番 UnifiedRunner が GlobalRiskSupervisor を emit_alert 無しで構築 (runner.py:264) しているため unrealized_warning の RiskAlertEvent が Event Bus に publish されず Email が依然届かない (RE-001, critical)。加えて activated/deactivated 同一 throttle kind で解除通知抑止 (RE-003, medium)、daily_reset 解除が詳細欠落メール化 (RE-004, low)。kill_switch メールは別経路 (runner.py:592 直接 publish) で届くため影響範囲は unrealized_warning に限定。",
+    "PR35": "PASS (named scope) — 0511-009 を execution_mode=paper へ実適用 (469b7e0 の Edit 失敗を a7130ca で修正、現ファイル paper 確定)、runner.py:375 で PaperBroker ルーティングされ Live 経路から確実に除外。0510-002 は実体が AUDUSDPureRangeMeanRevH4Strategy (方向非依存・既 paper) で退避対象外と妥当に再分類。復活 Runbook も整備。ただし sma_verification doc のラベル誤りの背後に、真にトレンド依存の USD/JPY H4 LONG Live 戦略 (0505-367/0505-424) の MISMATCH 露出が PR42 先送りで M-D2 期限超過しうる (RE-005, medium / doc_gap)。",
+    "PR29/PR30": "補助確認 — triggers キー修正 (coordinator) と allowlist 訂正 (metrics、ptrc_post.py の実 trigger 名と整合) は本体で正しく実装。ただし算出 reason が force_activate→_activate→inc_kill_switch_triggered() へ伝播せず metric は常に reason='unknown' (RE-002, high / fix_incomplete)。また UnifiedRunner 主 KS 経路は metric 自体を加算しない。テストはプロダクションメソッド非呼出で回帰検出力限定 (RE-006, low / false_green)。"
+  },
+  "summary": "R2 リスク修正の中核 PR31 (H-11 ガード) と PR32 (H-1 WARN ヒステリシス) は Critical/High を確実にクローズし、REV-1 設計 (KS は実現損益のみ・WARN は未実現で自動解除可) も損なわず、テストも false-green でなく実効的。PR35 (H-17) も名指し 0511-009 を Live 経路から確実に除外。しかし最重要の C-1/PR34 は根治していない: PR34 は EmailNotifier の kind 登録という下流症状のみ修正し、本番 UnifiedRunner が GlobalRiskSupervisor を emit_alert 無しで構築 (runner.py:264) しているため unrealized_warning の RiskAlertEvent が Event Bus に流れず、深夜含み損 Email は依然届かない (RE-001 critical, fix_incomplete)。単体テストは emit_alert を手動注入/直接呼出するため本番配線欠落を検出できず false-green。補助確認した H-2/PR29-PR30 も reason が metric 層へ伝播せず常に 'unknown' で観測目的が end-to-end 未達 (RE-002 high)。結論: PR31/PR32/PR35 は PASS 相当だが、C-1 は『配線』の観点で未クローズであり R2 完了判定基準 (Critical 0) を満たさない。RE-001 の本番 emit_alert 配線 + 実 Event Bus 統合テストの追加を最優先で要する。"
+}

@@ -1,0 +1,106 @@
+{
+  "agent": "devops-monitor",
+  "scope": "FTS 監視 (commit eccab9a 事後検証 + 新規)",
+  "audit_date": "2026-05-30",
+  "commit_verified": "eccab9a8a2a35297f94df380503f48672abe97fc",
+  "post_fix_verification": {
+    "RE-401_metrics_active_in_production": "OK",
+    "RE-401_detail": "4 箇所すべてで metrics=self._metrics 注入を確認。runner.py:351、main.py:427、forward_test.py:243、scripts/live_preflight.py:43。client.py:961-962 の `if self._metrics is None: return` ガードが機能するため metrics 非注入時の dead path は解消済み。ただし close_trade と get_open_positions は _record_api_metric 未追加（DM-501 参照）。",
+    "DE-403_alerting_rules_TF_split": "CONCERNS: [TF カバレッジ不完全]",
+    "DE-403_detail": "M15/H1/H4 の 3 TF については primary_tf ラベル分岐・閾値設定が正しく実装されている。しかし TF_SECONDS は M1/M5/M30/D1 も定義しており（live_store.py:93-101）、これら 4 TF の戦略が稼働した場合に FxFeatureStorestaleHigh が発火しない dead alert path が残る（DM-502 参照）。",
+    "phase_4_5_BLOCKING_resolved": "OK",
+    "phase_4_5_detail": "PA-412 dispatcher 分岐追加（email_notifier.py:452-458 `elif kind == 'escape_hatch'`）を確認。escape_hatch: 0.0 throttle 登録（email_notifier.py:373）により _should_throttle が interval=0.0 で正しく throttle しないことを確認（last_at is not None AND (now - last_at) < 0.0 は常に False）。entry_rollback_orphan の _RISK_ALERT_KINDS 登録（line 339）、12h throttle 登録（line 367）、dispatcher 分岐（line 448-451）を確認。"
+  },
+  "findings": [
+    {
+      "id": "DM-501",
+      "severity": "medium",
+      "area": "メトリクス計装 / OANDABroker",
+      "title": "close_trade と get_open_positions に _record_api_metric が未追加",
+      "description": "RE-401 修正で 4 箇所の OANDABroker(...) 生成に metrics= を注入したが、client.py の close_trade (line 831-847 PUT 通常経路) と get_open_positions (line 854-872) には _record_api_metric の呼び出しが存在しない。DM-302 修正で追加された _record_api_metric は submit_order / cancel_order / get_account_info / get_trade / get_open_trades / get_candles の 6 エンドポイントに追加済みだが、close_trade (PUT) と get_open_positions (GET openPositions) の 2 エンドポイントが漏れている。close_trade は決済の主経路であり、Grafana の fx_oanda_api_latency_ms_bucket から close_trade の P95 レイテンシが観測できない。OANDA 障害時に close_trade の遅延・エラーレートが不可視となる。",
+      "evidence": [
+        "trading_platform/broker/oanda_adapter/client.py:831-847 (close_trade 通常経路 PUT: _record_api_metric 呼び出しなし)",
+        "trading_platform/broker/oanda_adapter/client.py:854-872 (get_open_positions: _record_api_metric 呼び出しなし)",
+        "trading_platform/broker/oanda_adapter/client.py:409-411 (submit_order の対比: _record_api_metric 呼び出しあり)",
+        "trading_platform/broker/oanda_adapter/client.py:937-982 (_record_api_metric 定義)"
+      ],
+      "reproduction": "RE-401 修正後の AST 契約テスト (test_oanda_broker_metrics_wired.py) は OANDABroker(**kwargs, metrics=metrics) のインスタンス化箇所のみを検査している。close_trade 呼び出し時に _record_api_metric が呼ばれることは現行テストでカバーされていない。",
+      "suggested_fix": "close_trade の通常経路 PUT (line 831-847) に `_record_api_metric('close_trade', resp.status, elapsed_ms)` を追加。get_open_positions (line 854-872) に同様の計装を追加する。close_trade の stale 検知経路 (pre_check で TradeNotFoundError / BrokerUnavailableError) にも _record_api_metric を追加して timeout・4xx を記録する。",
+      "dead_path": "close_trade のレイテンシ / エラーレートが Prometheus に記録されない",
+      "regression_of": null,
+      "post_fix_defect": true,
+      "post_fix_of": "RE-401"
+    },
+    {
+      "id": "DM-502",
+      "severity": "low",
+      "area": "アラートルール / DE-403 派生",
+      "title": "FxFeatureStorestaleHigh が M1/M5/M30/D1 TF 戦略で発火しない",
+      "description": "DE-403 修正で alerting_rules.yml に TF 別閾値分岐を追加したが、M15/H1/H4 の 3 TF しか PromQL に含まれていない。live_store.py の TF_SECONDS は M1(60s)/M5(300s)/M30(1800s)/D1(86400s) も定義しており（line 94-101）、将来これらの TF の戦略が稼働した場合に FxFeatureStorestaleHigh が発火しない dead alert path が生まれる。現在の FTS 稼働戦略は M15/H1/H4 のみと思われるが、TF_SECONDS にある TF は稼働可能であり、アラートルールと実装の乖離として記録する。",
+      "evidence": [
+        "deploy/prometheus/alerting_rules.yml:112-117 (M15/H1/H4 の 3 TF のみカバー)",
+        "trading_platform/data/feature_store/live_store.py:93-101 (TF_SECONDS: M1/M5/M15/M30/H1/H4/D1 の 7 TF 定義)"
+      ],
+      "reproduction": "primary_tf='M30' の戦略を稼働させ、staleness が 3601s を超えた場合に FxFeatureStorestaleHigh が発火しないことを確認する（M30 の期待閾値は 900*2=1800s だが alerting_rules.yml に M30 エントリーが存在しない）。",
+      "suggested_fix": "alerting_rules.yml の FxFeatureStorestaleHigh expr に M1/M5/M30/D1 の分岐を追加する。閾値は TF_SECONDS * 2 で算出: M1>120s / M5>600s / M30>3600s / D1>172800s。または `fx_feature_staleness_sec > on(primary_tf) group_left() (fx_tf_interval_sec * 2)` のように TF 定数を別の recording rule で定義して汎用化する方が保守性が高い。",
+      "dead_path": "M1/M5/M30/D1 TF 戦略の staleness アラート未発火",
+      "regression_of": null,
+      "post_fix_defect": true,
+      "post_fix_of": "DE-403"
+    },
+    {
+      "id": "DM-503",
+      "severity": "medium",
+      "area": "メトリクス計装 / DM-302 継続未配線",
+      "title": "observe_event_bus_latency と set_order_success_rate が本番経路で一切呼ばれていない",
+      "description": "DM-302 修正で MetricsCollector に observe_event_bus_latency と set_order_success_rate の 2 メソッドが実装され、対応する Prometheus メトリクス (fx_event_bus_latency_ms / fx_order_success_rate) も登録されている。しかし trading_platform/ ソース全体を検索した結果、テストコード (test_prometheus_metrics_dm_f_002.py) とメソッド定義 (metrics.py) を除いて呼び出し箇所がゼロである。fx_event_bus_latency_ms は alerting_rules.yml に FxEventBusLatencyHigh アラートがなく、fx_order_success_rate はどのアラートにも参照されていない。両メトリクスは Prometheus に登録されるが常に初期値（ヒストグラムはゼロ観測/Gauge は 0.0）のままで、DM-302 の計装目的が達成されていない。",
+      "evidence": [
+        "trading_platform/core/monitoring/metrics.py:550-564 (observe_event_bus_latency 定義)",
+        "trading_platform/core/monitoring/metrics.py:831-839 (set_order_success_rate 定義)",
+        "grep 結果: trading_platform/ 配下に observe_event_bus_latency の呼び出し箇所なし（テスト・定義除く）",
+        "grep 結果: trading_platform/ 配下に set_order_success_rate の呼び出し箇所なし（定義除く）",
+        "deploy/prometheus/alerting_rules.yml: fx_event_bus_latency_ms / fx_order_success_rate を参照するアラートなし"
+      ],
+      "reproduction": "本番稼働時に Prometheus scrape → fx_event_bus_latency_ms_count が常に 0、fx_order_success_rate が常に 0.0。Event Bus 遅延が 500ms を超えても alerting_rules.yml にアラートが存在しないため検知不能。",
+      "suggested_fix": "(1) observe_event_bus_latency: redis_adapter.py の publish/consume パスで publish 時刻を記録し、subscribe コールバック呼び出し時に elapsed_ms を計算して observe する。(2) set_order_success_rate: runner.py または execution_engine の fill_processor で 直近 N 件の fills/orders 比を計算して定期更新する。(3) alerting_rules.yml に FxEventBusLatencyHigh (histogram_quantile(0.95) > 100ms) と FxOrderSuccessRateLow (< 0.9) を追加する。",
+      "dead_path": "fx_event_bus_latency_ms と fx_order_success_rate が永久にゼロのまま",
+      "regression_of": "DM-302",
+      "post_fix_defect": false
+    },
+    {
+      "id": "DM-504",
+      "severity": "low",
+      "area": "アラートルール / 新規メトリクスカバレッジ",
+      "title": "eccab9a 追加の重要メトリクスへの Prometheus アラートが未定義",
+      "description": "eccab9a コミットで追加・強化された以下のメトリクスに対して alerting_rules.yml にアラートが存在しない。(1) fx_oanda_api_responses_total{status_code='5xx'} / {status_code='timeout'}: RE-401 でメトリクスが本番経路で active になったが、エラーレートアラートが存在しない。FxOandaApiLatencyHigh (P95 > 2000ms) はあるが、5xx/timeout の頻度スパイクを検知するアラートがない。(2) entry_rollback_orphan: RE-402 で CRITICAL RiskAlert が追加されたが、EmailNotifier の inc_email_notifier_failure('entry_rollback_orphan') を観測するアラートが存在しない。Email が届かない SMTP 障害時に orphan trade が完全に検知不能になる。(3) fx_snapshot_persistence_failures_total / fx_backfill_failures_total / fx_feature_store_compute_errors_total: メトリクスは定義済みだがアラートが存在しない。",
+      "evidence": [
+        "deploy/prometheus/alerting_rules.yml: fx_oanda_api_responses_total を参照するアラートなし",
+        "deploy/prometheus/alerting_rules.yml: entry_rollback_orphan / fx_snapshot_persistence_failures_total / fx_backfill_failures_total を参照するアラートなし",
+        "trading_platform/core/monitoring/metrics.py:148-152 (fx_oanda_api_responses_total 定義)",
+        "trading_platform/core/monitoring/email_notifier.py:339 (entry_rollback_orphan _RISK_ALERT_KINDS 登録)"
+      ],
+      "reproduction": "OANDA API が 5xx を連続返却しても Prometheus アラートが発火しない。entry_rollback_orphan で SMTP が落ちていても Grafana に通知経路の異常が表示されない。",
+      "suggested_fix": "alerting_rules.yml に以下を追加: (1) FxOandaApiErrorRateHigh: rate(fx_oanda_api_responses_total{status_code=~'5xx|timeout'}[5m]) > 0.1 (2) FxSnapshotPersistenceFailure: increase(fx_snapshot_persistence_failures_total[10m]) > 0 (severity: critical) (3) FxBackfillFailureHigh: rate(fx_backfill_failures_total[15m]) > 0.1 (4) FxFeatureComputeErrorHigh: rate(fx_feature_store_compute_errors_total[10m]) > 0.05",
+      "dead_path": "OANDA 5xx スパイク・orphan trade 通知失敗・バックフィル障害の Prometheus 検知不能",
+      "regression_of": null,
+      "post_fix_defect": false
+    },
+    {
+      "id": "DM-505",
+      "severity": "info",
+      "area": "設計未解決 / DESIGN-C-001",
+      "title": "RE-305 の 30 の倍数発火ロジックと live_orders_silent 12h throttle の矛盾が継続運用中",
+      "description": "RE-305 修正 (runner.py:1617-1640) は consecutive_poll_errors が 30 の倍数 (30/60/90...) で live_orders_silent RiskAlert を発火する。poll_interval=60s の場合、30 回 = 30 分ごとに繰り返し発火する設計意図。しかし EmailNotifier の _EMAIL_THROTTLE_INTERVAL_SEC['live_orders_silent'] = 43200.0 (12 時間) が設定されており、初回以降の発火は 12 時間 throttle される。これにより RE-305 のコメント「30 の倍数で繰り返し発火し、復旧まで運用者に通知し続ける」という設計意図と、12h throttle による「12 時間に 1 通」という実際の挙動が矛盾している。ユーザーは 2026-05-29 に live_orders_silent の頻度が高すぎると指摘して 12h 化を要請したが、RE-305 の再発火ロジックのコメントは更新されていない。",
+      "evidence": [
+        "trading_platform/core/unified_runner/runner.py:1617-1640 (30 の倍数で繰り返し発火するコメント付きロジック)",
+        "trading_platform/core/monitoring/email_notifier.py:362-363 (live_orders_silent: 43200.0 = 12 時間 throttle)",
+        "trading_platform/core/monitoring/email_notifier.py:289-293 (ユーザー要請 2026-05-29 のコメント)"
+      ],
+      "reproduction": "OANDA account_info が 50 回連続失敗（= 50 分）した場合、RE-305 は 30 回目・60 回目の 2 回 RiskAlert を発火する。しかし 2 通目は 12h throttle により Email が届かない。runner.py:1635 のコメント「復旧まで運用者に通知し続ける」は現在の挙動と乖離している。",
+      "suggested_fix": "設計判断必要: (A) RE-305 の意図「継続通知」を維持するなら live_orders_silent の throttle を POLL_INTERVAL_SEC * 30 程度（30 分）に戻す。(B) ユーザー要請の「12h に 1 通」を維持するなら runner.py の繰り返し発火ロジック (30 の倍数条件) を 1 回のみ発火に変更する (自己フラグで二重防止)。runner.py:1634-1635 のコメントも実挙動に合わせて更新する。本 finding は DESIGN-C-001 として既認識だが、コードのコメントと挙動が乖離したまま残っていることを明示的に記録する。",
+      "dead_path": null,
+      "regression_of": null,
+      "post_fix_defect": false
+    }
+  ]
+}

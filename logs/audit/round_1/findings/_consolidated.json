@@ -1,0 +1,16 @@
+{
+  "round": 1,
+  "session": "AUDIT-2026-0525-001",
+  "date": "2026-05-25",
+  "target": "both",
+  "mode": "dry-run (investigation + report, no auto-fix)",
+  "agents": ["code-safety-reviewer", "quant-analyst", "platform-architect", "risk-execution-engineer", "data-engineer", "qa-tester", "devops-monitor"],
+  "totals": {"CSR": 10, "QA": 7, "PA": 9, "RE": 8, "DE": 6, "QT": 11, "DM": 10, "all": 61},
+  "note": "Full finding text retained in conversation transcript and devil-advocate validation.json. Known cross-duplicate: CSR-002 == QA-001 (L1 profit_factor=inf vs L2 None).",
+  "severity_raw_counts": {
+    "critical": 1,
+    "high": 12,
+    "medium": 20,
+    "low": 28
+  }
+}

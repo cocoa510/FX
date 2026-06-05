@@ -1,0 +1,74 @@
+{
+  "session_id": "AUDIT-2026-0529-001",
+  "session_start": "2026-05-29T03:50:00Z",
+  "session_end": "2026-05-29T05:40:00Z",
+  "limit_minutes": 300,
+  "threshold_pct": 94,
+  "target": "both",
+  "severity_threshold": "critical",
+  "max_rounds": 10,
+  "max_fixes_per_round": 5,
+  "mode": "dry-run",
+  "user_intent": "徹底調査モード - バグ・不具合・不整合の発見とレポート作成（修正は行わない）",
+  "current_round": 1,
+  "verdict": "NOT_converged (第2チーム検証後 high 6件 must_fix 残)",
+  "atlas_commit": "02bee7f1",
+  "fts_commit": "2803be5",
+  "team2_verification": {
+    "date": "2026-05-29",
+    "team": "risk-execution-engineer + data-engineer + devops-monitor + quant-analyst + devil-advocate(meta)",
+    "agreement_count": 71,
+    "corrections": {
+      "DE-311": "high→medium 差戻 (本番経路 StateStore 非使用、StateManager で永続化、settings.py が production+memory 拒否済み。INC-0527 ではなく INC-0526 と類似)",
+      "DE-301": "high→medium 格下げ (Live 22戦略の最大 period は SMA50 のみ、ema_800(069) は paper のみで Live 経路非該当)",
+      "CSR-302": "low→medium 戻し (ATLAS は LLM が metadata.json 自動生成する設計のため攻撃者前提が狭すぎる)"
+    },
+    "missed_findings_count": 8,
+    "missed_structural_areas": 7,
+    "narrative_flaws": ["DM-306 全3経路dead 過大", "DE-311 INC-0527 同型誤引用", "QA-301 発生条件曖昧", "RE-302 rollback二次処理未記載", "PA-307 OSGシングルトン共有未指摘"],
+    "summary_file": "logs/audit/AUDIT-2026-0529-001/verification/SUMMARY.md"
+  },
+  "must_fix_revised": {
+    "high_6_confirmed": ["RE-302", "RE-301", "DM-306", "DM-302", "DE-303", "QA-301"],
+    "medium_downgraded_from_high": ["DE-311 (本番経路取違)", "DE-301 (Live非該当)"],
+    "missed_should_add": ["RE-MISSED-302 medium (account_info early return cascade)", "CSR-302 medium 戻し"]
+  },
+  "rounds": [
+    {
+      "round": 1,
+      "findings_total": 81,
+      "validated_true": 81,
+      "validated_false": 0,
+      "downgraded": 27,
+      "upgraded": 2,
+      "severity_post_validation": {"critical": 0, "high": 8, "medium": 26, "low": 47},
+      "fixed": 0,
+      "deferred": 81,
+      "verdict": "調査のみ（dry-run）。修正は未実施。"
+    }
+  ],
+  "must_fix": {
+    "RE-302": "OANDA タイムアウト時の幻 trade_id 格納 - 1行修正 + broker_gateway 例外伝播",
+    "RE-301": "_resolve_live_trade_id instrument フォールバック runtime 残存 - rollback合流",
+    "DE-311": "AioRedisBackend 未実装 - JSONL fallback (暫定) → AioRedis 実装 (正規) [upgraded]",
+    "DM-306": "OANDA 60秒断絶 全3通知経路dead - _RISK_ALERT_KINDS に oanda_connection_lost 追加 [upgraded]",
+    "DM-302": "OANDA API latency / FeatureStore staleness alert 永久 Inactive - client.py / feature_store に計装",
+    "DE-303": "SharedDataProvider.poll_latest silent failure - RiskAlert publish 追加",
+    "DE-301": "ema_800 戦略 warmup EWM 残差 3.78e-6 - loader に period>384 live ゲート追加",
+    "QA-301": "Tier 2 EFFECTIVE_WEIGHT_FLOOR 偽陽性 - QA-302 とセットで [change:spec]"
+  },
+  "should_consider": ["PA-303", "PA-306", "PA-307", "DE-306", "QA-302"],
+  "duplicates_to_consolidate": [["QT-307", "QT-317", "DM-313"], ["QT-311", "QT-312"]],
+  "root_causes": [
+    "メトリクス定義と本番計装の乖離 (DM-301/302/303/311)",
+    "main.py(dev) と runner.py(本番) の二重実装による配線非対称 (PA-303/306/307/RE-303)",
+    "INC-2026-0526/0527 同型の幻エクスポージャー経路の runtime 側残存 (RE-301/302/DE-311)"
+  ],
+  "regression_check": {
+    "AUDIT-0525-001_002": "退行なし",
+    "AUDIT-0526-001": "退行なし (DE-201 修正に積み残し → DE-301 として新規指摘)",
+    "AUDIT-0528-002_003": "退行なし",
+    "AUDIT-0529-003": "本体経路 OK / H-01 が main.py 未適用 (RE-303 low) / Task C が main.py 未適用 (PA-303 medium)"
+  },
+  "summary_report": "logs/audit/summary_AUDIT-2026-0529-001.md"
+}

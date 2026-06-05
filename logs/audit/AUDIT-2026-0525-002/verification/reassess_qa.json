@@ -1,0 +1,65 @@
+{
+  "audit_id": "AUDIT-2026-0525-002",
+  "task": "QA-102 / QA-103 再評価 (コード実読 + 過去戦略集計 + 統計シミュレーション)",
+  "date": "2026-05-26",
+  "evidence_base": {
+    "strategies_scanned_result_json": 1453,
+    "strategies_with_trade_log": 606,
+    "overall_gate_pass": 308
+  },
+  "QA-102": {
+    "title": "無敗戦略 (gross_loss==0) の PF=None が Tier1 で恒久 FAIL",
+    "code_refs": [
+      "event_simulator.py:1385-1389 (gross_loss>0 else profit_factor=None)",
+      "runner.py:781-785 (_t1_cond: value is None -> passed=False)",
+      "event_simulator.py:1380-1381 (gross_profit/gross_loss は wins/losses sum)"
+    ],
+    "A_validity": "エッジ (実発生せず)。実データ実証: 1453戦略中 trades>0 かつ PF=None の無敗 = 0件。trade_log 保有606戦略の win_rate 最大=0.734 (73.4%)、win_rate==1.0 は0件、>=0.95 も0件、最小負けトレード件数=9件。WFA個別walk (oos_trades>0 かつ oos_pf=None) も0件。50+トレードで全勝はFX H1で統計的に発生しない。PF null 847件は全て trades==0 (L2未実行エラー) で本件と無関係。",
+    "A_secondary_finding": "指摘が見落とした波及: 仮に無敗walkが出ても _aggregate_wfa_walks (event_simulator.py:1576) は oos_pf=None を集計から除外するため、無敗OOS窓は WFA OOS PF平均から脱落する。Tier1 PF とは別経路だが、これも『最良を捨てる』非対称性であり、もし将来発生するなら QA-102 はWFA側にも及ぶ。ただし現状発生0件。",
+    "B_current_recommendation": "適切。Tier1 (真Immutable) を緩めず既知エッジとして文書化、は妥当。",
+    "C_alternatives": {
+      "案1_PF無限大でPASS扱い": "却下推奨。Gate緩和方向 ([change:spec] + 厳格化超の正当化必須)。trades>=50で全勝=過適合/データ異常の強いシグナルであり、無条件PASSは危険。統計的に無敗を『最良』と解釈するのは誤り (損失0は標本が偏っている証拠)。",
+      "案2_PF条件を他条件で代替評価": "却下推奨。Tier1 7条件AND構造を崩す。",
+      "案3_metric層でセンチネル": "却下推奨。旧99.99センチネルが _normalize_pf で1.0満点に化けた P8-H1 の不具合を再現するリスク。現行 None 設計はその修正結果であり、後退させるべきでない。"
+    },
+    "final_recommendation": "現推奨を維持。実発生0件のエッジに対しGate計算ロジックを触るのはリスクのみで便益ゼロ。文書化に『trades>=50無敗はデータ品質異常の検出対象 (PASSさせない方が正しい)』『発生時はWFA OOS PF集計からも脱落する二次経路あり』を追記すれば十分。コード変更不要。",
+    "code_change_needed": false,
+    "change_spec_needed": false
+  },
+  "QA-103": {
+    "title": "WFA OOS窓83%重複による pseudo-replication が Tier2 0.30寄与を楽観方向に歪める",
+    "code_refs": [
+      "config/defaults.py:302-303 (WFA_OOS_MONTHS=6, WFA_STEP_MONTHS=1)",
+      "config/defaults.py:304 (WFA_MIN_WALKS=10)",
+      "event_simulator.py:1731-1741 (walk列挙ループ, step_bars刻み)",
+      "event_simulator.py:1573-1623 (_aggregate_wfa_walks: walkメトリクスの単純平均)",
+      "runner.py:914-984 (Tier2: OOS/IS Ratio w=0.12 + Strategy Drift w=0.08 + WFA Efficiency w=0.10 = 0.30)",
+      "result_parser.py:232-255 (_compute_oos_is_ratio)"
+    ],
+    "overlap_facts": {
+      "data_3yr_walks": 19,
+      "adjacent_oos_overlap_pct": 83,
+      "max_bar_count_multiplicity": 6,
+      "unique_oos_months": 24,
+      "effective_independent_oos_blocks": 4.0
+    },
+    "A_validity": "過大評価。指摘の前提『overlap が点推定 (平均) を楽観方向に系統バイアスさせる』は統計的に誤り。モンテカルロ実証 (N=30000, iid/AR(1) phi=0,0.3,0.6): E[overlap平均 - 非重複平均] = -0.0002〜-0.0004 ≈ 0 で系統バイアス無し。pseudo-replication が歪めるのは分散・標準誤差・有意性検定であって、平均値の不偏性ではない。Tier2 は OOS PF平均/Drift平均/efficiency=平均OOS Sharpe÷平均IS Sharpe を正規化しスコア化するのみで、分散・p値・信頼区間を一切使わない。よって 0.30 寄与への楽観バイアスは点推定レベルでは生じない。",
+    "A_what_overlap_does": "overlap が実際に与える効果は『見かけの分散低下 = スコアの世代間再現性向上』。SD比 overlap/非重複 ≈ 1.07 (むしろ非重複4ブロックの方が端点集中でやや不安定)。真のリスクは『独立情報量が名目19walkより少ない (有効≈4)』点だが、これは検出力 (有意性) の問題でありGate点推定スコアの歪みではない。",
+    "A_overlap_is_standard": "重複walk-forward (rolling/anchored with step<OOS) は実務で一般的。非重複が唯一の正道ではない。データ量が限られる3年BTで10+walkを確保する標準的トレードオフ (defaults.py:301 コメントと整合)。",
+    "B_current_recommendation": "概ね適切だが accept 根拠の再記述方向が要修正。『コード不変・文書再記述』自体は妥当 (逃げではない)。ただし再記述は『pseudo-replication を認めて分散過小を accept』ではなく『点推定スコアには系統バイアスが入らない (MC実証) ため Tier2 0.30判定は歪まない。pseudo-replication の本質である分散過小評価は有意性検定の文脈の問題で、Gate点推定には非該当』と正確に書くべき。",
+    "C_alternatives": {
+      "案1_非重複窓 step=6": "却下 (構造的に不可能)。3年データで step=6/OOS=6/IS=12 にすると walks=4 < WFA_MIN_WALKS(10) となり WFA全体が None化。WFA寄与0.30が全戦略で消失 → soft_score閾値0.70近傍の91戦略 (実測) の判定が大規模に揺れる。過去 QA-006 Round 5 は逆に min_walks 6→10 と検出力を上げる方向に動いており、step拡大は過去判断と逆行。[change:spec] 6手順 + golden + 全1453戦略backfill が必要で、便益 (点推定は変わらない) に対しコスト甚大。",
+      "案2_ratio-of-means化": "現行が既に実質 ratio-of-means。efficiency = mean(OOS Sharpe)/mean(IS Sharpe) (event_simulator.py:1604) は ratio-of-means。OOS/IS PF比も mean(OOS PF)/mean(IS PF) (result_parser.py:248-255)。mean-of-ratios ではない。指摘の『mean-of-ratios集計』という現状認識は不正確。変更不要。",
+      "案3_CPCV等で根本対処": "推奨参照先。Redesign_v2_Plan.md L328-330,871-873 に Phase 5 として DSR/PBO/CPCV (purge=20bars/embargo=5bars, 16分割CSCV) が既に計画済。pseudo-replication/overfit確率の正攻法はこちら。WFA窓を弄る局所最適化は Phase 5 と競合し二重投資になる。",
+      "案4_現行維持": "推奨。点推定にバイアス無し・実務で重複walk一般的・非重複は構造不能・根本対処は Phase 5 CPCV。"
+    },
+    "final_recommendation": "コードは現行維持。ただし accept 根拠の再記述は『pseudo-replication を観点として扱う』のではなく『点推定スコアには系統バイアス非該当 (MC実証 E[diff]≈0)、分散過小は有意性検定の話でGate非該当、独立情報不足の根本対処は Phase 5 CPCV に委譲済』と書く。前回 accept 根拠『look-ahead無し』は正しい (重複してもIS<OOS時系列順序は保たれリークしない) が確かに本質を扱っていなかった。新根拠で補強する。集計が mean-of-ratios という現状認識の誤りも訂正すること。",
+    "code_change_needed": false,
+    "change_spec_needed": false,
+    "doc_recommendation": "spec_change_log または audit accept 記録に上記新根拠を追記 (コード不変)"
+  },
+  "overall": {
+    "QA-102": "現推奨維持 (エッジ・実発生0件・文書化で十分)。コード変更不要。",
+    "QA-103": "現推奨『コード不変・文書再記述』は維持。ただし再記述の論拠を pseudo-replication受容ではなく『点推定無バイアスのMC実証 + 根本対処はPhase5 CPCV』に差し替え。集計手法の現状認識誤り (mean-of-rat(実はratio-of-means)) も訂正。"
+  }
+}

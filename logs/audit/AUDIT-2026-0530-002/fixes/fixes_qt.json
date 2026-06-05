@@ -1,0 +1,49 @@
+{
+  "audit_id": "AUDIT-2026-0530-002",
+  "phase": "Phase 3/4",
+  "generated_at": "2026-05-30",
+  "generated_by": "qa-tester",
+  "fixes": [
+    {
+      "finding_id": "QT-501",
+      "severity": "high",
+      "category": "post_fix_defect",
+      "title": "CI contract ゲート永続 skip",
+      "root_cause": "parity.yml の contract ステップが tests/integration/contract/ の存在チェックをしていたが、実配置は tests/contract/ のため常時 skip されていた。eccab9a での配置と parity.yml コメント・実行パスが乖離していた矛盾。",
+      "fix_kind": "[fix:bug]",
+      "recommendation": "案 A: parity.yml を実配置 tests/contract/ に追従させ、コメントも更新",
+      "files_modified": [
+        {
+          "path": "C:\\data\\works\\FX\\fx_trading_system\\.github\\workflows\\parity.yml",
+          "change_summary": "contract ステップの存在チェックパスと pytest 実行パスを tests/integration/contract → tests/contract に変更。コメント (L74-75) を QT-501 修正内容に更新。他ステップへの影響なし。",
+          "diff": {
+            "old": {
+              "comment": "# QT-007 (第11次監査): 実体は tests/integration/contract/。旧 tests/contract 参照は\n# 常時 silent skip だった（catch-all ステップでは実行されるが専用ゲートが形骸化）。",
+              "existence_check": "if [ -d tests/integration/contract ]; then",
+              "pytest_cmd": "pytest tests/integration/contract/ -v --tb=short"
+            },
+            "new": {
+              "comment": "# QT-501 (AUDIT-2026-0530-002): contract テストは tests/contract/ 配下に配置\n# (2026-05-30 QT-501 修正で正規化)。旧コメントの tests/integration/contract/ は\n# 誤記であり、eccab9a での実配置 tests/contract/ と乖離していたため永続 skip だった。",
+              "existence_check": "if [ -d tests/contract ]; then",
+              "pytest_cmd": "pytest tests/contract/ -v --tb=short"
+            }
+          }
+        }
+      ],
+      "test_verification": {
+        "command": "pytest tests/contract/ -v --tb=short",
+        "result": "5 passed in 0.14s",
+        "test_cases": [
+          "test_oanda_broker_metrics_wired[trading_platform\\\\core\\\\unified_runner\\\\runner.py] PASSED",
+          "test_oanda_broker_metrics_wired[trading_platform\\\\main.py] PASSED",
+          "test_oanda_broker_metrics_wired[trading_platform\\\\forward_test.py] PASSED",
+          "test_oanda_broker_metrics_wired[scripts\\\\live_preflight.py] PASSED",
+          "test_required_sites_unique PASSED"
+        ]
+      },
+      "status": "fixed",
+      "commit": null,
+      "notes": "コミットは未作成（作業指示に従い省略）。parity.yml 他ステップ（Run parity tests / Run unit tests）への影響なし。"
+    }
+  ]
+}

@@ -1,0 +1,131 @@
+[fix:bug][feat][test] AUDIT-2026-0530-001: High 5件 + Medium 2件 post_fix_defect 修正
+
+専門家チーム監査 (7名) + devil-advocate 3名 + 第2チーム検証 (5名) で発見した
+昨日コミット 9998a7a 由来の post_fix_defect 5 件 + 関連 medium 2 件を修正。
+新規導入の Phase 4.5 事前 diff 安全性レビューで escape_hatch 配信欠陥を
+事前検出し追加修正済 (本コミットは Phase 4.5 を通過した状態)。
+
+=== HIGH 修正 (5件、post_fix_defect 連鎖断ち) ===
+
+## RE-401 [HIGH, canonical for OANDABroker metrics=]
+3 チーム独立発見 (RE-401 / DE-402 / DM-402) で同一。Meta 検証で RE-401 canonical
+確定。前日 DM-302 修正で `_record_api_metric` ヘルパー追加したが `OANDABroker(...)`
+生成時に `metrics=` 未注入 → 本番計装 dead。Meta 検証で第4欠落箇所
+(scripts/live_preflight.py:35) も発見。
+修正: 4 箇所 (runner.py:343 / main.py:335 / forward_test.py:239 /
+      scripts/live_preflight.py:35) に `metrics=self._metrics` 注入。
+再発防止: tests/contract/test_oanda_broker_metrics_wired.py (5 tests, AST 契約テスト)
+ファイル: 4 + 1 (contract test)
+
+## RE-402 [HIGH, post_fix_defect, INC-0526 逆方向再発]
+昨日 RE-301/302 修正で entry_rollback が state クリアのみで OANDA 上のポジションを
+孤児化していた問題。INC-0526 の逆方向 (FTS→OANDA 整合喪失) 同型バグ。
+修正: `_attempt_orphan_close_after_rollback` で OANDA orphan trade をベストエフォート
+      close。失敗時は CRITICAL `entry_rollback_orphan` RiskAlert を発火
+      (12h throttle、EmailNotifier 連携)。
+再発防止: tests/fault/test_re402_entry_rollback_oanda_cleanup.py (5 tests)
+ファイル: strategy_slot.py, email_notifier.py
+
+## DM-306 [HIGH] → 既修正、本コミットは DE-403 派生対応のみ
+昨日コミット 9998a7a で DM-306 (oanda_connection_lost) は対応済。
+本コミットでは関連の DE-403 (DM-302 修正起因の派生 post_fix_defect) を修正。
+
+## DE-403 [HIGH, post_fix_defect, FxFeatureStorestaleHigh 常時 FIRING]
+昨日 DM-302 修正で追加した `observe_feature_staleness` がラベル誤用 (strategy_id
+引数に TF 名 "H1" を渡す) + semantics 誤り (age_sec がバー間隔 H1=3600s/H4=14400s
+を測定) で固定 60s 閾値の `FxFeatureStorestaleHigh` が H1/H4 戦略 22 件全てで
+**起動時点から永久 FIRING**。第2チーム数学的確定。
+修正:
+  1. metrics.py: signature 変更 (strategy_id, age_sec, *, primary_tf="unknown") +
+     fx_feature_staleness_sec gauge ラベルに primary_tf 追加
+  2. live_store.py: staleness 再定義
+     `staleness_sec = max(0, now - (_last_primary_bar_time + TF_SECONDS[tf]))`
+     (バー配信遅延時のみ正値、通常 0)
+  3. alerting_rules.yml: TF 別閾値 (M15: >1800s / H1: >7200s / H4: >28800s)
+再発防止: tests/unit/test_de403_feature_staleness_semantics.py (9 tests)
+ファイル: metrics.py, live_store.py, alerting_rules.yml, test_dm302_*.py (整合更新)
+
+## PA-401 [HIGH, post_fix_defect, AUDIT-0529-003 C-01 同型再発]
+昨日 PA-303 修正で main.py の `initialize()` 内 LIVE Gate 拒否時の
+`RiskAlertEvent.publish()` が EventBus 未起動 (start() は line 1004) +
+EmailNotifier 未 subscribe で silently drop されていた。runner.py 側は
+AUDIT-2026-0529-003 C-01 で同等修正済だが main.py に移植漏れ。
+修正: idempotent helper `_ensure_eventbus_and_notifier_started()` 追加。
+      `_eventbus_started_early` / `_email_notifier_started` フラグで二重 start /
+      二重 subscribe を防止。LIVE Gate 拒否 publish 直前で helper を呼ぶ。
+再発防止: tests/integration/test_pa401_main_eventbus_startup_order.py (5 tests)
+ファイル: main.py
+
+## PA-412 [HIGH, post_fix_defect] + Phase 4.5 追加修正
+PLATFORM_ALLOW_MAIN_PRODUCTION_LIVE escape hatch 通過時に PA-401 (Email dead-path) +
+PA-103 元因 (既存ポジション無視) が同時顕在化。
+修正:
+  1. CRITICAL ログ強化 (PA-412 タグ + deprecation 警告 + 二重リスク明示)
+  2. `_escape_hatch_active` フラグ + initialize 内で専用
+     `platform_escape_hatch_active` RiskAlertEvent (CRITICAL) を publish
+  3. EmailNotifier `_RISK_ALERT_KINDS` に `escape_hatch` kind 登録 (throttle 対象外)
+  **Phase 4.5 事前 diff 検証で WARNING_BLOCKING 発見**: `_handle_risk_alert`
+  dispatcher に `elif kind == "escape_hatch":` 分岐が漏れて silently drop
+  していた問題を事前修正。`_EMAIL_THROTTLE_INTERVAL_SEC` に "escape_hatch": 0.0
+  を明示登録 (運用意図の明示と将来事故防止)。
+再発防止: tests/integration/test_pa412_escape_hatch_warning.py (4 tests)
+ファイル: main.py, email_notifier.py
+
+=== MEDIUM 修正 (2件) ===
+
+## RE-MISSED-401 [MEDIUM] get_trade が 5xx/timeout と 404 を混同
+第2チーム検証で発見。RE-402 の exit 側ミラー (RE-401/411 等と同じ「例外を None に
+握りつぶす」 anti-pattern)。
+修正: `TradeNotFoundError` 例外を新設 (BrokerError 派生)。
+      `get_trade` の except を transient (5xx/timeout/非404 4xx → BrokerUnavailableError)
+      / permanent (404 → TradeNotFoundError) で分離。
+      `close_trade` pre_check は `TradeNotFoundError` のみで stale=NOT_FOUND 判定
+      (transient は retry 経路へ)。
+再発防止: tests/fault/test_re_missed_401_get_trade_exception_discipline.py (8 tests)
+
+## RE-411 [MEDIUM] submit_order TimeoutError 計装漏れ
+昨日 DM-302 で `cancel_order` のみに `_record_api_metric` 計装、`submit_order` の
+outer except で TimeoutError/5xx の metric が drop。
+修正: submit_order outer except 内で `_record_api_metric(status='timeout'
+      if isinstance(exc, TimeoutError) else '5xx', ...)` を呼ぶ。
+再発防止: tests/unit/test_re411_submit_order_timeout_metric.py (4 tests)
+
+=== Phase 4.5 事前 diff 安全性レビュー (新規プロセス、本コミット初適用) ===
+
+AUDIT-2026-0529-001 の post_fix_defect 5 件発覚を受け、code-safety-reviewer による
+7 項目チェックリスト事前検証を Phase 4 に追加。本コミットでは:
+- 7 修正 × 7 項目 = 49 チェック実施
+- WARNING_BLOCKING 1 件発見 (PA-412 dispatcher 分岐漏れ) → 事前に追加修正
+- WARNING_ADVISORY 1 件 (DE-403 strategy_id ラベル名 misleading) → docstring 明記
+- 他 5 修正 (QA-301/RE-401/402/MISSED-401/411) は PASS
+
+詳細: logs/audit/AUDIT-2026-0530-001/verification/safety_review_phase_4_5.json
+
+=== 検証結果 ===
+
+- FTS unit + fault + contract: 1322 passed (退行ゼロ)
+- FTS integration (PA-401/412 関連 14 件): all passed
+- ruff: 本セッション変更ファイル 73 → 51 (-22 改善、auto-fix 適用済)
+
+=== 監査体制 ===
+
+第1チーム 10名 (専門家 7 + devil-advocate 3) → 68 findings 検出
+第2チーム  5名 (専門家 4 + devil-advocate meta 1) → 67 件合意 + 8 missed 発見
+Phase 4.5 code-safety-reviewer 事前 diff 検証 → 1 BLOCKING + 1 ADVISORY 発見
+
+=== 対象外 (本コミット範囲外、次回以降) ===
+
+- PA-407 main.py 廃止 ADR (設計判断必要)
+- DESIGN-C-001 RE-305 復旧通知 vs live_orders_silent 12h throttle 矛盾 (ユーザー判断)
+- DM-401/403/404/405/406/407 (low / docs / DM-402 連動)
+- DE-401/404/405/406/407/408 (low / medium、別セッション)
+- QT-401/402/403/404/405/406/407/408/409/410 (テスト品質、別 PR)
+- RE-MISSED-402/403/404/405 (low)
+- DE-411 (low、observe_feature_staleness の broad except)
+
+監査ID: AUDIT-2026-0530-001
+正本: logs/audit/summary_AUDIT-2026-0530-001.md
+詳細: logs/audit/AUDIT-2026-0530-001/{findings,validation,verification,fixes}/
+Phase 4.5 レビュー: logs/audit/AUDIT-2026-0530-001/verification/safety_review_phase_4_5.json
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>

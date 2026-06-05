@@ -1,0 +1,180 @@
+{
+  "agent": "risk-execution-engineer",
+  "scope": "FTS PTRC / Execution Engine 7 components / Kill Switch / State Store / Reconciliation",
+  "commit_audited": "2803be57b058b8a963f9224185195ffeeb73d71c",
+  "summary": {
+    "total_findings": 9,
+    "critical": 0,
+    "high": 2,
+    "medium": 4,
+    "low": 3,
+    "regressions_detected": 0,
+    "audit_0529_003_fix_quality": "概ね適正だが H-01 (KS 無限ループ修正) は **runner 経路にのみ** 適用されており、外部スクリプト経由で UnifiedRunner.run() を使わない経路 / main.py FastAPI 経路 (別実装 KillSwitch) は依然として無限ループの懸念がある。C-02 (live_gate_rejection throttle 撤廃) は意図通りだが SMTP rate-limit 連鎖の二次被害が放置されている。"
+  },
+  "findings": [
+    {
+      "id": "RE-301",
+      "severity": "high",
+      "area": "execution",
+      "title": "_resolve_live_trade_id の comment 非マッチ fallback で別戦略の trade を誤採用しうる",
+      "description": "LIVE エントリー後の trade_id 解決 (strategy_slot.py:805-823) で、clientExtensions.comment による正規マッチ (strategy_id 一致) が失敗した場合、line 813-816 で `instrument + units_predicate` のみで再マッチする instrument フォールバックが残っている。同一 instrument・同一 direction の LIVE 戦略が複数稼働している環境では、OANDA 側で comment がまだ permanently 反映されていない瞬間 (短い race) に、別戦略の既存オープン trade を誤って自戦略の open_trade_id として採用しうる。restore_positions では INC-2026-0526-001 (R1/R2) で同種の instrument フォールバックを廃止 + claimed_trade_ids で排他制御済みだが、本ランタイム経路には未適用 (R1 で実装されたのは起動時 restore のみ)。これは INC-2026-0526-001 と同型の幻エクスポージャー / 多重採用バグの再発経路。",
+      "evidence": [
+        "trading_platform/core/unified_runner/strategy_slot.py:805-823",
+        "trading_platform/core/unified_runner/strategy_slot.py:1310-1322"
+      ],
+      "reproduction": "USD_JPY LONG の LIVE 戦略 A と B を 1 process 内で稼働。A が `_handle_entry` で OANDA に注文を submit → submit が成功 (fill 取得) → 直後に B も submit (テスト的に同期) → B の `_resolve_live_trade_id` 内で OANDA `get_open_trades()` を呼んだ瞬間、B 自身の comment 反映が遅延していると、B の matching=[] になり fallback (line 813) で 'instrument=USD_JPY かつ units>0' を取得 → A の trade_id を誤採用。次回 close_trade で A の trade を close してしまう。",
+      "suggested_fix": "restore_positions (R1) と同じく instrument フォールバックを廃止する。matching=[] のときは `entry_rollback_no_trade_id` 経路 (line 749-759) と同等にロールバックし、periodic reconciler の divergence B 検知に委ねる。あるいは claimed_trade_ids 相当のランナー横断 set を runtime にも導入し他戦略の open_trade_id を予約除外する。",
+      "live_impact": "本番経路で発火しうる。実損失リスク: 別戦略の trade を誤って close → 2 戦略分の損益が片方に集約され戦略性能評価が崩壊。INC-2026-0526-001 と同型なので運用復旧コストも高い。",
+      "regression_of": null
+    },
+    {
+      "id": "RE-302",
+      "severity": "high",
+      "area": "execution",
+      "title": "_resolve_live_trade_id で get_open_trades が [] 返却時に broker_order_id を open_trade_id に流用 (Live と Paper の取り違え)",
+      "description": "strategy_slot.py:792 で `trades = await self.gateway.get_open_trades()` を呼び、line 793 `if not trades:` で空リストなら 'PaperBroker 等のフォールバック' とコメントして `state.open_trade_id = fill.broker_order_id` を代入する。しかし BrokerGateway.get_open_trades (broker_gateway.py:424-428) は OANDA 例外を try/except で握りつぶし [] を返す設計。つまり OANDA の一時的なネットワーク障害・タイムアウトで get_open_trades が空配列を返すと、LIVE 経路でも line 793 の Paper フォールバックに落ちる。OANDA の `orderFillTransaction.orderID` は OANDA 内部の Order ID であって Trade ID ではない (client.py:394: `broker_order_id = fill_tx.get('orderID', '')`)。結果、state.open_trade_id に Order ID が格納され、次回 `close_trade(open_trade_id)` 呼出が `/v3/accounts/{id}/trades/{order_id}/close` を叩いて 404 (TRADE_DOESNT_EXIST) を返す。その後 stale 回収パスへ → ポジションは OANDA 上に残ったまま FTS state はクリア → 幻ポジション化。",
+      "evidence": [
+        "trading_platform/core/unified_runner/strategy_slot.py:792-799",
+        "trading_platform/core/execution_engine/broker_gateway.py:420-428",
+        "trading_platform/broker/oanda_adapter/client.py:383-410"
+      ],
+      "reproduction": "LIVE 戦略 A がエントリー → `_handle_entry` → submit 成功で fill 取得 → 直後 `_resolve_live_trade_id` 呼出 → OANDA `get_open_trades` で aiohttp.ClientError 発生 → broker_gateway が空配列で握りつぶし → line 793 トリガ → state.open_trade_id=fill.broker_order_id (OANDA Order ID, 例: '176') → 次バーで `_handle_exit` → `close_trade('176')` → OANDA 404 → stale recovery が呼ばれるが trade はそのまま OPEN → 人手対応必須。",
+      "suggested_fix": "line 793-799 のフォールバックは Paper 専用に限定する (例: `if not self.is_live and not trades:` の条件追加)。Live で get_open_trades が [] を返した場合は entry_rollback ルートに合流させる。さらに broker_gateway.get_open_trades の except を例外伝播 (or None 戻り) に変えて呼出側で「空配列=実際に 0 件」と「失敗=例外」を区別可能にする方が根本治療。",
+      "live_impact": "本番経路で発火する。OANDA API のレイテンシスパイク・タイムアウトは恒常的な現象であり、LIVE 取引中の頻度は数日に 1 回程度発生しうる。実際の損失: 幻ポジション残置 + close_trade 404 ループ → 人手介入まで複数時間の不一致。RE-201 (063973d で修正済) と同型の問題ベクタ。",
+      "regression_of": null
+    },
+    {
+      "id": "RE-303",
+      "severity": "medium",
+      "area": "kill_switch",
+      "title": "AUDIT-2026-0529-003 H-01 修正は main.py FastAPI 経路の KillSwitch には適用されていない (二重実装の片方のみ修正)",
+      "description": "AUDIT-2026-0529-003 H-01 で KS 発動時の無限ループは UnifiedRunner.run() の poll サイクル (runner.py:1549-1566) で `_shutdown_requested=True` を立てて shutdown フローに乗せるよう修正された。しかし FTS には別実装の KillSwitch (`trading_platform/core/risk_engine/circuit_breaker.py:177` 以下) が並存しており、こちらは main.py FastAPI 経路で使われる (circuit_breaker.py:185-189 のコメント参照)。circuit_breaker.KillSwitch._activate (`circuit_breaker.py:386-539`) には shutdown 要求を発火するメカニズムがなく、main.py 経路では KS 発動後も FastAPI サーバが running し続け、`/risk/kill-switch/reset` API を待つ運用設計。AUDIT-2026-0525-002 NEW-CSR-001 / RE-002 で『main.py 経路と UnifiedRunner 経路の二重実装が配線乖離を生む』との指摘が累積している。今回 H-01 は UnifiedRunner 経路のみで対処され、main.py 経路は対象外。run_unified.py が正式本番経路だが、main.py で別経路で使われた場合 KS 後に手動 reset しなければプロセスは生き続け『KS 発動 → 全注文拒否 → 戦略が動かないがプロセスは生きている』状態に陥る。",
+      "evidence": [
+        "trading_platform/core/unified_runner/runner.py:1549-1566",
+        "trading_platform/core/risk_engine/circuit_breaker.py:177-189",
+        "trading_platform/core/risk_engine/circuit_breaker.py:386-539"
+      ],
+      "reproduction": "main.py FastAPI 経路で起動 (uvicorn trading_platform.main:app) → KillSwitch.start() 経由で fill subscribe → 連続損失で KS 発動 → manual_reset まで全注文拒否が継続。プロセスは alive。",
+      "suggested_fix": "(a) main.py 経路の KillSwitch にも shutdown シグナル相当の callback を注入する、または (b) main.py 経路を廃止 (NEW-CSR-001 で言及済) し UnifiedRunner 経路に統一する。後者が根本治療。",
+      "live_impact": "現在の本番は run_unified.py 経路 (UnifiedRunner) なので即時影響なし。main.py を本番起動する場合に発火。マスター修正点は『どの経路が本番か』のドキュメント化と非本番経路の deprecation。",
+      "regression_of": null
+    },
+    {
+      "id": "RE-304",
+      "severity": "medium",
+      "area": "execution",
+      "title": "KS 経路の broker_gateway.halt() は paper スロットの gateway もハードハルトする",
+      "description": "runner._cancel_all_open_orders (runner.py:1309-1322) は KS 発動時に `for slot in self._slots: slot.gateway.halt()` で全スロット (paper / live 区別なし) の BrokerGateway を halt する。paper スロットの gateway も同じ BrokerGateway インスタンスで管理されているため、KS 発動後は paper トレードも完全停止する。これは INC-2026-0527-001 (paper exposure 混入修正) の『paper と live は完全分離』方針と矛盾する。設計上の解釈: KS は『口座全体の安全停止』なので paper も含む全停止が安全 (defense-in-depth)。一方で『paper はリスクなしで戦略評価を継続したい』要件と衝突する。",
+      "evidence": [
+        "trading_platform/core/unified_runner/runner.py:1303-1322",
+        "trading_platform/core/unified_runner/strategy_slot.py:351-357"
+      ],
+      "reproduction": "Live 1 戦略 + Paper 5 戦略の構成で Live KS 発動 → Paper 全 5 戦略のエントリー submit が `kill_switch_active: broker gateway halted` で REJECT。Paper の戦略評価データが歯抜けに。",
+      "suggested_fix": "paper / shadow スロットの gateway は halt 対象から除外する (`if slot.is_live: slot.gateway.halt()`)。または『Paper 隔離方針を再評価し KS 全停止を採用』を明文化する [change:spec] 判断。",
+      "live_impact": "本番経路で発火する。Paper トレードのデータ取得継続性に影響。Live 損失は発生しない。",
+      "regression_of": null
+    },
+    {
+      "id": "RE-305",
+      "severity": "medium",
+      "area": "execution",
+      "title": "OANDA get_account_info 連続失敗時に shutdown も KS もトリガしない (degraded ログのみ)",
+      "description": "runner._poll_cycle で `account_info = await self._broker.get_account_info()` (runner.py:1520) が連続失敗 (`_consecutive_poll_errors >= 5`) しても、ログに `oanda_connection_degraded` WARN を出力するのみで shutdown / KS は発火しない (runner.py:1528-1534)。OANDA 接続が長時間障害した場合でも、プロセスは alive で poll を回し続ける (各回失敗で early return)。新規注文は account_info が無いため発生しないが、運用観測上『プロセスは生きているが取引していない』状態が無視されうる。`live_orders_silent` アラート (6 時間閾値) は heartbeat 周期で発火するが、それまでに早期警戒の機会を失う。",
+      "evidence": [
+        "trading_platform/core/unified_runner/runner.py:1518-1534"
+      ],
+      "reproduction": "OANDA API を 30 分間 502 で返すスタブに切替えて run_unified.py 起動 → `consecutive_errors` がインクリメントし続け、`oanda_connection_degraded` WARN のみ。Email/RiskAlert は発火せず。",
+      "suggested_fix": "(a) `_consecutive_poll_errors >= N` (例 30回 = 30分) で `live_orders_silent` 同等の RiskAlert を発出する、(b) より大きな閾値 (例 60回 = 1時間) で `_shutdown_requested=True` を設定して graceful exit、または (c) KS 相当の force_activate を呼ぶ。最低限 (a) の能動通知は早期検知のために必要。",
+      "live_impact": "本番で発火しうる。実損失リスクなし (注文できない) だが、運用者の障害検知遅延を招く。INC-2026-0526-001 で Live 沈黙検知を実装した思想と整合性を取るべき。",
+      "regression_of": null
+    },
+    {
+      "id": "RE-306",
+      "severity": "medium",
+      "area": "reconciliation",
+      "title": "_maybe_reconcile_live_positions が失敗 (例外) しても 10 分のクールダウンを更新するため、回復後すぐ照合できない",
+      "description": "runner._maybe_reconcile_live_positions (runner.py:972-978) は実行前に `_last_position_reconcile_at = now` を設定してから `_reconcile_live_positions()` を呼ぶ。これは『失敗時に毎周期リトライして API を叩き続けない』設計意図のコメント (runner.py:970)。しかし `_reconcile_live_positions` 内で OANDA `get_open_trades` 取得に失敗した場合 (runner.py:1014-1022)、本来取得すべき検証が次の 10 分間スキップされる。stale recovery (divergence A) の即時化が遅延し、最悪 10 分間 (1 heartbeat × 10 分間隔) は幻 state を保持し続ける。OANDA の一時的なネットワーク障害 (数秒) でも 10 分のペナルティが課される設計。",
+      "evidence": [
+        "trading_platform/core/unified_runner/runner.py:964-978",
+        "trading_platform/core/unified_runner/runner.py:1012-1022"
+      ],
+      "reproduction": "heartbeat 周期 (15 polls = 15 分) で `_reconcile_live_positions` 内の `get_open_trades` 呼出で 30 秒スリープしてタイムアウト → 例外で照合スキップ → 次回 10 分は照合スキップ → 合計 25 分間 stale 検知不能。",
+      "suggested_fix": "OANDA 取得失敗時のみ `_last_position_reconcile_at` を更新せず (= 次回 heartbeat で再試行)、ただしリトライ抑止のために `_consecutive_reconcile_failures` を別途追跡し閾値超過時のみ間隔を延ばす。あるいは shorter retry interval (例 1 分) を別途設定する。",
+      "live_impact": "本番で発火しうる。stale 検知遅延 → 幻エクスポージャー残留時間が増加 → 新規エントリーが exposure 上限に張り付く可能性。INC-2026-0526-001 を再発させる経路ではないが、検知時間が長くなる。",
+      "regression_of": null
+    },
+    {
+      "id": "RE-307",
+      "severity": "low",
+      "area": "ptrc",
+      "title": "PTRC reject の Audit Log / RiskAlert が fire-and-forget で event loop 不在時に喪失",
+      "description": "ptrc.py の `_fire_ptrc_audit` (line 128-164) と `_fire_risk_alert` (line 90-116) は `asyncio.get_running_loop()` で RuntimeError を捕捉した場合 logger.debug でスキップする。本番経路では常に event loop 内なので実害はないが、ユニットテスト・migration スクリプト・同期コンテキストから PTRC.evaluate を直接呼ぶ将来の経路でサイレント失敗を許す。`_pending_tasks` の GC 防止はモジュールレベル set なので、テストプロセスの並列実行で task が混在しうる (テスト隔離の観点で潜在的)。さらに `_fire_ptrc_audit` の task は failure 時の error callback を持たないため、AuditLogger.record が例外を投げた場合は黙って消える。supervisor 側 (`_spawn_audit_task`) は done callback で例外をログに残しているのと非対称。",
+      "evidence": [
+        "trading_platform/core/risk_engine/ptrc.py:128-164",
+        "trading_platform/core/risk_engine/ptrc.py:90-116",
+        "trading_platform/core/unified_runner/risk_supervisor.py:204-226"
+      ],
+      "reproduction": "テストで `loop.create_task(audit_logger.record(...))` が例外を投げる AuditLogger (write 失敗) を注入 → ログに痕跡が残らず、テストは PASS で進む。",
+      "suggested_fix": "ptrc._fire_ptrc_audit にも done callback を追加し、`t.exception()` を logger.error で記録する。risk_supervisor._spawn_audit_task と同パターンに揃える。",
+      "live_impact": "本番影響は限定的 (実 deploy で event loop 不在状況はない)。観測性 (audit log 喪失の隠蔽) のみのリスク。",
+      "regression_of": null
+    },
+    {
+      "id": "RE-308",
+      "severity": "low",
+      "area": "execution",
+      "title": "AUDIT-2026-0529-003 C-02 (live_gate_rejection throttle 撤廃) は SMTP rate-limit の二次被害を放置",
+      "description": "C-02 修正で `live_strategy_rejected_by_gate` 通知を専用 kind `live_gate_rejection` に分離し `_EMAIL_THROTTLE_INTERVAL_SEC` に登録しないことで throttle 不可化した (email_notifier.py:298-307, 314-324)。量産投入時の silent failure 防止という意図は正しい。しかし数十～数百の LIVE 戦略を同時投入した場合 (Mass import rehearsal などの本番シナリオ)、起動時に N 通の Email が短時間に発射される。SMTP リトライ (_SMTP_MAX_ATTEMPTS=3 × backoff 1-2 秒) と合わせると最大 N × 3 通の SMTP 試行が走り、Gmail などの送信レート制限 (例: 100/day for free tier, さらに短時間で 30/hr) を超過しうる。EmailNotifier 自身は failure を握りつぶしログのみ (line 256-265) なので、SMTP 拒否されても取引フローは止まらないが、その後の正規通知 (kill_switch_activated 等) も rate-limit の巻き添えで送れなくなる。",
+      "evidence": [
+        "trading_platform/core/monitoring/email_notifier.py:296-324",
+        "trading_platform/core/monitoring/email_notifier.py:939-995",
+        "logs/bulk_import_rehearsal_2026_0529.md (1,649 strategies 同時投入の想定)"
+      ],
+      "reproduction": "60 戦略を LIVE で投入、全戦略の gate_results.json を pass=False に書き換え → 起動時に 60 通の Email を 1 秒以内に発射 → SMTP 4.7.0 / 421 で reject 開始 → リトライで更に倍々ゲーム → 数分後の本物の kill_switch_activated メールも失敗。",
+      "suggested_fix": "live_gate_rejection はバースト緩和のため 1 アグリゲートメールに集約する。具体的には『最初の 1 件を即送 + 後続 30 秒以内のものを集約して 1 通にまとめる』バッチング。または daily summary に降格し起動時は logger / metric のみとする (Gate 拒否は事前に防げる類の問題)。",
+      "live_impact": "本番で発火しうる (量産投入時)。直接的な取引損失なし、観測性 (他のクリティカル通知の巻き添え失敗) のリスク。SMTP rate-limit に該当した場合は EmailNotifier 自体のヘルスチェック (failure_count) を Prometheus alert に晒すべき。",
+      "regression_of": null
+    },
+    {
+      "id": "RE-309",
+      "severity": "low",
+      "area": "ptrc",
+      "title": "PTRC _check_max_daily_loss の per-strategy daily_unrealized_pnl は本番経路で常に 0 (設計明文化済みだがコード/コメントの不整合)",
+      "description": "ptrc.py の `_check_max_daily_loss` は `risk_state.daily_realized_pnl + risk_state.daily_unrealized_pnl` を合算して評価する (line 560-561)。しかし risk_supervisor.build_risk_state (`risk_supervisor.py:817-826`) のコメント RE-002 によれば『本番 UnifiedRunner 経路では per-strategy の daily_unrealized_pnl は意図的に 0 のまま』であり、PTRC は realized-only で評価される。設計判断としては OK (REV-1 契約) だが、PTRC 側のコメントは『将来の方針変更時に risk_state へ実値を渡せば即座に機能する』と書かれているため (line 558)、運用者・新規開発者がこのコードを見て『含み損も評価される』と誤解しやすい。account 合算の含み損 WARN レイヤー (_evaluate_unrealized_warning) は別系統で正しく動くので実害はないが、二重実装の食い違いがメンテ負債。",
+      "evidence": [
+        "trading_platform/core/risk_engine/ptrc.py:532-590",
+        "trading_platform/core/unified_runner/risk_supervisor.py:817-833"
+      ],
+      "reproduction": "（コード解析のみ）",
+      "suggested_fix": "ptrc.py の _check_max_daily_loss にも RE-002 と同等の設計コメントを追加し、『risk_state.daily_unrealized_pnl は本番では常に 0、含み損は account 合算 WARN レイヤーで保護』を明示する。または将来 per-strategy 含み損を反映する設計判断が固まった時点で wire-up し、両系統を実値で動かす [change:spec]。",
+      "live_impact": "本番影響なし。コード可読性のみ。",
+      "regression_of": null
+    }
+  ],
+  "audit_0529_003_fix_review": {
+    "h_01_ks_infinite_loop_fix": {
+      "verdict": "適正 (runner 経路のみ)",
+      "notes": "UnifiedRunner 経路では正しく _shutdown_requested=True を立てて shutdown フローに乗せている。run_unified.py の try/finally で shutdown() が呼ばれることも確認済み。ただし main.py FastAPI 経路の別 KillSwitch には未適用 (RE-303 として独立指摘)。"
+    },
+    "c_01_email_notifier_startup_order_fix": {
+      "verdict": "適正",
+      "notes": "EmailNotifier.start() を slot loop の前に移動済み (runner.py:495-505)。_strategies_metadata は dict 参照渡しで後段追加も visibility あり。PTRC set_risk_alert_emitter (line 376) はさらに前で wire 済みだが、PTRC alert は warmup 後の slot 処理で発火するので EmailNotifier.start() 前に喪失する RiskAlert はない。"
+    },
+    "c_02_live_gate_rejection_throttle_separation": {
+      "verdict": "意図は適正、二次被害 (SMTP rate-limit) 未対処",
+      "notes": "RE-308 として独立指摘。"
+    }
+  },
+  "regressions_check": {
+    "re_001_static_fx_in_live": "OandaCurrencyConverter 配線済み + _unsafe_static_in_live 検知 + fail-safe REJECT + RiskAlert (ptrc.py:223-233, 288-342)。退行なし。",
+    "re_101_currency_converter_wiring": "UnifiedRunner.initialize で OandaCurrencyConverter(fallback=None) を構築し PTRC に注入済み (runner.py:364-368)。退行なし。",
+    "re_201_phantom_exposure_on_stale_recovery_fail": "_recover_stale_trade_pnl で `recovered` フラグを使い、record_close 不発時のみ clear_exposure を呼ぶ二重保護を確認 (strategy_slot.py:1668, 1734-1750)。退行なし。",
+    "inc_2026_0526_001_6day_silence": "_sync_risk_state_from_slot に is_live ガード追加済み (runner.py:765-766)。退行なし。",
+    "inc_2026_0527_001_paper_exposure_leak": "is_live ガードで paper 状態が live supervisor に混入する経路を遮断済み。退行なし。"
+  },
+  "observability_asymmetry": {
+    "fx_kill_switch_triggered_total": "supervisor 主経路 (risk_supervisor.py:1170) と circuit_breaker.KillSwitch._activate (circuit_breaker.py:408) の両方で加算される。reason allowlist (metrics.py:597-613) も両経路の reason を含む。OK。",
+    "fx_ptrc_reject_total": "ptrc.py:397-400 で reject 時に inc。CB/KS reject (line 281-285) は ptrc_rejected_cb_ks の Audit Log には記録するが metrics には加算しない (line 397 の if all_passed: else: 分岐の前で return しているため)。これは Phase 0 (CB/KS) の reject を ptrc_reject_total に含めない設計と読めるが、運用観測上は混乱を招く。低リスクだが docstring 化が望ましい。",
+    "fx_fills_total": "metrics.inc_fill (metrics.py:457-464) は OK だが、UnifiedRunner 経路 (strategy_slot.py) では呼出が見当たらない (fills_filled の state インクリメントのみ)。本番経路で fx_fills_total が常に 0 のままの可能性。** 要追加調査 ** (本監査の範囲外で別途確認推奨)。"
+  }
+}

@@ -1,0 +1,85 @@
+{
+  "agent": "devops-monitor",
+  "audit_id": "AUDIT-2026-0529-001",
+  "phase": "Phase 3/4 — 実装担当 (実コード修正 + 回帰テスト追加)",
+  "date": "2026-05-29",
+  "commit_status": "NOT committed — ユーザーレビュー待ち",
+  "test_result": "34 passed / 0 failed (pytest -x -q)",
+  "fixes": [
+    {
+      "id": "DM-306",
+      "severity": "high",
+      "area": "healthcheck / email",
+      "title": "oanda_connection_lost を _RISK_ALERT_KINDS に登録し Email 経路を復活",
+      "files_modified": [
+        "trading_platform/core/monitoring/email_notifier.py"
+      ],
+      "tests_added": [
+        "tests/unit/test_dm306_oanda_connection_lost_email.py"
+      ],
+      "summary": "_RISK_ALERT_KINDS に 'oanda_connection_lost': 'live_anomaly' を追加。health_check.py:417 で publish される RiskAlertEvent が EmailNotifier に到達し、OANDA 60 秒超断絶時のメール通知が機能するようになった。live_anomaly kind の throttle (900s) が適用されるため断絶継続中の連投も抑止される。",
+      "verification": "test_oanda_connection_lost_triggers_email: publish → _send_email_sync 呼び出し確認。test_oanda_connection_lost_kind_is_live_anomaly: _RISK_ALERT_KINDS 登録値の静的検証。",
+      "regression_risk": "既存 live_anomaly throttle ロジックが共有されるため throttle 動作は既存テストで担保済み。"
+    },
+    {
+      "id": "DM-302",
+      "severity": "high",
+      "area": "metrics / broker / feature_store",
+      "title": "OANDABroker と LiveFeatureStore に API latency / feature staleness 計装を追加",
+      "files_modified": [
+        "trading_platform/broker/oanda_adapter/client.py",
+        "trading_platform/data/feature_store/live_store.py",
+        "trading_platform/core/monitoring/metrics.py"
+      ],
+      "tests_added": [
+        "tests/unit/test_dm302_metrics_instrumentation.py"
+      ],
+      "summary": "最小侵襲の計装を 3 ファイルに追加:\n(1) client.py: OANDABroker.__init__ に metrics=None オプション引数を追加。_record_api_metric() ヘルパーを新設。submit_order / cancel_order / get_account_info / get_open_trades / get_candles の各 HTTP 呼び出しで time.perf_counter() 計測 → observe_oanda_api_latency / inc_oanda_api_status を呼出。status 正規化: 2xx=success / None=timeout / 4xx=4xx / 5xx=5xx。\n(2) live_store.py: update_bar() の主 TF 更新パスで _last_primary_bar_time を使ったバー間隔計測 → observe_feature_staleness(primary_tf, age_sec) を呼出。初回バーはスキップ。\n(3) metrics.py: inc_oanda_api_status の status_code 引数型を int | str に拡張（正規化済み文字列を受け付けるため）。",
+      "verification": "test_get_account_info_records_latency_and_status / test_get_open_trades_records_latency_and_status / test_get_candles_records_latency_and_status / test_status_normalization_4xx / test_no_metrics_no_error / test_feature_staleness_recorded_on_second_bar / test_feature_staleness_not_called_for_aux_tf_bar の 7 テスト全 PASS。",
+      "regression_risk": "metrics=None 時は計装スキップで後方互換。broker の既存呼び出し（metrics 引数なし）は None 扱いで動作変化なし。"
+    },
+    {
+      "id": "DM-MISSED-DM314",
+      "severity": "low",
+      "area": "alerting",
+      "title": "FxEventBusDedupSpike に InMemory モードでは機能しない旨のコメントを追加",
+      "files_modified": [
+        "deploy/prometheus/alerting_rules.yml"
+      ],
+      "tests_added": [],
+      "summary": "FxEventBusDedupSpike アラートの直前に DM-MISSED-DM314 finding ID と説明コメントを追加。InMemoryEventBus では layer='redis' の dedup パスが通らないためこのアラートは Redis モード時のみ有効である旨を明記。コードの動作変更なし。",
+      "verification": "コメント追加のみのため自動テスト不要。alerting_rules.yml の YAML 構文は変更なし。",
+      "regression_risk": "なし（コメント追加のみ）"
+    },
+    {
+      "id": "QT-307_QT-317_DM-313",
+      "severity": "low",
+      "area": "ci",
+      "title": "parity.yml に unit tests 混在の意図・影響・将来計画のコメントを追加、重複統合宣言ファイルを作成",
+      "files_modified": [
+        ".github/workflows/parity.yml"
+      ],
+      "artifacts_created": [
+        "logs/audit/AUDIT-2026-0529-001/duplicates_consolidated.md"
+      ],
+      "tests_added": [],
+      "summary": "parity.yml:83 の 'Run unit tests' ステップ直前に QT-307/QT-317/DM-313 の finding ID・影響範囲・将来分離計画を明記したコメントを追加。3 finding は同一根因（parity.yml の unit テスト混在）のため duplicates_consolidated.md で重複統合を宣言。別ワークフロー分離（unit.yml 新設）は中規模タスクとして将来対応指針に記載。",
+      "verification": "コメント追加のみのため自動テスト不要。",
+      "regression_risk": "なし（コメント追加のみ）"
+    }
+  ],
+  "excluded_findings": [
+    {
+      "id": "DM-301",
+      "reason": "対象外（本セッション指示に含まれていない）"
+    },
+    {
+      "id": "DM-303",
+      "reason": "対象外（本セッション指示に含まれていない）"
+    },
+    {
+      "id": "DM-305",
+      "reason": "対象外（metrics.py コメント更新のみで優先度低）"
+    }
+  ]
+}

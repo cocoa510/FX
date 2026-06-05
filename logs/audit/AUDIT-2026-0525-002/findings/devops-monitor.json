@@ -1,0 +1,174 @@
+{
+  "agent": "devops-monitor",
+  "session": "AUDIT-2026-0525-002",
+  "date": "2026-05-25",
+  "scope": "回帰検証・修正不完全性・新規問題（dry-run、修正なし）",
+  "findings": [
+    {
+      "id": "DM-101",
+      "severity": "high",
+      "area": "dashboard",
+      "title": "DM-004 未修正: Dashboard が localhost:8000(main.py)固定のまま — 本番 UnifiedRunner を監視不能",
+      "description": "trading_platform/dashboard/app.py:36 の `API_BASE_URL = \"http://localhost:8000\"` はハードコードされたまま。前回監査 AUDIT-2026-0525-001 で DM-004 を high と評価し、verification.json で second team も `report_correct` と確認したが、fixes_applied.json / fixes_applied_r2_r4.json / fixes_applied_low.json のいずれにも DM-004 が含まれていない（未修正）。UnifiedRunner（本番経路 scripts/run_unified.py）は HTTP サーバを一切持たず /status /health /metrics エンドポイントが存在しないため、Dashboard は本番の Kill Switch 状態・ポジション・ヘルスチェック結果を参照できない。今回 DM-003 で HealthChecker を UnifiedRunner に配線したが、その状態が Dashboard に届く経路が依然存在しない。",
+      "evidence": [
+        "trading_platform/dashboard/app.py:36 — API_BASE_URL = \"http://localhost:8000\" (ハードコード)",
+        "trading_platform/dashboard/app.py:43 — fetch_status() が API_BASE_URL/status を requests.get",
+        "trading_platform/dashboard/app.py:53 — fetch_health() が API_BASE_URL/health を requests.get",
+        "scripts/run_unified.py — HTTP サーバ起動コードが一切存在しない",
+        "logs/audit/round_1/fixes_applied.json — DM-004 の記載なし（未修正確認）",
+        "logs/audit/round_1/verification.json:65 — claim: 'DM-004 dashboard cannot monitor production (high)', verdict: 'report_correct'",
+        "logs/audit/round_1/validation.json:16 — DM-004 high として記録"
+      ],
+      "suggested_fix": "1) .env.example に FTS_DASHBOARD_API_URL=http://localhost:8000 を追加し、app.py で os.getenv('FTS_DASHBOARD_API_URL', 'http://localhost:8000') を参照させる。2) UnifiedRunner 向けの軽量ステータス読み取り経路（StateManager / unified_runner.jsonl のファイル直読み、または UnifiedRunner に軽量 HTTP エンドポイントを追加）を実装する。3) ダッシュボードのサイドバーに「接続先 URL（環境変数 FTS_DASHBOARD_API_URL）が main.py(dev) 向けであり、UnifiedRunner(本番)では使用不可」の警告ラベルを表示する暫定措置を取る。",
+      "category": "incomplete_fix"
+    },
+    {
+      "id": "DM-102",
+      "severity": "high",
+      "area": "health_check / unified_runner",
+      "title": "event_bus prober が同期 health_status() を await しており常に TypeError → event_bus が常時 unhealthy (critical) となる偽陽性",
+      "description": "runner.py:324-328 の _event_bus_prober は `await _bus_ref.health_status()` を実行する。しかし trading_platform/core/event_bus/memory_adapter.py:253 の InMemoryEventBus.health_status() は `def health_status(self)` (同期メソッド) であり、dict を返す。同期メソッドを await すると `TypeError: object dict can't be used in 'await' expression` が発生し、`except Exception: return False` でキャッチされて prober は常に False を返す。`event_bus` は `critical=True` で登録されているため、PROBER_UNHEALTHY_THRESHOLD=3 回連続失敗（= PING_INTERVAL_SEC=10秒 × 3 = 30秒後）以降は `event_bus` が unhealthy、システム全体が unhealthy として HealthChecker.check_all() が報告する。redis_adapter.py:384 の RedisEventBus.health_status() も同期メソッドであり同様の問題がある。test_dm003_unified_runner_health_checker.py の動作テストは HealthChecker をモックするため、この await ミスマッチを検出できない。",
+      "evidence": [
+        "trading_platform/core/unified_runner/runner.py:324-328 — `async def _event_bus_prober() -> bool: ... return await _bus_ref.health_status()`",
+        "trading_platform/core/event_bus/memory_adapter.py:253 — `def health_status(self) -> dict[str, object]:` (async なし)",
+        "trading_platform/core/event_bus/redis_adapter.py:384 — `def health_status(self) -> dict[str, Any]:` (async なし)",
+        "trading_platform/core/monitoring/health_check.py:40 — PROBER_UNHEALTHY_THRESHOLD: int = 3",
+        "trading_platform/core/monitoring/health_check.py:43 — CRITICAL_COMPONENTS: frozenset[str] = frozenset({'redis', 'oanda', 'event_bus'})",
+        "tests/unit/test_dm003_unified_runner_health_checker.py:99-196 — HealthChecker をモック化しているため TypeError を検出できない"
+      ],
+      "suggested_fix": "1) runner.py の _event_bus_prober を同期呼び出しに変更: `result = _bus_ref.health_status(); return bool(result.get('healthy', False))`。2) または InMemoryEventBus / RedisEventBus の health_status() を `async def` に変更し、呼び出し側との一貫性を保つ。3) test_dm003 に実際の InMemoryEventBus を注入した統合テストを追加し、prober が TypeError なく True を返すことを検証する。",
+      "category": "new"
+    },
+    {
+      "id": "DM-103",
+      "severity": "medium",
+      "area": "audit_log / risk_supervisor / ptrc",
+      "title": "AuditLogger.record() が re-raise するため fire-and-forget タスクで未処理例外が発生しうる",
+      "description": "trading_platform/core/monitoring/audit_log.py:141 の `raise` は、`record()` が IO エラー等で失敗した場合に例外を再 raise する。一方、_fire_ptrc_audit (ptrc.py:92) と _fire_ks_audit (risk_supervisor.py:194) は `loop.create_task(_audit_logger.record(entry))` で fire-and-forget 起動するが、done callback を設定していない。タスクが例外で終了すると Python は 'Task exception was never retrieved' warning を stderr に出力するが、これは structlog ではなく Python runtime の警告であり、unified_runner.log に記録されない（RotatingFileHandler に届かない）。disk full / permission denied 等でAuditLogger が全失敗する状態になると、ログに残らない警告が連続出力される。また re-raise と fire-and-forget は意味的に矛盾しており、承認された注文の audit 記録失敗が無音になりうる。",
+      "evidence": [
+        "trading_platform/core/monitoring/audit_log.py:135-141 — except Exception: logger.exception(...); raise",
+        "trading_platform/core/risk_engine/ptrc.py:92 — `loop.create_task(_audit_logger.record(entry))` (done callback なし)",
+        "trading_platform/core/unified_runner/risk_supervisor.py:194 — `loop.create_task(_audit_logger.record(entry))` (done callback なし)",
+        "scripts/run_unified.py — asyncio.set_exception_handler の設定なし"
+      ],
+      "suggested_fix": "1) AuditLogger.record() の except ブロックから raise を削除し、ログ記録のみに留める（fire-and-forget パターンとの整合）。2) または create_task に done_callback を設定し、タスク例外を structlog で記録する: `t = loop.create_task(...); t.add_done_callback(lambda fut: logger.error(...) if fut.exception() else None)`。3) 推奨は 1) + 別途 AuditLogger 単体の write 失敗をメトリクス (Counter) で計上する。",
+      "category": "new"
+    },
+    {
+      "id": "DM-104",
+      "severity": "medium",
+      "area": "watchdog / env_config",
+      "title": "DM-006 で追加した FTS_WATCHDOG_WEBHOOK_URL が .env.example に未記載 — 運用者がopt-in webhook の存在を知れない",
+      "description": "scripts/runner_watchdog.ps1:62 で `$hook = $env:FTS_WATCHDOG_WEBHOOK_URL` を参照し、設定時に Slack/Teams 等の webhook へ POST する。この環境変数は DM-006 (commit 8deceed) で新設されたが、.env.example に記載がない。FTS のすべての環境変数は .env.example に集約する規約（CLAUDE.md 参照）になっており、記載漏れは運用者が webhook 通知機能の存在を発見できないことを意味する。watchdog は PowerShell スクリプトのため Python の PlatformSettings バリデーションも通らず、設定ミスが実行時まで判明しない。",
+      "evidence": [
+        "scripts/runner_watchdog.ps1:62 — `$hook = $env:FTS_WATCHDOG_WEBHOOK_URL`",
+        ".env.example:1-74 — FTS_WATCHDOG_WEBHOOK_URL の記載なし（全文確認済み）",
+        "commit 8deceed — DM-006 実装。.env.example の変更なし"
+      ],
+      "suggested_fix": ".env.example に以下を追加する（watchdog セクション）:\n```\n# ----------------------------\n# Watchdog アラート（DM-006）\n# ----------------------------\n# 設定するとダウン検知・再起動・タスク無効化を Slack/Teams 等の webhook に POST する\n# 未設定でも logs/watchdog_alerts.jsonl への記録は常時行われる\nFTS_WATCHDOG_WEBHOOK_URL=\n```",
+      "category": "new"
+    },
+    {
+      "id": "DM-105",
+      "severity": "medium",
+      "area": "watchdog / runbook",
+      "title": "restart_loop.md の「5 回以上」がスクリプトの MaxConsecutiveFailures=3 と矛盾",
+      "description": "docs/runbook/restart_loop.md:44 に「短時間に 5 回以上の再起動が起きていれば」という記述があるが、scripts/runner_watchdog.ps1:24 の実際の `$MaxConsecutiveFailures = 3` と矛盾している。watchdog は 3 回連続失敗でタスクを自動無効化するため、オペレーターが「5 回」を目安に対応すると 3 回到達時の自動無効化を見落とす可能性がある。DM-010 (commit 81c7b5e) でランブックの bash→PowerShell 変換・ログパス修正は実施されたが、この閾値の不整合は修正されていない。",
+      "evidence": [
+        "docs/runbook/restart_loop.md:44 — \"短時間に 5 回以上の再起動が起きていれば\"",
+        "scripts/runner_watchdog.ps1:24 — `$MaxConsecutiveFailures = 3`",
+        "scripts/runner_watchdog.ps1:95 — `if ($count -ge $MaxConsecutiveFailures)` でタスク無効化"
+      ],
+      "suggested_fix": "docs/runbook/restart_loop.md:44 の「5 回以上」を「3 回以上（MaxConsecutiveFailures=$MaxConsecutiveFailures）」に修正し、watchdog.ps1 の変数と連動する旨を注記する。",
+      "category": "new"
+    },
+    {
+      "id": "DM-106",
+      "severity": "medium",
+      "area": "monitoring / prometheus",
+      "title": "UnifiedRunner 本番経路では Prometheus メトリクスが scrape 不可能 — アラートルール全件が dead alert",
+      "description": "deploy/prometheus/README.md:27-30 に「/metrics は main.py (FastAPI) 経由でのみ公開される」と記載され、DM-008 でその旨が修正された。しかし、本番経路 UnifiedRunner はメトリクスを MetricsCollector に蓄積しているが、それを expose する HTTP エンドポイントが存在しない。Prometheus は main.py(dev) を scrape 対象とする設計となっているが、main.py は常時起動しておらず（UnifiedRunner が本番）、alerting_rules.yml の全 10 件のアラートルール（FxKillSwitchTriggered / FxCircuitBreakerTriggered 等）は本番環境では機能しない。特に FxKillSwitchTriggered / FxPositionReconcilerMismatch（severity: critical）が発火しない状態は重大なリスク監視の空白である。DM-008 は README の誤記を修正したが、根本問題（本番メトリクス露出の欠如）は未解決のまま accepted 状態になっている。",
+      "evidence": [
+        "deploy/prometheus/README.md:27-30 — UnifiedRunner は /metrics を公開しない旨を明記",
+        "scripts/run_unified.py — prometheus_client.start_http_server / make_wsgi_app の呼び出しなし",
+        "deploy/prometheus/alerting_rules.yml:12-157 — 全 10 アラートが fx_* メトリクスを参照（scrape不可）",
+        "logs/audit/round_1/fixes_applied_low.json — DM-008 fix: README修正のみ（root causeは未修正）"
+      ],
+      "suggested_fix": "1) run_unified.py の async_main() に `from prometheus_client import start_http_server; start_http_server(int(os.getenv('PROMETHEUS_PORT', '9090')))` を追加し、UnifiedRunner 起動時にメトリクスを expose する。2) または MetricsCollector を Prometheus textfile_collector 形式でファイル出力し、Prometheus に node_exporter textfile_collector ディレクトリを設定する。3) .env.example に PROMETHEUS_PORT=9090 を追加する。",
+      "category": "incomplete_fix"
+    },
+    {
+      "id": "DM-107",
+      "severity": "medium",
+      "area": "audit_log",
+      "title": "PTRC 承認（approved=True）ケースが Audit Log に記録されない — 発注根拠の監査証跡が不完全",
+      "description": "ptrc.py:293-299 の承認パスは structlog INFO のみ記録し、_fire_ptrc_audit を呼ばない。CLAUDE.md の「リスク拒否理由は必ずAudit Logに記録する」は満たされているが、注文が承認されて実際に発注された根拠（どのリスクチェックをどのパラメータで通過したか）が Audit Log に残らない。FX live取引では承認された注文の根拠も監査証跡として重要。特に Audit Log を事後の法的/内部監査対象とする場合、REJECT のみ記録は不完全な証跡となる。",
+      "evidence": [
+        "trading_platform/core/risk_engine/ptrc.py:293-299 — all_passed=True のとき logger.info のみ、_fire_ptrc_audit 呼び出しなし",
+        "trading_platform/core/risk_engine/ptrc.py:313-318 — all_passed=False のときのみ _fire_ptrc_audit 呼び出し",
+        "trading_platform/fx_trading_system_spec.md (または CLAUDE.md) — 「Audit Log: PTRC判定・リスク拒否・注文根拠」"
+      ],
+      "suggested_fix": "ptrc.py の承認パス（all_passed=True）にも _fire_ptrc_audit(action='ptrc_approved', ...) を追加する。ただし承認はトレード頻度に比例してファイルサイズが増大するため、action='ptrc_approved' を DEBUG レベルで記録するか、承認ケースは別カテゴリ（AuditCategory.ORDER_ACTION）で要約記録する設計とする。",
+      "category": "new"
+    },
+    {
+      "id": "DM-108",
+      "severity": "low",
+      "area": "watchdog / monitoring",
+      "title": "watchdog_alerts.jsonl が Dashboard・Python 監視コードから一切消費されていない",
+      "description": "DM-006 (commit 8deceed) で runner_watchdog.ps1 は logs/watchdog_alerts.jsonl への構造化アラート追記を実装した。README および commit メッセージでは「監視/Prometheus textfile/ダッシュボードが tail・scrape 可能」と述べているが、実際には Dashboard (app.py) も Python 監視コードも watchdog_alerts.jsonl を参照していない。Prometheus textfile_collector も設定されていない（DM-106参照）。結果として watchdog_alerts.jsonl は書き込まれるが読まれず、能動的通知は FTS_WATCHDOG_WEBHOOK_URL のみに依存する（DM-104: .env.example 未記載）。",
+      "evidence": [
+        "scripts/runner_watchdog.ps1:34 — $AlertFile = Join-Path $LogDir 'watchdog_alerts.jsonl'",
+        "trading_platform/dashboard/app.py — watchdog_alerts, watchdog_alert の参照なし（全文検索確認）",
+        "trading_platform/ — watchdog_alerts を読むコードなし（grep 確認）",
+        "deploy/prometheus/ — textfile_collector 設定なし"
+      ],
+      "suggested_fix": "1（短期）: Dashboard のサイドバーに watchdog_alerts.jsonl の直近 N 件を表示するパネルを追加する（ファイル直読み）。2（中期）: Prometheus textfile_collector + node_exporter でメトリクス化し、alerting_rules.yml に FxWatchdogTaskDisabled アラートを追加する。",
+      "category": "new"
+    },
+    {
+      "id": "DM-109",
+      "severity": "low",
+      "area": "health_check",
+      "title": "HealthChecker のヘルス状態が UnifiedRunner の本番動作ループ（run()）から参照されていない",
+      "description": "HealthChecker は initialize() で start() され、10 秒ごとに prober を実行しているが、runner.py の run() メインループはその結果を参照しない。例えば OANDA が OANDA_OUTAGE_THRESHOLD_SEC=60 秒途絶すると HealthChecker は RiskAlertEvent を publish するが、run() ループ自体はヘルス状態を定期確認せず、unhealthy であっても通常の poll を継続する。HealthChecker が自動停止を誘発する経路は存在しない（Kill Switch は GlobalRiskSupervisor 経由）。これは設計上の判断（監視と実行の分離）としてあり得るが、OANDA 途絶中の発注試行が継続されるリスクについて明示的なコメントが runner.py にない。",
+      "evidence": [
+        "trading_platform/core/unified_runner/runner.py — run() メソッドに self._health_checker 参照なし",
+        "trading_platform/core/monitoring/health_check.py:391-429 — _track_oanda_outage / _publish_oanda_outage_alert で RiskAlertEvent を publish",
+        "trading_platform/core/unified_runner/runner.py:305-330 — HealthChecker 初期化。run() ループへの状態フィードバックなし"
+      ],
+      "suggested_fix": "設計判断として acceptable であれば、runner.py の run() または _check_daily_reset() ループ内にコメントで「HealthChecker の unhealthy は RiskAlertEvent 経由で GlobalRiskSupervisor に通知される。run() は HealthChecker 状態を直接参照しない（監視と実行の分離）」を明記する。リスクを下げるなら、unhealthy が N 分継続した場合にシャットダウンフラグを立てる機構を追加する。",
+      "category": "new"
+    },
+    {
+      "id": "DM-110",
+      "severity": "low",
+      "area": "regression_check",
+      "title": "B-001 修正（datetime.UTC → timezone.utc）の同種バグ残存なし — 確認済み",
+      "description": "B-001 修正（risk_supervisor.py の datetime.now(datetime.UTC)）の同種バグが他ファイルに残存しないことを grep で確認した。trading_platform/ および scripts/ 配下（除: .venv, __pycache__, test_）に datetime.UTC の使用は存在しない。B-001 は修正済みで回帰なし。",
+      "evidence": [
+        "grep -rn 'datetime\\.UTC' trading_platform/ scripts/ — 結果: .venv/Lib/site-packages/sqlalchemy (外部ライブラリ) のみ",
+        "trading_platform/core/unified_runner/risk_supervisor.py:191 — `datetime.now(timezone.utc).isoformat()` （修正済み）"
+      ],
+      "suggested_fix": "対応不要（確認済み）。",
+      "category": "regression"
+    }
+  ],
+  "summary": {
+    "total_findings": 10,
+    "severity_breakdown": {
+      "critical": 0,
+      "high": 2,
+      "medium": 4,
+      "low": 4
+    },
+    "category_breakdown": {
+      "incomplete_fix": 2,
+      "regression": 1,
+      "new": 7
+    },
+    "dm001_003_wiring_verification": "DM-001(AuditLogger DI) / DM-003(HealthChecker start/stop) の配線は runner.py:294-330 で正しく実装されており、PTRC 拒否 (ptrc.py:209/249/314) / KS 発動 (risk_supervisor.py:997-1002) への呼び出しパスも実コードで確認。dead path なし。ただし DM-102 の event_bus prober await ミスマッチが HealthChecker の偽陽性を引き起こしている。",
+    "dm004_status": "未修正。fixes_applied.json / r2_r4 / low のいずれにも含まれていない。本番 UnifiedRunner 監視不能の状態が継続中（high）。",
+    "b001_regression_check": "datetime.UTC の同種バグは trading_platform / scripts 全域に残存なし（DM-110）。"
+  }
+}

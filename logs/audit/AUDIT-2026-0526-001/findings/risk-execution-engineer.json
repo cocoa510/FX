@@ -1,0 +1,77 @@
+{
+  "agent": "risk-execution-engineer",
+  "summary": "PTRC・Execution Engine 7コンポーネント・Kill Switch・State Store を file:line で精査。直近 AUDIT-0525-001/002 + INC-0526-001 の修正（RE-001 動的換算器配線、RE-101 fail-safe、INC-0526 restore R1/R2 fan-out 遮断、supervisor REJECT 監査ログ、exposure_near_cap 検知）は実コードで成立しており退行・残存 latent REJECT は確認されなかった。新規に critical 0件・high 1件（stale 回収失敗時の幻エクスポージャー残留＝INC-0526 と同型の未修復経路）・medium 2件・low 2件を検出。幻エクスポージャー（OANDA open=0 で内部 long 残留）の中核経路は restore 側では解消済みだが、稼働中 stale 回収失敗時に supervisor.total_exposure が減算されず自己修復しない経路が残る。",
+  "findings": [
+    {
+      "id": "RE-201",
+      "severity": "high",
+      "confidence": "high",
+      "area": "execution/risk-state-reconciliation",
+      "title": "stale 回収失敗時に supervisor.total_exposure が減算されず幻エクスポージャーが恒久残留（自己修復不能）",
+      "description": "StrategySlot._recover_stale_trade_pnl は、OANDA trade が CLOSED と確認できた場合のみ risk_supervisor.record_close() を呼んで total_exposure / strategy.exposure を減算する（strategy_slot.py:1675-1693）。一方、get_trade() が None / 非CLOSED（PENDING/OPEN/未知）を返した場合（1714-1720 の else 分岐）や例外発生時（1721-1727）は record_close を呼ばずに関数末尾（1729-1733）で self.state.open_trade_id 等を None クリアする。結果、(a) supervisor.account_state.total_exposure と当該 StrategyRiskState.exposure はエントリー時/restore 時に積んだ units を保持したまま、(b) slot 側は trade_id を失い再回収を試みる手段を喪失する。これは INC-2026-0526-001 の中核症状（OANDA open_positions=0 なのに内部 exposure が残り live 新規が total_exposure 上限で REJECT される）と同型の経路で、restore 経路（R1/R2）では解消済みだが『稼働中の定期照合（_reconcile_live_positions, runner.py:907-946）が divergence A で _recover_stale_trade_pnl をトリガし、その回収が失敗するケース』で再発しうる。回収失敗後は exposure_near_cap 警告（runner.py:793-819）で可視化されるのみで自動是正されず、複数戦略で蓄積すると 100000 units 上限に張り付き全 live 新規が沈黙する。tests/unit/test_runner_periodic_reconcile.py は _recover_stale_trade_pnl を AsyncMock で差し替えており（86行）、回収失敗時の exposure 減算は未検証。",
+      "evidence": [
+        "trading_platform/core/unified_runner/strategy_slot.py:1675-1693",
+        "trading_platform/core/unified_runner/strategy_slot.py:1714-1733",
+        "trading_platform/core/unified_runner/runner.py:907-946",
+        "trading_platform/core/unified_runner/risk_supervisor.py:681-687",
+        "tests/unit/test_runner_periodic_reconcile.py:86,153-162"
+      ],
+      "suggested_fix": "_recover_stale_trade_pnl の回収失敗（非CLOSED / 例外）分岐でも、state クリアの前に supervisor の当該戦略 exposure を best-effort で減算する経路を設ける。CLAUDE.md『自動でポジションは閉じない』原則は OANDA への決済送信を禁じるもので、既に OANDA 側に存在しない（=決済済み or 幻）trade に対応する内部エクスポージャー会計の整合化は許容範囲。具体策: (a) 回収失敗時は trade_id をクリアせず次回照合で再試行できるよう温存する、または (b) divergence A 確定（OANDA trade map に存在しない）かつ回収不能と判定できた場合に risk_supervisor で当該 strategy.exposure 分を total_exposure から減算（record_close を pnl=0 で呼ぶ or 専用の clear_exposure(strategy_id) API）。いずれもアラートは継続発出する。回収失敗→exposure 残留→上限張り付きを再現する統合テストを追加。"
+    },
+    {
+      "id": "RE-202",
+      "severity": "medium",
+      "confidence": "high",
+      "area": "risk/ptrc-post",
+      "title": "PTRC-Post の総エクスポージャー判定が units/JPY の単位不一致で事実上 dead（Level2/Level3 exposure トリガ無効）",
+      "description": "PostTradeRiskControl.evaluate_fill は exposure_ratio = risk_state.total_exposure / portfolio.account_balance を HARD_LIMITS.max_total_exposure_ratio(=8.0) と比較する（ptrc_post.py:146-165, 172）。しかし risk_state.total_exposure は units 建て（GlobalRiskSupervisor / coordinator いずれも units 合計）で、account_balance は JPY 建て。例: 100000 units / 300000 JPY = 0.33 で 8.0 を絶対に超えず、exposure 起因の Level2(entry_stop) / Level3(exposure_and_loss_critical 等) が発火しない。これは PTRC._check_total_exposure が FTS-RX-R5-001 で notional 換算へ修正したのと同じ単位不一致バグが PTRC-Post 側に残存しているもの。緩和要因: PTRC-Post は本番 UnifiedRunner 経路では未配線（coordinator.py / main.py の dev/FastAPI 経路のみ）で、daily_loss と slippage トリガは正しく機能するため exposure 軸のみ dead。",
+      "evidence": [
+        "trading_platform/core/risk_engine/ptrc_post.py:146-165",
+        "trading_platform/core/risk_engine/ptrc_post.py:172-183",
+        "trading_platform/core/risk_engine/ptrc.py:657-668"
+      ],
+      "suggested_fix": "PTRC._resolve_reference_price + CurrencyConverter を用いて total_exposure を notional(account 通貨) に換算してから ratio を算出する、もしくは PTRC-Post の exposure 比較を units ベースの絶対上限（can_open_position と同じ max_total_exposure_units）に置き換える。後者なら portfolio.account_balance への除算をやめ supervisor の上限と整合させる。[change:spec] 相当のため方針確認を伴う。"
+    },
+    {
+      "id": "RE-203",
+      "severity": "medium",
+      "confidence": "medium",
+      "area": "risk/fx-rate-staleness",
+      "title": "橋渡しクロスレートが heartbeat 周期でしか再シードされず、非取引クロスのレート陳腐化中も REJECT せず古値で換算継続",
+      "description": "OandaCurrencyConverter は fail-safe（レート無→None→REJECT）契約だが、一度シードされたクロス（例 USD_JPY）はキャッシュに値が残る限り陳腐化していても convert() が古い mid を返す（currency_converter.py:159-181）。本番では _seed_fx_cross_rates が起動時 + heartbeat 周期（HEARTBEAT_INTERVAL_POLLS 毎、runner.py:1341）でしか再シードされず、橋渡しクロス自体が取引スロットに無い場合は per-bar の update_from_instrument（runner.py:1409）も走らない。急変時に数 poll サイクル古いレートで EUR_USD 等の exposure/margin/risk が評価され、最大で heartbeat 間隔分のレート乖離が PTRC 判定に混入する。fail-open（無評価通過）ではないため即時の安全機構 dead ではないが、INC-0526 メモリの『固定 USD_JPY=150 で誤評価』の弱い再来リスク。レート鮮度（最終更新時刻）の TTL/陳腐化検知が無い。",
+      "evidence": [
+        "trading_platform/core/risk_engine/currency_converter.py:159-188",
+        "trading_platform/core/unified_runner/runner.py:1013-1032",
+        "trading_platform/core/unified_runner/runner.py:1339-1341"
+      ],
+      "suggested_fix": "price_cache のエントリにタイムスタンプを付与し、一定 TTL を超えた橋渡しクロスは convert() で None を返して fail-safe REJECT に倒す（rate_stale を _ALERT_REASONS に追加し RiskAlert 可視化）。または橋渡しクロスを毎 poll サイクルでシードする（API コストは crosses 集合サイズに比例し小）。"
+    },
+    {
+      "id": "RE-204",
+      "severity": "low",
+      "confidence": "high",
+      "area": "risk/circuit-breaker-state-guard",
+      "title": "RiskState.is_circuit_breaker_active は __setattr__ ガード対象外で自動改善/誤代入から保護されていない",
+      "description": "RiskState は is_kill_switch_active を __setattr__ + set_kill_switch classmethod で構造的に保護する（risk.py:130-166）が、is_circuit_breaker_active は無防備で CircuitBreaker._trip/_cooldown/reset が直接代入する（circuit_breaker.py:117,166,172-173）。KS と同等の『安全機構を緩める方向の直接代入』に対する構造的ガードが CB には無い。CB は cooldown で自動解除される設計のため KS ほど致命的ではないが、Immutable/guarded 設計の一貫性が欠ける。実害は『LLM/自動改善が is_circuit_breaker_active=False を直接書いて CB を骨抜きにする』理論リスクに留まる。",
+      "evidence": [
+        "trading_platform/core/models/risk.py:123-140",
+        "trading_platform/core/risk_engine/circuit_breaker.py:117,166,172-173"
+      ],
+      "suggested_fix": "is_circuit_breaker_active も _ACCOUNT_GUARDED_FIELDS 同様に __setattr__ ガード対象へ追加し set_circuit_breaker(instance, value) classmethod 経由のみに限定する。CircuitBreaker 側の直接代入をその classmethod 呼出に置換。[change:spec] 相当だが挙動不変（経路を classmethod に通すだけ）。"
+    },
+    {
+      "id": "RE-205",
+      "severity": "low",
+      "confidence": "medium",
+      "area": "execution/idempotency",
+      "title": "FillProcessor 冪等性キーが broker_fill_id 欠落時に order_id フォールバックとなり、同一注文の部分約定（複数 fill）を重複吸収する恐れ",
+      "description": "process_fill の冪等性キーは (order_id, broker_fill_id) で重複 FillEvent を no-op 吸収する（fill_processor.py:116-135）。StrategySlot 経路は broker_fill_id=fill.broker_order_id or order.order_id を渡す（strategy_slot.py:704,1146）。broker_order_id が空（OANDA レスポンス欠落 / Paper 縮退）の場合キーは (order_id, order_id) に縮退する。本来 OANDA の 1 注文が複数 fill transaction（部分約定）で返るケースでは broker_fill_id が fill ごとに異なるべきだが、空フォールバック時は 2 件目の部分約定が『重複』とみなされ no-op 吸収され、2 件目以降のポジション加算が失われうる。現状 OANDA market 注文は基本フル fill のため実害は限定的で、broker_order_id が安定供給される限り発生しない。",
+      "evidence": [
+        "trading_platform/core/execution_engine/fill_processor.py:114-135",
+        "trading_platform/core/unified_runner/strategy_slot.py:701-705",
+        "trading_platform/core/execution_engine/coordinator.py:481-487"
+      ],
+      "suggested_fix": "部分約定対応を本格化する際は broker_fill_id に fill transaction ID（OANDA orderFillTransaction.id）を必ず用い、order_id フォールバックは『単一フル約定前提』を満たす経路に限定する旨をコメント/型で明示する。フォールバック発生時に WARN を出して可視化。"
+    }
+  ]
+}

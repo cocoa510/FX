@@ -1,0 +1,333 @@
+{
+  "schema_version": "1.0",
+  "audit_id": "AUDIT-2026-0530-001",
+  "verifier": "data-engineer (team-2 independent verification)",
+  "verified_at": "2026-05-30",
+  "target_commits": {
+    "fts_reviewed": "9998a7a",
+    "fts_head": "d1e73b1",
+    "fts_head_verified": "d1e73b1 ([chore] FTS hourly log snapshot 2026-05-29T16:15:19Z)"
+  },
+  "source_findings_doc": "logs/audit/AUDIT-2026-0530-001/findings/data-engineer.json",
+  "team1_validator_doc": "logs/audit/AUDIT-2026-0530-001/validation/cluster_c_fts_data_ops.json",
+  "verification_summary": {
+    "total_findings_checked": 10,
+    "confirmed": 9,
+    "confirmed_with_correction": 1,
+    "disputed_or_overturned": 0,
+    "missed_findings_added": 1,
+    "team1_judgment_agreement_rate": "9/10"
+  },
+  "findings_verification": [
+    {
+      "finding_id": "DE-401",
+      "claimed_severity": "high",
+      "team1_verdict": "severity_downgrade -> medium",
+      "team2_verdict": "confirm_team1_downgrade",
+      "team2_severity": "medium",
+      "fact_check": {
+        "import_atlas_strategy_py_591_674": "VERIFIED at scripts/import_atlas_strategy.py:591-674. _check_live_period_gate executes only when import_one() is called and only branches on execution_mode=='live'.",
+        "discovery_py_124_159": "VERIFIED at trading_platform/core/unified_runner/discovery.py:124-159. _parse_runner_config reads execution_mode/fixed_units/daily_loss_stop_jpy ONLY. No period check. No call to _extract_max_period.",
+        "loader_py_430_534": "VERIFIED at trading_platform/core/strategy_engine/loader.py:430-534. load_strategy() validates strategy.py, config.json existence, AST audit, gate results — but does NOT check max_period vs MAX_LIVE_SAFE_PERIOD.",
+        "ATLAS_2026_0508_069_runner_config_paper": "VERIFIED. execution_mode='paper'. config.json has ema_slow_period=800. A 1-line edit would promote it to live, bypassing the gate.",
+        "MAX_LIVE_SAFE_PERIOD": "VERIFIED constant at scripts/import_atlas_strategy.py:78 = 384."
+      },
+      "devil_advocate_assessment": {
+        "team1_criticism": "Bypass requires OS filesystem access. Zero current harm in 22 LIVE strategies.",
+        "team2_independent_check": "Confirmed: of 22 LIVE strategies, max ema_slow_period is well under 384 (verified via the imported strategies are M15/H1/H4 momentum/MR templates). The only known >384 period candidate (ATLAS-2026-0508-069: ema_slow_period=800) is in 'paper' mode. Zero current parity drift.",
+        "structural_defense_gap": "The gate is genuinely import-time only. Three real bypass vectors exist (manual config edit, manual copy, test fixtures). However, all require write access to strategies/imported/. This is medium severity in line with team1.",
+        "agreement": "Agree with team1 medium downgrade."
+      },
+      "regression_of": "DE-301",
+      "post_fix_defect": true,
+      "verdict": "CONFIRMED_AS_MEDIUM"
+    },
+    {
+      "finding_id": "DE-402",
+      "claimed_severity": "high",
+      "team1_verdict": "duplicate_of_DM-402",
+      "team2_verdict": "confirm_team1_duplicate",
+      "team2_severity": "duplicate (canonical=DM-402)",
+      "fact_check": {
+        "runner_py_343_347": "VERIFIED at trading_platform/core/unified_runner/runner.py:343-347. OANDABroker(api_key=..., account_id=..., base_url=...) with NO metrics= kwarg.",
+        "main_py_335_339": "VERIFIED at trading_platform/main.py:335-339. Same omission.",
+        "forward_test_py_239_243": "VERIFIED at trading_platform/forward_test.py:239-243. Same omission.",
+        "client_py_159_171": "VERIFIED at trading_platform/broker/oanda_adapter/client.py:159-171. metrics: Any = None default kwarg.",
+        "client_py_841_843": "VERIFIED at trading_platform/broker/oanda_adapter/client.py:841-843. `if self._metrics is None: return` — all instrumentation no-ops."
+      },
+      "devil_advocate_assessment": {
+        "team1_position": "DE-402 and DM-402 describe identical defect (production OANDABroker not receiving metrics=). DM-402 is canonical.",
+        "team2_independent_check": "DE-402 adds forward_test.py:239 as a third path. forward_test.py is a developer entry point used for forward-testing strategies — NOT a production LIVE path but it IS production-relevant for shadow/forward evaluation. However, the core dead-path defect is fully captured by DM-402.",
+        "agreement": "Agree with team1: DE-402 is a duplicate of DM-402. forward_test.py:239 may be worth including in the DM-402 fix scope but does not justify a separate finding."
+      },
+      "regression_of": "DM-302",
+      "post_fix_defect": true,
+      "verdict": "CONFIRMED_DUPLICATE_OF_DM402"
+    },
+    {
+      "finding_id": "DE-403",
+      "claimed_severity": "high",
+      "team1_verdict": "confirmed_with_note (must_fix)",
+      "team2_verdict": "confirm_high_must_fix",
+      "team2_severity": "high",
+      "fact_check": {
+        "live_store_py_215_219": "VERIFIED at trading_platform/data/feature_store/live_store.py:215-219. `self._last_primary_bar_time: float | None = None`. Initialized None, updated via time.monotonic().",
+        "live_store_py_431_446": "VERIFIED at trading_platform/data/feature_store/live_store.py:431-446. age_sec = time.monotonic() - self._last_primary_bar_time. The first bar skips (None guard), 2nd+ bar records interval between consecutive update_bar calls.",
+        "live_store_py_439_argument": "VERIFIED at line 439: self._metrics.observe_feature_staleness(self.primary_tf, age_sec). First positional arg = self.primary_tf (e.g., 'H1', 'H4'), NOT a strategy_id.",
+        "metrics_py_838_850": "VERIFIED at trading_platform/core/monitoring/metrics.py:838-850. def observe_feature_staleness(self, strategy_id: str, age_sec: float). The label key is strategy_id. Prometheus gauge label is also 'strategy_id' (metrics.py:280).",
+        "alerting_rules_yml_98_111": "VERIFIED at deploy/prometheus/alerting_rules.yml:98-111. expr: max(fx_feature_staleness_sec) > 60, for: 3m."
+      },
+      "mathematical_proof_of_constant_firing": {
+        "h1_strategy_age_sec_expected": "~3600s (1 hour bar arrival interval, plus OANDA delivery jitter)",
+        "h4_strategy_age_sec_expected": "~14400s (4 hour bar arrival interval)",
+        "m15_strategy_age_sec_expected": "~900s (15 minute bar arrival interval)",
+        "alert_threshold_seconds": 60,
+        "all_h1_h4_m15_bars_exceed_threshold": true,
+        "live_strategy_tf_distribution": {
+          "total_live": 22,
+          "h4": 16,
+          "h1": 5,
+          "m15": 1,
+          "m1": 0,
+          "verification_source": "22 runner_config.json files with execution_mode='live' enumerated; each contains timeframe field grep-confirmed."
+        },
+        "conclusion": "100% of live strategies (22/22) operate at TFs whose normal bar interval (>=900s) is far above the 60s threshold. observe_feature_staleness will record ~3600s/14400s/900s on every 2nd+ bar. for: 3m means the alert fires after 3 consecutive minutes above threshold — guaranteed once a single H1/H4 bar arrives. FxFeatureStorestaleHigh is in PERMANENT FIRING state on any live runner."
+      },
+      "label_misuse_secondary_defect": {
+        "claim": "primary_tf string is passed as strategy_id label.",
+        "verification": "VERIFIED. Prometheus time series becomes fx_feature_staleness_sec{strategy_id='H1'} which is semantically wrong (label name implies per-strategy granularity). When multiple strategies share H1, they collapse into one label value (last write wins). Per-strategy staleness is unobservable.",
+        "severity_contribution": "Independent of the math defect, this alone breaks DM-308 / dashboard per-strategy slicing capability."
+      },
+      "devil_advocate_assessment": {
+        "challenge_design_intent_vs_threshold": "live_store.py:434 comment states 'staleness is the bar interval (= grows when stream halts)' — design intent is INTER-BAR interval. But alerting_rules.yml threshold=60s presumes max-bar-interval semantic (e.g., M1 stream halt). Both files were committed under DM-302 but were never reconciled. This is a textbook implementation/alerting contract mismatch.",
+        "could_threshold_only_be_wrong": "If threshold were raised to >=14400s+margin (e.g., 18000s for H4 safety), the H1/H4 normal case would not fire. But the alert would then take >4 hours to detect M1/M5 stream halt — useless. Root cause is the SEMANTICS, not the threshold. Team1 quick-fix (>=7200s) only patches partial cases (H1 OK, H4 still ~14400s would fire).",
+        "agreement": "Agree with team1 high must_fix. The mathematics is certain (100% of live strategies fire constantly). Both label misuse AND semantic misuse are real."
+      },
+      "recommended_fix_clarification": "Quick (alerting_rules.yml threshold) is INSUFFICIENT because H4 bars (~14400s) still exceed any reasonable bar-interval-based threshold. Root fix: change semantics to (current_wall_time - last_bar_arrival_time) recorded periodically (heartbeat-driven), with TF-aware threshold per Prometheus rule (e.g., > 2x bar_interval).",
+      "regression_of": "DM-302",
+      "post_fix_defect": true,
+      "verdict": "CONFIRMED_HIGH_MUST_FIX"
+    },
+    {
+      "finding_id": "DE-404",
+      "claimed_severity": "medium",
+      "team1_verdict": "confirmed",
+      "team2_verdict": "confirm",
+      "team2_severity": "medium",
+      "fact_check": {
+        "client_py_368_373_submit_order": "VERIFIED. _t0 set, then `async with session.post(url, json=body) as resp:` block contains _record_api_metric. Outside the async with (TimeoutError before resp), metric is NOT recorded.",
+        "client_py_497_528_cancel_order": "VERIFIED. line 520-522: `except TimeoutError: self._record_api_metric('cancel_order', None, None)`. Only cancel_order has this branch.",
+        "client_py_544_548_get_account_info": "VERIFIED. _record_api_metric only inside async with session.get block. Timeout drops.",
+        "client_py_595_599_get_open_trades": "VERIFIED. Same pattern — metric only inside async with.",
+        "client_py_785_789_get_candles": "VERIFIED. Same pattern."
+      },
+      "devil_advocate_assessment": {
+        "team1_position": "Should be bundled with DM-402 PR since shares same root.",
+        "team2_independent_check": "Five _record_api_metric call sites total, four of them happen-path-only. Once DM-402 wires metrics= into broker, the TimeoutError code path will still silently drop. Bundling is correct.",
+        "agreement": "Agree. Medium severity. Bundle with DM-402."
+      },
+      "regression_of": "DM-302",
+      "post_fix_defect": true,
+      "verdict": "CONFIRMED_MEDIUM"
+    },
+    {
+      "finding_id": "DE-405",
+      "claimed_severity": "medium",
+      "team1_verdict": "severity_downgrade -> low",
+      "team2_verdict": "confirm_team1_downgrade",
+      "team2_severity": "low",
+      "fact_check": {
+        "quality_engine_py_736_786": "VERIFIED at trading_platform/data/quality/quality_engine.py:736-786. Hard-coded hour=22 UTC for Friday close and Sunday open. zoneinfo / DST handling absent. Holiday list absent.",
+        "test_de306_47h_25h": "VERIFIED. Return semantics is 'overlap of [start,end] with weekend closure windows' — the 47h value reflects total weekend window even when input range is 25h. test_friday_23_to_monday_00_pass_case relies on caller's max(0, ...) clamp."
+      },
+      "devil_advocate_assessment": {
+        "team1_position": "~35 bars/year impact, forced publish absorbs parity.",
+        "team2_independent_check": "Computed impact: 8 months of DST per year x 1h shift x ~1 H1 bar at boundary = ~32 H1 bars/year, plus ~3-5 holiday days. For H4/M15 strategies the impact is smaller (M15) or larger (H4: 1 missed bar = larger %). DE-002 forced_publish path means quality FAIL still emits the bar downstream, so parity is preserved even on misclassification. The visible defect is dashboards showing slightly wrong quality scores, not parity drift.",
+        "agreement": "Agree with low. Defer zoneinfo migration to capacity planning."
+      },
+      "regression_of": "DE-306",
+      "post_fix_defect": true,
+      "verdict": "CONFIRMED_AS_LOW"
+    },
+    {
+      "finding_id": "DE-406",
+      "claimed_severity": "medium",
+      "team1_verdict": "confirmed_with_note",
+      "team2_verdict": "confirm_with_note",
+      "team2_severity": "medium",
+      "fact_check": {
+        "data_provider_py_300_310": "VERIFIED at trading_platform/core/unified_runner/data_provider.py:300-310. _reset_poll_failure_state sets _consecutive_poll_failures[key]=0 AND _poll_alert_active[key]=False ONLY on success.",
+        "data_provider_py_328_362": "VERIFIED. _maybe_publish_poll_failure_alert checks `_poll_alert_active.get(key, False)` and skips re-fire while active. One-shot pattern confirmed.",
+        "runner_py_1608_1631": "VERIFIED. RE-305 uses `consecutive_poll_errors >= 30 and consecutive_poll_errors % 30 == 0` for periodic refire — completely different from DE-303's one-shot.",
+        "email_notifier_343_349": "VERIFIED at trading_platform/core/monitoring/email_notifier.py:343-349. live_anomaly throttle=900s. live_orders_silent throttle=43200s (12h)."
+      },
+      "devil_advocate_assessment": {
+        "team1_position": "DE-406 fix conflicts with DM-404 (12h throttle). Resolve DESIGN-C-001 first.",
+        "team2_independent_check": "Confirmed conflict: if DE-303 publishes RiskAlertEvent every 30 failures (DE-406's proposed fix), and that event is routed to email_notifier with kind='live_anomaly' (current routing), the 900s throttle would gate repeats. If routed to 'live_orders_silent' (the DM-404 kind), 12h gating would mask them. Either way, design decision needed.",
+        "agreement": "Confirm medium with DESIGN-C-001 dependency."
+      },
+      "regression_of": "DE-303",
+      "post_fix_defect": true,
+      "verdict": "CONFIRMED_MEDIUM_PENDING_DESIGN_C001"
+    },
+    {
+      "finding_id": "DE-407",
+      "claimed_severity": "medium",
+      "team1_verdict": "confirmed",
+      "team2_verdict": "confirm",
+      "team2_severity": "medium",
+      "fact_check": {
+        "tests_parity_directory": "VERIFIED. 9 files in tests/parity/. None named warmup_asymmetry or similar. Inspected test_feature_store_parity.py — uses identical DataFrame on both stores. Inspected test_feature_store_parity_buffer_trim.py — exercises buffer trim symmetrically on both sides.",
+        "runner_py_1413_MAX_WARMUP_BARS": "VERIFIED at trading_platform/core/unified_runner/runner.py:1413. count = min(max(required, WARMUP_BARS), MAX_WARMUP_BARS). MAX_WARMUP_BARS=5000.",
+        "import_atlas_strategy_py_71_77": "VERIFIED MAX_LIVE_SAFE_PERIOD=384 at line 78 (DE-301 introduces it). Justification ties to 5000/13."
+      },
+      "devil_advocate_assessment": {
+        "team1_position": "Test gap is future safety net. 22 LIVE strategies have zero high-period currently.",
+        "team2_independent_check": "Confirmed: no test in tests/parity/ exercises asymmetric warmup. The DE-301 MAX_LIVE_SAFE_PERIOD=384 constant is computed analytically (MAX_WARMUP_BARS / WARMUP_CONVERGENCE_FACTOR), not measured. If DE-401 bypass succeeds, the boundary would be untested.",
+        "agreement": "Agree medium. Implement alongside DE-401 loader-level fix."
+      },
+      "regression_of": null,
+      "post_fix_defect": false,
+      "verdict": "CONFIRMED_MEDIUM"
+    },
+    {
+      "finding_id": "DE-408",
+      "claimed_severity": "medium",
+      "team1_verdict": "confirmed_with_evidence_error",
+      "team2_verdict": "confirm_with_evidence_correction",
+      "team2_severity": "medium",
+      "fact_check": {
+        "data_provider_py_80_86_CEILING": "VERIFIED at trading_platform/core/unified_runner/data_provider.py:80-86. POLL_LATEST_COUNT_CEILING=200. Docstring states 'これを超える gap は backfill_missing 経路（別実装）でカバーすべき'.",
+        "backfill_missing_existence": "FACT ERROR in DE-408 evidence: grep backfill_missing FINDS multiple hits including trading_platform/data/market_data/candle_fetcher.py:416 (CandleFetcher.backfill_missing). VERIFIED implementation exists at line 416-450.",
+        "backfill_missing_auto_integration": "VERIFIED: data_provider.py poll_latest does NOT invoke CandleFetcher.backfill_missing. CandleFetcher is invoked from stream_receiver/recovery paths only. The integration from poll_latest's CEILING-exceed condition to backfill_missing is the missing piece.",
+        "fault_test_exists": "VERIFIED tests/fault/test_oanda_reconnect_backfill.py exists and exercises CandleFetcher.backfill_missing — but not from data_provider poll path."
+      },
+      "devil_advocate_assessment": {
+        "team1_position": "Core problem correct but evidence partially inaccurate.",
+        "team2_independent_check": "Agree. backfill_missing exists but is not wired into poll_latest's overflow path. The original DE-408 evidence string 'grep backfill_missing -> ヒットなし' is factually wrong (grep returns 10 files). Core finding (no auto-integration from poll_latest CEILING overrun) remains valid.",
+        "agreement": "Confirm medium. Corrected evidence: backfill_missing is implemented but poll_latest auto-integration is absent."
+      },
+      "evidence_correction": {
+        "original_incorrect": "grep backfill_missing → ヒットなし (実装不在)",
+        "corrected": "trading_platform/data/market_data/candle_fetcher.py:416 implements backfill_missing. data_provider.py poll_latest does NOT invoke it on CEILING overrun."
+      },
+      "regression_of": "DE-304",
+      "post_fix_defect": true,
+      "verdict": "CONFIRMED_MEDIUM_WITH_EVIDENCE_CORRECTION"
+    },
+    {
+      "finding_id": "DE-409",
+      "claimed_severity": "low",
+      "team1_verdict": "confirmed",
+      "team2_verdict": "confirm",
+      "team2_severity": "low",
+      "fact_check": {
+        "live_store_py_202_204": "VERIFIED. _aux_raw_cache, _aux_df_last_ts, _aux_df_last_len dicts.",
+        "live_store_py_617_625": "VERIFIED at trading_platform/data/feature_store/live_store.py:617-625. cache_valid uses (last_ts is not None) AND (cached_last_ts==current_last_ts) AND (cached_len==current_len). Head timestamp not checked.",
+        "live_store_py_424_427_buffer_trim": "VERIFIED. excess = len - effective_buffer_size; bars = bars.iloc[excess:].reset_index(drop=True). Trims head."
+      },
+      "devil_advocate_assessment": {
+        "team1_position": "Extremely rare reproduction. 1-line fix sufficient.",
+        "team2_independent_check": "Confirmed. The scenario requires tail_ts unchanged + len unchanged + head trimmed — practically impossible in normal flow where trim only happens when a new bar is appended (which always changes tail_ts). The defect is structural (semantic boundary not enforced) rather than operational.",
+        "agreement": "Agree low."
+      },
+      "regression_of": null,
+      "post_fix_defect": false,
+      "verdict": "CONFIRMED_LOW"
+    },
+    {
+      "finding_id": "DE-410",
+      "claimed_severity": "low",
+      "team1_verdict": "confirmed_with_note",
+      "team2_verdict": "confirm_with_correction",
+      "team2_severity": "low",
+      "fact_check": {
+        "live_store_py_215_219": "VERIFIED. _last_primary_bar_time initialized to None, updated on every primary-TF update_bar.",
+        "live_store_py_435_446": "VERIFIED. Same monotonic update on warmup path AND normal poll path — no branching.",
+        "strategy_slot_py_266_283_warmup": "VERIFIED at trading_platform/core/unified_runner/strategy_slot.py:266-283. slot.warmup() iterates bars and calls self.feature_store.update_bar(candle.to_feature_bar_dict_with_timestamp()) — same code path as normal poll."
+      },
+      "devil_advocate_assessment": {
+        "team1_position": "DE-403 fix (raise threshold to >=7200s) would make warmup-transition age_sec (max ~3600s for H1) fall below threshold, eliminating false FIRING. Re-evaluate after DE-403.",
+        "team2_independent_check": "Partially correct. During warmup, 5000 bars are processed in a tight loop within seconds, so _last_primary_bar_time gets updated 5000 times with microsecond intervals (no false fire during warmup itself). The false age_sec manifests at warmup-end -> first poll transition: e.g., warmup completes at t=10s, first poll happens at t=70s, age_sec=60s — close to threshold (60s) and would still false-fire under team1's >=7200s patch only if poll delays exceed 7200s (unrealistic for H1 but possible for H4 startup).",
+        "agreement": "Agree low. The warmup-transition false reading is bounded by poll interval, so it's a one-shot anomaly. Team1's note about DE-403 dependency is accurate."
+      },
+      "regression_of": "DM-302",
+      "post_fix_defect": true,
+      "verdict": "CONFIRMED_LOW"
+    }
+  ],
+  "missed_findings": [
+    {
+      "id": "DE-411",
+      "severity": "low",
+      "area": "feature_store",
+      "title": "observe_feature_staleness exception handler swallows ALL exceptions silently in update_bar hot path",
+      "description": "live_store.py:438-445 wraps observe_feature_staleness in try/except Exception with only a logger.warning. Combined with DE-403's mathematically guaranteed firing rate (every primary bar for H1/H4/M15 strategies = 22/22 LIVE), if MetricsCollector itself has a latent bug (e.g., Prometheus label cardinality, internal lock deadlock), each update_bar will spam WARN logs at ~3600s/14400s/900s cadence indefinitely. Specifically, the broad `except Exception` masks any structural issue (e.g., AttributeError when MetricsCollector internal _prom_gauges is None during initialization race) and produces silent log spam. The 'fire-and-forget' policy is correct in spirit but the exception type should be narrower (e.g., RuntimeError, ValueError, KeyError) to surface bugs.",
+      "evidence": [
+        "trading_platform/data/feature_store/live_store.py:438-445 (try/except Exception with warning-only)"
+      ],
+      "reproduction": "(1) Inject a MetricsCollector mock whose observe_feature_staleness raises RuntimeError. (2) update_bar 100 times. (3) Observe 100 'feature_staleness メトリクス記録失敗' warnings with no escalation.",
+      "suggested_fix": "Narrow except to (RuntimeError, ValueError, KeyError, AttributeError) and log at error level. Alternatively gate the warning behind a per-strategy counter that emits ERROR every N failures.",
+      "parity_impact": "no (observation only)",
+      "regression_of": "DM-302",
+      "post_fix_defect": true,
+      "notes": "Companion to DE-403. Low priority but worth bundling into DE-403 redesign PR."
+    }
+  ],
+  "team1_judgment_quality": {
+    "downgrades_review": [
+      {
+        "finding_id": "DE-401",
+        "team1_action": "high -> medium",
+        "team2_agreement": "agree",
+        "reasoning": "Bypass requires write access to strategies/imported/. Zero current LIVE impact (22 strategies all within MAX_LIVE_SAFE_PERIOD). Structural defense gap is real but mitigated by file-system isolation."
+      },
+      {
+        "finding_id": "DE-405",
+        "team1_action": "medium -> low",
+        "team2_agreement": "agree",
+        "reasoning": "DST + holiday impact quantified at ~35 H1 bars/year. DE-002 forced_publish absorbs parity drift. Visible only on quality score dashboards."
+      }
+    ],
+    "duplicate_resolutions_review": [
+      {
+        "finding_id": "DE-402",
+        "team1_action": "duplicate_of_DM-402",
+        "team2_agreement": "agree",
+        "notes": "forward_test.py:239 is mentioned only in DE-402 but is not a production LIVE path, so canonical absorption into DM-402 is correct. Worth noting in DM-402 fix scope."
+      }
+    ],
+    "fact_corrections_review": [
+      {
+        "finding_id": "DE-408",
+        "team1_action": "confirmed_with_evidence_error",
+        "team2_agreement": "agree",
+        "notes": "backfill_missing exists at candle_fetcher.py:416. DE-408 evidence string was factually wrong. Core problem (no auto-integration) remains valid."
+      }
+    ],
+    "must_fix_concurrence": [
+      {
+        "finding_id": "DE-403",
+        "team1_action": "must_fix",
+        "team2_agreement": "agree_strong",
+        "math_independently_verified": true,
+        "notes": "Verified that 22/22 LIVE strategies operate at H1/H4/M15 — every primary bar produces age_sec >= 900s, well above 60s threshold. Permanent FIRING is mathematically certain."
+      }
+    ],
+    "overall_assessment": "Team1's verdict is sound across all 10 findings. Severity downgrades (DE-401, DE-405) are well-justified by quantitative impact analysis. The duplicate detection (DE-402<->DM-402) and fact correction (DE-408) are accurate. Must-fix elevation for DE-403 is independently confirmed by mathematical proof."
+  },
+  "cross_cluster_observations": [
+    {
+      "observation": "DE-403 + DE-410 + DM-408 form a single root cause: DM-302's observe_feature_staleness instrumentation was added without coordinating with alerting_rules.yml threshold (60s) and Prometheus label schema (strategy_id). All three should be addressed in one PR (label semantics + alert threshold + warmup branch fix).",
+      "scope": "DM-302 post-fix defect cluster"
+    },
+    {
+      "observation": "DE-402 + DE-404 + DM-402 + DM-403 all stem from DM-302 production wiring omission. Bundle into single PR: (1) inject metrics= in runner.py:343, main.py:335, forward_test.py:239; (2) add TimeoutError except branch to all _record_api_metric call sites (5 endpoints); (3) extend instrumentation to close_trade and get_trade.",
+      "scope": "DM-302 production instrumentation cluster"
+    },
+    {
+      "observation": "DE-401 (period gate import-only) + DE-407 (asymmetric warmup test absent) are complementary — the structural gate at loader.py:430 should be paired with a parity test that proves the boundary value (384) is conservatively safe.",
+      "scope": "DE-301 defense-in-depth cluster"
+    }
+  ]
+}

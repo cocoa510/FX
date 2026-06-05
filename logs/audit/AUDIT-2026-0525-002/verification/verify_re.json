@@ -1,0 +1,51 @@
+{
+  "verifier": "risk-execution-engineer",
+  "mandate": "find_errors",
+  "session": "AUDIT-2026-0525-002",
+  "verification_date": "2026-05-26",
+  "method": "empirical_trace + live_runner_state_inspection + venv reproduction (.venv/Scripts/python.exe). 修正なし(dry-run)。",
+  "results": [
+    {
+      "id": "RE-101",
+      "report_claim": "本番で PreTradeRiskControl() が引数なし生成され OandaCurrencyConverter 未注入(0インスタンス化)、.env が OANDA_ENVIRONMENT=live のため Live 稼働中の ATLAS-2026-0511-059 (EUR_USD, execution_mode=live, fixed_units=10000) が毎エントリーでサイレント REJECT される。",
+      "verdict": "confirmed",
+      "corrected_severity": "high",
+      "empirical": "(1) コード経路: runner.py:291 と main.py:81 で PreTradeRiskControl() 引数なし生成を実読確認。grep 'OandaCurrencyConverter(' trading_platform/ = 0件 (currency_converter.py:94 にクラス定義のみ、注入箇所ゼロ)。.env: OANDA_ENVIRONMENT=live、ENV= 行なし (grep -cE '^ENV=' .env = 0)。0511-059/runner_config.json: execution_mode=live, instrument=EUR_USD, fixed_units=10000 を実読確認。 (2) venv 再現: OANDA_ENVIRONMENT=live で PreTradeRiskControl() を実構築 → _currency_converter=StaticCurrencyConverter, _unsafe_static_in_live=True。EUR_USD/GBP_USD/AUD_USD の擬似 SHORT 注文を evaluate() に通すと全て approved=False / reason='RE-001 fail-safe' (ptrc.py:218-254 経路) で REJECT。OandaCurrencyConverter を注入すると _unsafe_static_in_live=False となり RE-001 ゲートは不発火 → 根本原因が『動的換算器の未注入』である事を実証。 (3) Live 稼働実在: PID ファイル(logs/unified_runner.pid=7232)のプロセスが tasklist で alive。logs/unified_runner.log の unified_runner_ready イベントが 059 を live スロット22件の一つとして明示列挙(EUR_USD は live 群で 059 唯一)。slot_configured/state_loaded ログで 059 が live mode・EUR_USD・H1 でロード済みを確認。よって『059 が live デプロイされ稼働中』は事実=high 追認。 (4) 重要な過大評価補正: 059 の永続 state (logs/unified_state/ATLAS-2026-0511-059.state.json, updated 2026-05-25T20:58) は signals_long=0 / signals_short=0 / orders_submitted=0 / orders_rejected=0 / bars_processed=90。RE-001 fix commit 3dbf087 は 2026-05-25 15:36。即ち fix 以降、059 はまだ一度もエントリーシグナルを発しておらず RE-001 REJECT は現時点で『実観測ゼロ』。『毎エントリーでサイレント REJECT されている』は機構としては正(次に entry シグナルが出れば確実に REJECT、venv で実証済)だが、現在進行形で REJECT が起きているかのような断定は厳密には latent。 (5) JPY 波及確認(タスク3): venv で USD_JPY/EUR_JPY/GBP_JPY/AUD_JPY を evaluate → 全て RE001_failsafe_reject=False (quote==account=JPY のため RE-001 ゲートを素通り、後段 spread check は test 注文の bid/ask 欠落による artifact で本番経路ではダミー bid/ask 注入済)。fail-safe は非JPYクォートのみ REJECT する設計通りで JPY live 戦略(USD_JPY/EUR_JPY/GBP_JPY/AUD_JPY の live 群 21件)は無影響。 (6) 影響範囲確認(タスク3): imported 60戦略中 非JPYクォート=12件(GBP_USD×6 / EUR_USD×5 / AUD_USD×1)、うち live は 059(EUR_USD)のみ、残11件は paper。report の件数主張と完全一致。 (7) サイレント性確認: strategy_slot.py:642-653 で PTRC reject 時は WARNING ログ + orders_rejected++ のみ、RiskAlertEvent/Email なし。決済(FLAT)注文は strategy_slot.py:1092 で意図的に PTRC バイパス → RE-101 は entry のみ阻害、保有ポジション stuck の二次被害はなし(059 は entry 不能ゆえ常時 flat)。",
+      "rationale": "コード経路・Live 稼働・REJECT 機構・JPY 非波及・影響範囲(059 唯一)を全て実証で確認。高severity の中核根拠『live-funded な非JPY戦略が構造的にエントリー不能=実質 dead』は成立し high で妥当。ただし report の『毎エントリーでサイレント REJECT(現在進行形)』は誇張気味で、正確には『fix 以降 059 は未シグナル(orders_rejected=0)、次回 entry で確実に REJECT する latent な実弾沈黙』。high 追認だが『観測済みの継続 REJECT』ではなく『次回エントリーで確定発火する潜在不具合 + 根本(換算器未配線)未修正』として記述すべき。severity は不変、impact 記述のみ要補正。"
+    },
+    {
+      "id": "RE-102",
+      "report_claim": "日次損失ハードリミットが realized-only で集計含み損のブロッキングゲートがゼロ。相関ドローダウン時に含み損が膨らむ中で新規エントリーが通り続ける tail risk。medium。",
+      "verdict": "confirmed",
+      "corrected_severity": "medium",
+      "empirical": "(1) realized-only: risk_supervisor.py:630-639 で build_risk_state が state.daily_unrealized_pnl を PTRC RiskState に渡すが、grep 'daily_unrealized_pnl =' で per-strategy 値の更新箇所は line 769 の '=0.0'(日次リセット)のみ → per-strategy unrealized は本番経路で常に 0。ptrc.py:447-460 の _check_max_daily_loss は existing_loss=realized+unrealized(=realized+0) + 新規SL想定で判定 → 実質 realized-only。 (2) can_open_position(risk_supervisor.py:407-433): 口座/戦略とも daily_realized_pnl_total / state.daily_realized_pnl のみ参照、含み損は不参照。 (3) KS(risk_supervisor.py:832-849 _evaluate_kill_switch): total_pnl=daily_realized_pnl_total のみで発動、含み損では発動しない(docstring 明記)。 (4) WARN 層(risk_supervisor.py:858-947 _evaluate_unrealized_warning): combined=realized_total+unrealized_total を 95% で発動するが docstring/alert メッセージとも『新規発注ブロックは行わない/新規発注は継続可能』と明記、_dispatch_alert(Email)のみで非ブロッキング。daily_unrealized_pnl_total 自体は line 693 で account 単位に populate されており WARN は機能するが gate ではない。 → 集計含み損に対する hard な新規発注ブロックは皆無を確定。",
+      "rationale": "report の技術的主張は全て実証で正。severity 妥当性: 緩和要因として (a) 各ポジションのブローカー側 SL が 1 トレード単位で最悪損失を上限化、(b) 95% WARN が運用者へ能動通知、が存在する。未緩和の tail は『同方向相関の複数ポジション同時逆行で集計含み損>10% だが各SL未約定かつ realized が閾値未満』という条件付き経路に限定される。by-design + ユーザー承認済(commit 6f5b4cb)であり、即時の実弾損失を生む不具合ではなく『構造的残存リスク』。過小評価ではない(KS/can_open 双方を実読し穴の実在を確認、low ではない)。過大評価でもない(条件付き tail かつ per-trade SL backstop あり、high ではない)。medium + should_consider が妥当。"
+    },
+    {
+      "id": "RE-103",
+      "report_claim": "(参考再確認) PTRC 拒否 Audit が参照保持なし create_task で GC 欠落しうる。low。RE-101 高頻度 REJECT 下で should_consider に格上げ。",
+      "verdict": "report_error_overstated",
+      "corrected_severity": "low",
+      "empirical": "ptrc.py:60-92 の _fire_ptrc_audit が loop.create_task の戻り値を破棄・add_done_callback なしは実読確認(report の機構主張は正)。ただし should_consider 格上げ根拠の前提『RE-101 が高頻度 REJECT を生む』は RE-101 検証で否定的: 059 は fix 以降 orders_rejected=0(未シグナル)、本番経路で PTRC 拒否自体が高頻度には発生していない。よって『RE-101 起因の GC 欠落確率上昇』という格上げ理由は現状の経験事実に反する。GC 欠落は理論上の可能性に留まり low が妥当、should_consider 格上げは前提誤り。",
+      "rationale": "機構(参照非保持 create_task)は実在するが、validation が格上げ根拠にした『RE-101 高頻度 REJECT』が経験的に未発生(orders_rejected=0)。adoption_level の格上げは前提が成立せず過大。severity low は維持。"
+    }
+  ],
+  "additional_findings": [
+    {
+      "id": "RE-VERIFY-NOTE-1",
+      "note": "RE-101 の二次被害排除を確認: 決済(FLAT)注文は strategy_slot.py:1092-1097 で意図的に PTRC バイパス。RE-101 は entry のみ阻害し exit は阻害しないため『REJECT で position が stuck になり決済もできない』という最悪シナリオは構造的に発生しない。059 は entry 不能ゆえ常時 flat = 取引ゼロの『無害な沈黙』。これは report が見落としていた緩和事実(RE-101 を更に過大評価しないための確認点)。"
+    },
+    {
+      "id": "RE-VERIFY-NOTE-2",
+      "note": "paper モード非JPYクォート 11戦略(EUR_USD/GBP_USD/AUD_USD)も同一 PTRC を通るため、それらがシグナルした際も RE-001 で REJECT される。実弾ではないため live impact は 059 に限定されるが、paper forward-test の結果が『非JPY戦略全滅』として歪む副作用がある。report は live のみ言及し paper への波及を未記載 — 監視/フォワードテスト評価の信頼性に影響する点を追記すべき(severity は live でないため low 相当)。"
+    }
+  ],
+  "summary": {
+    "RE-101_verdict": "confirmed (high 妥当, impact 記述のみ要補正)",
+    "RE-102_verdict": "confirmed (medium 妥当)",
+    "RE-103_verdict": "report_error_overstated (adoption 格上げ前提が経験的に不成立、low 維持)",
+    "false_count": 0,
+    "overstated_count": 1,
+    "understated_count": 0
+  }
+}

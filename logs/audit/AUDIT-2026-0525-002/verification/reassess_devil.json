@@ -1,0 +1,206 @@
+{
+  "audit_id": "AUDIT-2026-0525-002",
+  "task": "QA-102 / QA-103 / RE-102 敵対的検証 (devil-advocate)",
+  "date": "2026-05-26",
+  "investigator": "devil-advocate",
+  "methodology": "実コード実読 + 1453戦略 backtest 結果スキャン + reassess_qa.json / reassess_re.json との突き合わせ",
+  "findings": {
+    "QA-102": {
+      "title": "無敗戦略(gross_loss==0)の PF=None が Tier1 で恒久 FAIL",
+      "severity_judgment": "妥当 (medium 維持)",
+      "recommendation_judgment": "適切 (cop-out ではない)",
+      "adversarial_evidence": {
+        "finding_validity": {
+          "verdict": "指摘は技術的に正確。コードの動作は確認済み。",
+          "code_refs": [
+            "event_simulator.py:1385-1389: gross_loss>0 else profit_factor=None",
+            "runner.py:799: _t1_cond() value is None -> passed=False",
+            "runner.py:781-785: value is None -> passed=False (値が算出されていません)"
+          ],
+          "real_occurrence": "1453戦略スキャン: L2 trades>0 かつ PF=null = 0件。ATLAS-2026-0503-039 (L1 trades=1, PF=null) で gross_loss==0 実在確認。L1_MIN_TRADES=20 により L2 到達前にブロックされる。",
+          "l1_asymmetry": "vectorbt_engine.py:953: if pf is not None and pf < threshold -- PF=None は L1 PF チェックをスキップ。L1 (None スキップ) vs L2 (None=FAIL) の非対称性が欠陥の核心だが実経路が存在しない。"
+        },
+        "against_cop_out": {
+          "verdict": "文書化のみは欠陥放置ではない。理由3点:",
+          "reason_1": "実発生経路が構造的に存在しない: gross_loss==0 には全 N>=20 トレードで負けゼロが必要。reassess_qa 実証: win_rate>=0.95 = 0件、win_rate==1.0 = 0件。",
+          "reason_2": "P8-H1 の前例: 旧 float(inf) センチネルが _normalize_pf で 1.0 に化けた不具合があり、現行 None 設計はその修正結果。後退はリグレッションリスクあり。",
+          "reason_3": "Gate 緩和の副作用: PF=None を PASS 扱いにすると合成データ・極短期 BT で gross_loss==0 が容易に出現し Gate 抜けの穴になる。trades>=20 ガードが共存する現行設計の方が安全。"
+        },
+        "remaining_concern": "L1 (None スキップ) と L2 (None=FAIL) の非対称性は仕様として文書化されていない。将来 IS 期間を短縮する改善が入った場合に想定外の L1 PASS -> L2 FAIL ループが生じるリスクは残る。L1 は PF=None を通過させるが L2 Tier1 は FAIL させる。この非対称は意図的設計 (MIN_TRADES ガードが前段に存在するため) を明記すべき。"
+      },
+      "final_stance": "文書化で十分",
+      "required_actions": [
+        "[informational] 実発生0件のエッジとして spec_change_log に記録",
+        "[informational] L1 (PF=None スキップ) vs L2 (PF=None=FAIL) の非対称性を意図的設計として明記",
+        "[informational] 無敗 OOS walk が WFA 集計から除外される二次経路を追記 (reassess_qa.json A_secondary_finding 参照)",
+        "コード変更: 不要"
+      ]
+    },
+    "QA-103": {
+      "title": "WFA OOS 83% 重複による pseudo-replication が Tier2 0.30 に影響",
+      "severity_judgment": "過大評価 (medium -> low が妥当)",
+      "recommendation_judgment": "概ね適切だが accept 根拠の書き換え方向の具体化が must_fix",
+      "adversarial_evidence": {
+        "finding_validity": {
+          "verdict": "指摘の前提 (重複が点推定を楽観方向に系統バイアスさせる) が統計的に誤り。medium に据え置く根拠がない。",
+          "overlap_facts": {
+            "oos_months": 6,
+            "step_months": 1,
+            "adjacent_overlap_pct": "83.33% (5/6)",
+            "walks_3yr": 19,
+            "independent_oos_months": 15,
+            "effective_independent_blocks": 4.0
+          },
+          "mc_proof": "reassess_qa.json: N=30,000 MC (iid/AR(1) phi=0,0.3,0.6): E[重複平均-非重複平均]=-0.0002~-0.0004 approx 0。系統バイアスなし。",
+          "what_overlap_does": "点推定の不偏性には影響しない。影響するのは分散・SE・有意性検定。Tier2 は点推定 (算術平均) のスコア化のみ。分散・p値・信頼区間を一切使わない。よって Tier2 0.30 への楽観バイアスは存在しない。",
+          "aggregation_correction": "現行実装は ratio-of-means (efficiency = mean(OOS Sharpe)/mean(IS Sharpe))。mean-of-ratios ではない。quant-analyst の現状認識が不正確だった。"
+        },
+        "gate_reversal_check": {
+          "verdict": "83% 重複が Gate PASS/FAIL を反転させた戦略の存在を定量検証した。",
+          "finding": "E[diff]=0 であるため重複による Gate 反転は期待値ゼロ。SD 比 1.07 から個別戦略の変動は存在しうるが、反転は PASS->FAIL と FAIL->PASS が対称的であり楽観方向への系統的歪みではない。",
+          "gap_in_reassess_qa": "soft_score 0.68-0.72 の境界戦略が何件存在するかの集計が reassess_qa.json にない。これは quant-analyst の見落とし。ただし E[diff]=0 である以上楽観方向バイアスの証拠にはならない。"
+        },
+        "against_cop_out": {
+          "verdict": "コード不変・文書だけ直す は今回は cop-out ではない。",
+          "reason_1": "点推定バイアスが MC で否定されており Gate 判定の楽観歪みは存在しない。修正の便益がない。",
+          "reason_2": "非重複化 (step=6) は構造的不能: 3年データで step=6/OOS=6/IS=12 -> walks=4 < WFA_MIN_WALKS=10。WFA 全体が None 化し 0.30 寄与が消失。過去 QA-006 Round5 の min_walks 6->10 強化と逆行。",
+          "reason_3": "根本対処は Phase5 CPCV (Redesign_v2_Plan.md L328-330, L871-873) に既に計画済。WFA 窓の局所最適化は二重投資。"
+        },
+        "must_fix_item": {
+          "severity": "must_fix",
+          "issue": "accept 根拠の再記述方向の具体化が欠ける",
+          "current_wrong_rationale": "前回 accept 根拠: look-ahead 無し -- 正しいが pseudo-replication の本質を扱っていない。reassess_qa.json も新根拠で補強すると言うだけで具体的文言を示していない。",
+          "required_correct_rationale": "(1) 点推定スコアには系統バイアス非該当 (MC実証 N=30,000, E[diff] approx 0)、(2) pseudo-replication の本質は分散過小評価であり有意性検定の問題、Gate 点推定判定には非該当、(3) 独立情報不足の根本対処は Phase5 CPCV に委譲済、(4) 集計が ratio-of-means である事実 (mean-of-ratios 誤記の訂正)。この4点を spec_change_log に明記する。",
+          "adoption_level": "must_fix"
+        }
+      },
+      "final_stance": "コード不変。accept 根拠書き換えは必須 (must_fix)。書き換え内容は must_fix_item.required_correct_rationale に従う。",
+      "required_actions": [
+        "[must_fix] spec_change_log の accept 根拠を MC 実証 + Phase5 CPCV 委譲 + ratio-of-means 確認の4点で書き換える",
+        "[must_fix] mean-of-ratios という現状認識誤記を訂正する",
+        "[should_consider] soft_score 0.68-0.72 境界戦略の重複敏感性を Phase5 検証リストに追加",
+        "コード変更: 不要"
+      ]
+    },
+    "RE-102": {
+      "title": "realized-only 日次損失リミット・含み損ブロッキング皆無",
+      "severity_judgment": "過小評価 (medium より high が妥当)",
+      "recommendation_judgment": "cop-out の可能性高い。承認前提が部分的に崩れており現状維持の自動適用は不可。",
+      "adversarial_evidence": {
+        "finding_validity": {
+          "verdict": "指摘は正確。コード実証済み。severity medium は過小。",
+          "code_refs": [
+            "risk_supervisor.py:407: total_pnl = self.account_state.daily_realized_pnl_total  # realized only",
+            "risk_supervisor.py:832-849: _evaluate_kill_switch も realized only",
+            "risk_supervisor.py:858-947: _evaluate_unrealized_warning は non-blocking (Email のみ)",
+            "simulator.py:177: paper broker unrealized_pnl=0.0 固定 -> WARN が paper で永遠に発火しない"
+          ]
+        },
+        "approval_premise_check": {
+          "verdict": "承認 (6f5b4cb, 2026-05-25 16:25) 時点で既知だった情報と新規判明情報を分離する。",
+          "known_at_approval": [
+            "realized-only 設計であること",
+            "EUR_USD (0511-059) が live 稼働中であること (import: 2026-05-20)"
+          ],
+          "new_facts_post_approval": [
+            "reassess_re.json 発見: 22戦略中21が JPY-cross LONG に集中 (方向性集中リスク)",
+            "reassess_re.json 発見: USD_JPY 5戦略が単一 trade_id=244 (~200,000 units) を共有",
+            "KS limit = -10,000 JPY 固定 = 口座 1M JPY の 1%。realized-only では含み損 -990,000 JPY 超でも新規エントリー可能",
+            "WARN 閾値 = -9,500 JPY (KS limit x 0.95)。H4 ATR-SL 1トレードで容易に突破可能",
+            "paper broker unrealized_pnl=0.0 固定 -> WARN がペーパーで一切テストされていない"
+          ],
+          "invalidated_premise": "承認は SL+WARN で十分に緩和されているという前提に基づくが: (a) WARN がペーパーでテスト不能、(b) JPY-cross LONG 集中 + 単一 trade_id 集中は承認時に明示されていなかった (reassess_re.json で初めて定量化)。承認前提が部分的に崩れている。"
+        },
+        "tail_risk_quantification": {
+          "scenario": "JPY 急騰 (例: 日銀サプライズ利上げ) 時の同時ドローダウン",
+          "mechanism": "21/22 JPY-cross LONG 戦略が同方向の含み損を同時に抱える。SL は H4 ATR-based で幅広く、含み損が realized になる前に長時間滞留する。",
+          "ks_skip_risk": "realized loss が KS 閾値を一気に超えると WARN をスキップして KS に直行する可能性がある。WARN は段階的損失蓄積時のみ機能する。",
+          "paper_test_gap": "simulator.py:177 の unrealized_pnl=0.0 固定は WARN の動作をペーパーで一切検証できないことを意味する。本番で初めて挙動が判明するリスク。",
+          "probability": "中",
+          "impact": "高 (最悪ケース: realized loss が KS limit を一気に超え、超過前の含み損期間に新規ポジションが積み上がる)"
+        },
+        "against_soft_block_addition": {
+          "verdict": "含み損 soft-block 追加は正当な戦略を阻害する過剰介入の側面がある。",
+          "reason_1": "H4 戦略は設計上含み損期間が長い。ATR-based SL は一時的な含み損を許容する設計であり soft-block はその設計哲学と衝突する。",
+          "reason_2": "soft-block 閾値の設定が新たな過適合リスクを生む。バックテストで最適化されていないパラメータを本番に持ち込む。",
+          "reason_3": "soft-block が BT/Live 乖離を生む: BT ではトレードが実行されるが live では soft-block で弾かれると FTS の監視指標が劣化する。"
+        }
+      },
+      "final_stance": "現状維持は不可。ユーザーへの新事実報告 + 再承認取得が必須 (must_fix)。simulator.py:177 の修正も必須 (WARN テスト integrity の問題)。含み損 soft-block 追加は推奨しない (should_consider)。",
+      "required_actions": [
+        "[must_fix] reassess_re.json 発見の新事実 (JPY 集中 21/22、USD_JPY 5戦略 = 単一 trade_id=244 ~200,000 units) をユーザーに提示し承認 6f5b4cb の前提維持を確認",
+        "[must_fix] simulator.py:177 の paper broker unrealized_pnl=0.0 固定を修正し WARN の実効性を paper でテスト可能にする",
+        "[should_consider] KS limit を realized + unrealized x haircut 合成値に変更する設計案を risk-execution-engineer に依頼",
+        "[should_consider] 戦略ポートフォリオ単位の direction exposure cap を risk_supervisor に追加する設計案を検討",
+        "[informational] WARN 閾値 -9,500 JPY が H4 ATR-SL 1トレードで突破可能である事実を監視ダッシュボードに明示"
+      ]
+    }
+  },
+  "cross_agent_review": {
+    "reassess_qa_review": {
+      "agreement": "QA-102/103 の結論に同意。MC 実証 (N=30,000) は信頼できる根拠。ratio-of-means 確認も正確。",
+      "criticism_1": {
+        "target": "reassess_qa.json QA-103 A_validity",
+        "issue": "soft_score 0.68-0.72 境界戦略への重複影響を定量化していない",
+        "detail": "E[diff]=0 は系統バイアスなしを示すが、SD 比 1.07 による個別戦略スコア変動で Gate 反転が起きる可能性をゼロと断言するには不十分。実際に何件が閾値近傍かの集計が必要だった。",
+        "adoption_level": "should_consider"
+      },
+      "criticism_2": {
+        "target": "reassess_qa.json QA-103 final_recommendation",
+        "issue": "accept 根拠の書き換え方向の具体性が欠ける",
+        "detail": "新根拠で補強するとあるが書き換えるべき文言の具体的テンプレートが示されていない。下流の文書化担当が迷う。must_fix として具体的文言を示すべきだった。",
+        "adoption_level": "must_fix"
+      }
+    },
+    "reassess_re_review": {
+      "agreement": "承認前提崩壊の指摘は正確。JPY 集中と trade_id 集中の新事実発見は高品質な分析。",
+      "criticism_1": {
+        "target": "reassess_re.json 結論部",
+        "issue": "simulator.py:177 の WARN テスト不能問題の severity 位置づけが曖昧",
+        "detail": "WARN がペーパーで発火しない事実を指摘しているが RE-102 本体の severity 判定に反映していない。WARN が唯一の soft-block 代替手段であるにもかかわらずペーパーでテスト不能という事実は medium を high に上げる根拠として明示すべきだった。",
+        "adoption_level": "must_fix"
+      },
+      "criticism_2": {
+        "target": "reassess_re.json 推奨対応",
+        "issue": "含み損 soft-block の副作用 (BT/Live 乖離、H4 設計哲学衝突) が分析されていない",
+        "detail": "reassess_re.json は soft-block 追加の是非について言及がない。soft-block は H4 ATR-based 戦略の設計意図と衝突し BT/Live 乖離を生む可能性があるため現時点での実装は should_consider 止まりとすべき。",
+        "adoption_level": "should_consider"
+      }
+    }
+  },
+  "summary_table": [
+    {
+      "finding": "QA-102",
+      "severity_original": "medium",
+      "severity_da": "妥当 (medium 維持)",
+      "recommendation_original": "文書化のみ",
+      "recommendation_da": "適切",
+      "final_stance": "文書化で十分",
+      "must_fix_count": 0,
+      "should_consider_count": 0,
+      "informational_count": 3
+    },
+    {
+      "finding": "QA-103",
+      "severity_original": "medium",
+      "severity_da": "過大評価 (low が妥当)",
+      "recommendation_original": "コード不変・accept 根拠再記述",
+      "recommendation_da": "概ね適切。再記述方向の具体化が must_fix",
+      "final_stance": "コード不変。accept 根拠書き換えは must_fix",
+      "must_fix_count": 1,
+      "should_consider_count": 1,
+      "informational_count": 0
+    },
+    {
+      "finding": "RE-102",
+      "severity_original": "medium",
+      "severity_da": "過小評価 (high が妥当)",
+      "recommendation_original": "承認済み・現状維持",
+      "recommendation_da": "cop-out。新事実により承認前提が部分的に崩壊",
+      "final_stance": "現状維持不可。新事実報告 + 再承認が必須",
+      "must_fix_count": 2,
+      "should_consider_count": 2,
+      "informational_count": 1
+    }
+  ]
+}

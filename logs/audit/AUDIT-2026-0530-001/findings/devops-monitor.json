@@ -1,0 +1,167 @@
+{
+  "agent": "devops-monitor",
+  "scope": "FTS 監視 (commit 9998a7a 事後検証 + ユーザー要請変更)",
+  "audit_date": "2026-05-30",
+  "commit_verified": "9998a7a",
+  "post_fix_verification": {
+    "DM-306_oanda_connection_lost_email": "OK: _RISK_ALERT_KINDS['oanda_connection_lost'] = 'live_anomaly' が追加済み (email_notifier.py:316)。health_check.py の _publish_oanda_outage_alert (line 407-429) が publish する RiskAlertEvent は EmailNotifier に到達する。2 テスト (test_oanda_connection_lost_triggers_email / test_oanda_connection_lost_kind_is_live_anomaly) が基本経路を検証。ただし concerns: [1] _LIVE_ANOMALY_LABELS に 'oanda_connection_lost' / 'oanda_connection_degraded' / 'market_data_poll_failure' が未登録のため、件名が汎用の 'Live 異常' となり運用者が alert_type を件名から即判別できない (DM-401 参照)。[2] テストが 'throttle 後の回復経路' (oanda_alert_sent フラグリセット = 再断絶時の再通知) を検証していない。",
+    "DM-302_oanda_api_latency_instrumentation": "PARTIAL: _record_api_metric() ヘルパーの status 正規化は alerting_rules.yml の期待ラベルと完全一致 (success/timeout/4xx/5xx/unknown)。metrics=None フォールバックも実装済み。しかし concerns: [1] runner.py:343-347 の OANDABroker 生成時に metrics= が渡されていない → DM-302 の根幹修正が本番 UnifiedRunner 経路で dead (DM-402 参照、HIGH)。[2] main.py:335-339 の OANDABroker 生成にも metrics= がない (DM-402)。[3] close_trade / get_trade / get_open_positions の 3 メソッドに _record_api_metric が未追加 (DM-403 参照)。[4] _last_primary_bar_time はインスタンス変数 (per-store) のためマルチスロット衝突はない。observe_feature_staleness の引数に strategy_id でなく primary_tf を渡す設計は FxFeatureStorestaleHigh アラートの max() 集約と整合する。[5] test_dm302 の 7 テストは submit_order のメトリクス記録を直接テストしていない (submit_order は _submit_order_impl 経由の複合フローで asyncio.Semaphore が絡みモック困難だが、dead path の懸念は残る)。",
+    "live_orders_silent_12h_throttle": "PARTIAL: 分離実装は正確で、account_position_mismatch / exposure_near_cap 等の live_anomaly は 15 分 throttle を維持しつつ live_orders_silent のみ 43200s に独立。テスト (test_live_orders_silent_uses_dedicated_kind_with_12h_throttle) も登録値と throttle 挙動を検証済み。しかし concerns: [1] runner.py:1602-1631 の RE-305 ループ (consecutive_poll_errors >= 30, % 30 == 0 で繰り返し発火) が 12h throttle と矛盾: 設計コメントに『復旧まで通知し続ける』と書かれているが、2 通目以降が throttle で抑止される (DM-404 参照)。[2] 沈黙検知 threshold (LIVE_ORDER_SILENCE_THRESHOLD_SEC = 6h) と throttle (12h) の比率: 初報 → 次報が 12h 後なので最長 18h 無音状態を見逃す可能性。ただし沈黙が続く間は heartbeat ループで繰り返し評価されるため 6h 以上の沈黙は次の heartbeat で再評価・再発火するが全て throttle される。"
+  },
+  "findings": [
+    {
+      "id": "DM-401",
+      "severity": "LOW",
+      "area": "email",
+      "title": "_LIVE_ANOMALY_LABELS に DM-306 / DE-303 で追加された 3 種の alert_type が未登録",
+      "description": "_RISK_ALERT_KINDS に 'oanda_connection_lost' / 'oanda_connection_degraded' / 'market_data_poll_failure' が live_anomaly に集約されたが、_LIVE_ANOMALY_LABELS (email_notifier.py:778-783) にはこれら 3 種が追加されていない。_build_live_anomaly_message は dict.get(event.alert_type, 'Live 異常') でデフォルトラベルにフォールバックするため、実際に届くメール件名が '[FX-TEST] [WARN/CRITICAL] Live 異常' のような汎用文言になる。OANDA 断絶 / account_info 劣化 / データポール失敗の 3 種が件名から区別できず、深夜スマホ通知で即トリアージができない。本文には alert_type が含まれるため情報は失われないが、件名フィルタリングができない運用上の問題。",
+      "evidence": [
+        "trading_platform/core/monitoring/email_notifier.py:778-783 (_LIVE_ANOMALY_LABELS の定義)",
+        "trading_platform/core/monitoring/email_notifier.py:316 (oanda_connection_lost → live_anomaly)",
+        "trading_platform/core/monitoring/email_notifier.py:321 (oanda_connection_degraded → live_anomaly)",
+        "trading_platform/core/monitoring/email_notifier.py:326 (market_data_poll_failure → live_anomaly)",
+        "trading_platform/core/monitoring/email_notifier.py:808 (label = _LIVE_ANOMALY_LABELS.get(event.alert_type, 'Live 異常'))"
+      ],
+      "reproduction": "alert_type='oanda_connection_lost' で RiskAlertEvent を publish → 届くメール件名が '[prefix] [WARN/CRITICAL] Live 異常' になり 'OANDA断絶' 等の具体的なラベルが含まれない",
+      "suggested_fix": "_LIVE_ANOMALY_LABELS に以下 3 エントリを追加:\n'oanda_connection_lost': 'OANDA 疎通途絶（60 秒超断絶）',\n'oanda_connection_degraded': 'OANDA account_info 連続取得失敗（接続劣化）',\n'market_data_poll_failure': 'マーケットデータポール連続失敗（全戦略 idle 化リスク）'",
+      "dead_path": false,
+      "regression_of": null,
+      "post_fix_defect": true
+    },
+    {
+      "id": "DM-402",
+      "severity": "HIGH",
+      "area": "metrics",
+      "title": "DM-302 修正の核心: OANDABroker 生成時に metrics= が渡されず本番計装が dead",
+      "description": "DM-302 は client.py に _record_api_metric() ヘルパーを追加し、5 API メソッドで呼ぶことで OANDA API レイテンシ / ステータス計測を実装した。しかし OANDABroker のコンストラクタに metrics= を渡す責任は生成元にある。現状:\n(1) runner.py:343-347: OANDABroker(api_key=, account_id=, base_url=) — metrics= なし\n(2) main.py:335-339: OANDABroker(api_key=, account_id=, base_url=) — metrics= なし\nどちらも self._broker._metrics = None のままになるため、_record_api_metric は早期 return (if self._metrics is None: return) で常にスキップされる。結果として FxOandaApiLatencyHigh / fx_oanda_api_responses_total の両アラートが本番で永続 Inactive のままとなり、DM-302 の修正目的が完全に達成されていない。テスト (test_dm302_metrics_instrumentation) はモックの OANDABroker(metrics=mock) で検証しているため本番の配線漏れを検出できなかった。",
+      "evidence": [
+        "trading_platform/core/unified_runner/runner.py:343-347 (metrics= 引数なし)",
+        "trading_platform/main.py:335-339 (metrics= 引数なし)",
+        "trading_platform/broker/oanda_adapter/client.py:841-843 (if self._metrics is None: return で計装スキップ)",
+        "trading_platform/core/unified_runner/runner.py:205-208 (self._metrics は MetricsCollector として存在している)"
+      ],
+      "reproduction": "UnifiedRunner を起動して OANDA API を呼び出す → fx_oanda_api_latency_ms_bucket が 0 のまま → Prometheus FxOandaApiLatencyHigh が永続 Inactive",
+      "suggested_fix": "runner.py:343-347 を以下に修正:\nself._broker = OANDABroker(\n    api_key=api_key,\n    account_id=account_id,\n    base_url=base_url,\n    metrics=self._metrics,  # DM-302: 計装注入\n)\n同様に main.py:335-339 にも metrics=self._metrics を追加。\ntest_pa301_osg_metrics_injection.py と同型の AST/grep テストで 'OANDABroker(' の後に 'metrics=' が存在することを構造検証するテストを追加。",
+      "dead_path": "本番で発火しない / FxOandaApiLatencyHigh が Inactive",
+      "regression_of": null,
+      "post_fix_defect": true
+    },
+    {
+      "id": "DM-403",
+      "severity": "LOW",
+      "area": "metrics",
+      "title": "close_trade / get_trade / get_open_positions の 3 メソッドに _record_api_metric 計装なし",
+      "description": "DM-302 は submit_order / cancel_order / get_account_info / get_open_trades / get_candles の 5 メソッドに _record_api_metric を追加した。しかし以下 3 メソッドには追加されていない:\n(1) close_trade (PUT /trades/{id}/close): 決済の中核 API。レイテンシ高騰や 5xx エラーは不整合ポジションの直接原因になりうる\n(2) get_trade (GET /trades/{id}): close_trade の pre_check + stale 回収フォールバックで呼ばれる\n(3) get_open_positions (GET /accounts/{id}/openPositions): 通貨ペア別サマリー\nclose_trade のレイテンシは注文執行の観点で最重要だが、FxOandaApiLatencyHigh が close_trade を観測対象外にしている。また close_trade の TimeoutError / Exception パスがあるが _record_api_metric を呼んでいない (cancel_order の TimeoutError パスは 'timeout' を記録している)。",
+      "evidence": [
+        "trading_platform/broker/oanda_adapter/client.py:700-727 (close_trade 通常経路: _record_api_metric なし)",
+        "trading_platform/broker/oanda_adapter/client.py:564-587 (get_trade: _record_api_metric なし)",
+        "trading_platform/broker/oanda_adapter/client.py:729-752 (get_open_positions: _record_api_metric なし)",
+        "trading_platform/broker/oanda_adapter/client.py:497-528 (cancel_order: TimeoutError で status=None を記録している先例)"
+      ],
+      "reproduction": "OANDA close_trade が 2 秒以上かかっても FxOandaApiLatencyHigh は発火しない",
+      "suggested_fix": "close_trade の通常経路 PUT 前後に _t0/elapsed_ms を追加し self._record_api_metric('close_trade', resp.status, _elapsed_ms) を呼ぶ。同様に get_trade / get_open_positions にも追加。close_trade の pre_check GET (get_trade 経由) はエラー時 pre_check_ok=False で PUT に進む設計のため、get_trade の TimeoutError も 'timeout' で記録できるよう try/except ブロックに _record_api_metric を追加する。",
+      "dead_path": false,
+      "regression_of": null,
+      "post_fix_defect": false
+    },
+    {
+      "id": "DM-404",
+      "severity": "MEDIUM",
+      "area": "email",
+      "title": "RE-305 ループ (30 回連続ポールエラー毎に live_orders_silent 発火) が 12h throttle で無効化",
+      "description": "runner.py:1602-1631 の RE-305 実装は '_consecutive_poll_errors >= 30 and % 30 == 0' を条件に live_orders_silent を繰り返し publish し、コメントに『復旧まで通知し続ける』と明記している。しかし live_orders_silent の EmailNotifier throttle は 43200 秒 (12 時間) であるため:\n- POLL_INTERVAL_SEC=60 なら 30 回 = 30 分ごとに発火\n- 2 通目以降はすべて throttle で抑止される\n- 実質的に 1 通しか届かず RE-305 の「継続通知」という設計意図が無効化される\nこれは live_orders_silent の 12h throttle 導入 (ユーザー要請 2026-05-29) と RE-305 の継続通知設計の衝突で、どちらの要件を優先するかの設計判断が不在のまま両者が共存している。また live_orders_silent の _check_live_health_alerts による heartbeat 評価 (6h threshold で毎 heartbeat 評価) も同様に throttle で初報以後が全抑止される。",
+      "evidence": [
+        "trading_platform/core/unified_runner/runner.py:1602-1631 (RE-305: 30 回倍数で live_orders_silent 繰り返し発火の設計意図)",
+        "trading_platform/core/monitoring/email_notifier.py:349 (live_orders_silent: 43200.0 = 12h throttle)",
+        "trading_platform/core/unified_runner/runner.py:70 (POLL_INTERVAL_SEC = 60 → 30 エラー = 30 分)"
+      ],
+      "reproduction": "OANDA account_info が 35 分間失敗し続けると RE-305 により 30 回目と 60 回目のタイミングで live_orders_silent が publish されるが、2 通目 (60 回目時点) は throttle で抑止される",
+      "suggested_fix": "選択肢 A: RE-305 経路の live_orders_silent を別の専用 alert_type (例: 'oanda_poll_error_escalation') に分離し throttle を設定しない (kill_switch と同等扱い)。選択肢 B: RE-305 コメントを修正し『初回 1 通のみ通知』の設計に変更する。いずれにせよ 2 つの要件 (「12h 以内は連投しない」と「復旧まで継続通知」) の優先度をユーザーが明示的に判断する必要がある。",
+      "dead_path": "RE-305 の継続通知が本番で発火しない",
+      "regression_of": null,
+      "post_fix_defect": true
+    },
+    {
+      "id": "DM-405",
+      "severity": "LOW",
+      "area": "email",
+      "title": "_build_live_anomaly_message の対応手順テキストが旧来 INC のみに言及し OANDA 断絶系に不適切",
+      "description": "_build_live_anomaly_message (email_notifier.py:827-840) の「背景」と「対応手順」テキストは INC-2026-0526-001 (幻エクスポージャー / 上限張り付き / Live 沈黙) を前提に書かれている。DM-306 / DM-302 / DE-303 で oanda_connection_lost / oanda_connection_degraded / market_data_poll_failure もこの builder で送信するようになったが、これら 3 種には『OANDA Web 管理画面で実建玉と内部 heartbeat exposure の乖離を確認』という手順は不適切で、『OANDA API ステータスページを確認 / ネットワーク接続を確認』等が正しい。件名も 'Live 異常' になるため (DM-401)、OANDA 断絶を幻ポジション兆候と混同しやすい。",
+      "evidence": [
+        "trading_platform/core/monitoring/email_notifier.py:827-840 (対応手順テキスト)",
+        "trading_platform/core/monitoring/email_notifier.py:316-326 (oanda_connection_lost / oanda_connection_degraded / market_data_poll_failure が live_anomaly に集約)"
+      ],
+      "reproduction": "OANDA が 60 秒断絶すると届くメール本文に『幻エクスポージャー・上限張り付き・Live 沈黙のいずれかが疑われます』と書かれ、実際の原因 (OANDA 断絶) への対処手順が含まれない",
+      "suggested_fix": "DM-401 の修正 (_LIVE_ANOMALY_LABELS への登録) に合わせて、'oanda_connection_lost' / 'oanda_connection_degraded' / 'market_data_poll_failure' 用の専用ビルダーメソッドを追加するか、_build_live_anomaly_message 内で alert_type によって「背景」と「対応手順」テキストを分岐させる。",
+      "dead_path": false,
+      "regression_of": null,
+      "post_fix_defect": true
+    },
+    {
+      "id": "DM-406",
+      "severity": "LOW",
+      "area": "alerting",
+      "title": "alerting_rules.yml に live_orders_silent / oanda_connection_lost 等に対応する Prometheus アラートが存在しない",
+      "description": "FxOandaApiLatencyHigh (alerting_rules.yml:71) と FxFeatureStorestaleHigh (alerting_rules.yml:98) は Prometheus メトリクス経由のアラートとして定義されている。しかし oanda_connection_lost / oanda_connection_degraded / market_data_poll_failure / live_orders_silent は Email 経路 (RiskAlertEvent → EmailNotifier) のみで通知され、Prometheus / Grafana ではこれらの状態遷移を観測するルールが存在しない。Email が届かない場合 (SMTP 障害、EmailNotifier throttle 中) の検知手段がなく、Prometheus / Grafana ダッシュボードで異常を発見できない。これは可観測性の対称性の欠如。",
+      "evidence": [
+        "deploy/prometheus/alerting_rules.yml (oanda_connection_lost / live_orders_silent に対応するルールなし)",
+        "trading_platform/core/monitoring/email_notifier.py:316-326 (Email 経路のみ)"
+      ],
+      "reproduction": "EmailNotifier が SMTP 障害で送信失敗中に OANDA が 60 秒断絶しても、Prometheus の FxEmailNotifierFailuresHigh が発火するだけで OANDA 断絶を示すアラートは何も発火しない",
+      "suggested_fix": "Health Check コンポーネントが RiskAlertEvent を publish する際に Prometheus counter (例: fx_oanda_outage_total{threshold_sec='60'}) も increment するか、health_check.py の ComponentStatus を Prometheus Gauge として公開する。alerting_rules.yml にそのゲージを参照するルールを追加する。",
+      "dead_path": "Prometheus/Grafana 経路での OANDA 断絶検知が dead",
+      "regression_of": null,
+      "post_fix_defect": false
+    },
+    {
+      "id": "DM-407",
+      "severity": "LOW",
+      "area": "metrics",
+      "title": "metrics.py の EmailNotifier sent/failure/retry/throttled のコメントで kind ラベル一覧が古い",
+      "description": "metrics.py:354-387 の EmailNotifier 関連 counter コメントに「kind ラベル一覧」が書かれているが (fill / kill_switch / kill_switch_cancel_failed / position_reconciler / unrealized_warning)、9998a7a コミットで追加された 'live_anomaly' / 'live_orders_silent' / 'position_mismatch' / 'live_gate_rejection' が含まれていない。運用者が Grafana で kind ラベルを調べる際にコードコメントと実際の値が乖離しており、observability のセルフドキュメントとして機能しない。",
+      "evidence": [
+        "trading_platform/core/monitoring/metrics.py:354-387 (kind ラベル一覧コメント)",
+        "trading_platform/core/monitoring/email_notifier.py:275-327 (_RISK_ALERT_KINDS: 12 種が実際に送信される)"
+      ],
+      "reproduction": "Grafana で fx_email_notifier_sent_total{kind='live_anomaly'} を見ると値が存在するが、metrics.py のコメントには 'live_anomaly' が記載されていない",
+      "suggested_fix": "metrics.py:354-387 の kind コメントに以下を追加: 'live_anomaly' / 'live_orders_silent' / 'position_mismatch' / 'live_gate_rejection'。または kind の定義権を _RISK_ALERT_KINDS に一元化し、コメントではなくコード参照で確認できるよう改善する。",
+      "dead_path": false,
+      "regression_of": null,
+      "post_fix_defect": false
+    },
+    {
+      "id": "DM-408",
+      "severity": "LOW",
+      "area": "metrics",
+      "title": "observe_feature_staleness の Prometheus gauge ラベルが strategy_id でなく primary_tf であることがアラートルールのドキュメントと乖離",
+      "description": "alerting_rules.yml:98-111 の FxFeatureStorestaleHigh は 'max(fx_feature_staleness_sec) > 60' で集約し strategy_id ラベルを使っていない。一方 metrics.py:839-850 の observe_feature_staleness は strategy_id を gauge ラベルとして設定している。しかし DM-302 で live_store.py に追加された計装では strategy_id の代わりに primary_tf (例: 'H1') を渡している (live_store.py:439)。この設計変更はテスト (test_dm302: 'H1' が渡されることを assert) で確認されているが、metrics.py の observe_feature_staleness のドキュメントは引数名を 'strategy_id: str' としており (metrics.py:843)、テストコードコメントも 'strategy_id として primary_tf を渡す設計' と注記している。ラベル意味が実態と API 定義でずれており、将来的に strategy_id を正しく渡したい場合に混乱する。",
+      "evidence": [
+        "trading_platform/core/monitoring/metrics.py:838-850 (observe_feature_staleness: 引数名が strategy_id)",
+        "trading_platform/data/feature_store/live_store.py:439 (self.primary_tf を渡している)",
+        "tests/unit/test_dm302_metrics_instrumentation.py:212-213 ('strategy_id として primary_tf を渡す設計' と注記)"
+      ],
+      "reproduction": "Grafana で fx_feature_staleness_sec{strategy_id='H1'} を見ても意味が伝わらない (strategy_id が 'H1' というのは不自然)",
+      "suggested_fix": "observe_feature_staleness の引数名を 'label: str' または 'instance_label: str' に変更し、ドキュメントに 'primary_tf またはユニークな識別子を渡す' と明記する。または LiveFeatureStore に strategy_id を注入する設計に変更し、正しい strategy_id を渡す。",
+      "dead_path": false,
+      "regression_of": null,
+      "post_fix_defect": false
+    },
+    {
+      "id": "DM-409",
+      "severity": "INFO",
+      "area": "dashboard",
+      "title": "Dashboard の API_BASE_URL は環境変数から取得するが SSRF 対策がない",
+      "description": "dashboard/app.py:52 で API_BASE_URL = os.environ.get('FTS_DASHBOARD_API_BASE_URL', '') を取得し、line 113 で requests.get(f'{API_BASE_URL}/status') を呼ぶ。FTS_DASHBOARD_API_BASE_URL に外部 URL が設定された場合、ダッシュボードが任意の HTTP エンドポイントにリクエストを送信する SSRF (Server-Side Request Forgery) リスクがある。Streamlit ダッシュボードは通常 localhost またはイントラネットで稼働し、環境変数は管理者が設定するため実際のリスクは低い。ただし CLAUDE.md のセキュリティ原則 (ユーザー入力・外部 API レスポンスは必ず検証する) との対称性の観点から記録する。認証機構もなく、ダッシュボードに到達できるユーザーは全データを閲覧できる。",
+      "evidence": [
+        "trading_platform/dashboard/app.py:52 (API_BASE_URL 取得)",
+        "trading_platform/dashboard/app.py:113 (requests.get(f'{API_BASE_URL}/status'))",
+        "trading_platform/dashboard/app.py:131 (requests.get(f'{API_BASE_URL}/health'))"
+      ],
+      "reproduction": "FTS_DASHBOARD_API_BASE_URL=http://internal-service/secret を設定してダッシュボードを起動すると、そのエンドポイントに GET リクエストが送信される",
+      "suggested_fix": "API_BASE_URL を localhost / 127.0.0.1 / 指定ドメインのみ許可するホワイトリスト検証を追加する。または環境変数ではなく config ファイルで制御し、任意 URL 設定を構造的に禁止する。Phase 2 で認証機構を追加する際に合わせて対処。",
+      "dead_path": false,
+      "regression_of": null,
+      "post_fix_defect": false
+    }
+  ]
+}

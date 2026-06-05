@@ -1,0 +1,54 @@
+{
+  "verifier": "qa-tester",
+  "audit_id": "AUDIT-2026-0526-001",
+  "reverify_date": "2026-05-26",
+  "target_commit": "dd2dd82",
+  "summary": "QT-201/203/204は主張・証拠が正確（confirmed）。QT-202は根本的に誤り（refuted）: 第1チームはRE-001フェイルセーフがテスト環境で発動してxfailを誘発すると主張したが、_unsafe_static_in_live フラグはOANDA_ENVIRONMENT=='live'のときのみTrueになる（ptrc.py:223-226）。テスト環境ではこのenv変数は設定されないためフェイルセーフは不発、xfailの原因はRE-001ではなく単純な合成データでのシグナル未発生。QT-205は誤り（refuted）: conftest.py:51でos.environ.setdefault('STRICT_SKIP','1')によりデフォルト有効化済みであり『デフォルト無効』という主張は現コードと矛盾する。",
+  "verifications": [
+    {
+      "id": "QT-201",
+      "claim_accuracy": "正確",
+      "severity_verdict": "medium 妥当",
+      "current_code_quote": "tests/integration/test_signal_flow.py:287-292: # シグナルが出ない場合もあるため、少なくともエラーなく完走することを確認 / assert feature_store.bar_count == len(sample_ohlcv_df) / # 約定があれば、ポジション情報が存在する / if fills_completed > 0: /     positions = fill_processor.get_all_positions() /     assert len(positions) > 0",
+      "verdict": "confirmed",
+      "notes": "引用行(287-292)は正確に実在する。fill/position経路のアサーションがfills_completed>0の条件付きであり、atlas_strategy_001が合成データでシグナル0件の場合は約定・ポジション検証が一切スキップされてPASSEDと表示される偽緑構造は事実。line 95-97の指摘（test_signal_generation_with_data がbar_countのみアサートしてシグナル発生確認なし）も正確に実在する（実際のコードではコメント変更があり行番号が95→95-97に対応）。severity=mediumは妥当。"
+    },
+    {
+      "id": "QT-202",
+      "claim_accuracy": "誤り（根本的）",
+      "severity_verdict": "severity=medium は誇大。実際の問題は存在するが因果が異なる",
+      "current_code_quote": "trading_platform/core/risk_engine/ptrc.py:223-226: self._unsafe_static_in_live: bool = ( isinstance(self._currency_converter, StaticCurrencyConverter) and _os.environ.get('OANDA_ENVIRONMENT', '').lower() == 'live' ) / tests/integration/test_atlas_top3_strategies.py:229-230: @pytest.fixture def ptrc() -> PreTradeRiskControl: return PreTradeRiskControl()",
+      "verdict": "refuted",
+      "notes": "第1チームの因果分析が誤り。ptrc.py:223-226の通り、_unsafe_static_in_live=Trueになるのは OANDA_ENVIRONMENT=='live' の場合のみ。test_atlas_top3_strategies.py はテスト環境（OANDA_ENVIRONMENT未設定）で実行されるため、PreTradeRiskControl()（StaticConverter注入）でも _unsafe_static_in_live=False であり、RE-001フェイルセーフは一切発動しない。非JPY戦略（EUR_USD等）でもStaticConverterのREJECTは起きない。xfailに到達するのは単純に合成データで各戦略のシグナル発生条件を満たさないため（ptrc_tested=Falseのままループが終了）であり、RE-001とは無関係。ただし『ptrcフィクスチャがcurrency_converter引数なし生成で、本番と実装が乖離している』という副次的な問題自体は事実（MockCurrencyConverterを注入すべき設計上の課題）。severity=mediumは過大。実際の問題はconfidence=lowのlowに相当する。"
+    },
+    {
+      "id": "QT-203",
+      "claim_accuracy": "正確",
+      "severity_verdict": "low 妥当",
+      "current_code_quote": "tests/integration/test_atlas_top3_strategies.py:299-313: try: signal = loaded_strategy.strategy.generate_signal(bar, features) ... except Exception: errors += 1 ... assert errors == 0, f'シグナル生成中に{errors}件のエラー発生'",
+      "verdict": "confirmed",
+      "notes": "引用行(299-313)は正確に実在する。except Exception節でexception変数へのbinding(as e)がなく、例外クラス名・メッセージ・スタックトレースは記録されない。テスト失敗時に診断情報が欠落するという問題は事実。severity=lowは妥当（テスト失敗の検知能力自体は保たれており、診断利便性の問題）。"
+    },
+    {
+      "id": "QT-204",
+      "claim_accuracy": "正確",
+      "severity_verdict": "medium 妥当",
+      "current_code_quote": "trading_platform/core/unified_runner/runner.py:488-497: claimed_trade_ids: set[str] = set() / for slot in self._slots: /     if slot.is_live and self._broker: /         await slot.restore_positions( /             risk_supervisor=self._risk_supervisor, /             claimed_trade_ids=claimed_trade_ids, /         ) / tests/unit/test_strategy_slot_restore_position_mismatch.py: StrategySlot単体のみ（2スロットをclaimed共有で呼ぶテストはunit/mismatchファイル内に存在するが、runner._startup_recovery/initialize()経由のループ自体を統合レベルで検証するテストは tests/integration/ に存在しない）",
+      "verdict": "confirmed",
+      "notes": "runner.py:491-497のclaimed_trade_ids共有ループは正確に実在（確認済み）。tests/integration/を全grep（claimed_trade_ids, fan-out, fanout, restore.*multi, multi.*restore, _restore_all_positions）した結果、統合テストレベルでrunnerのinitialize()→forループを複数スロットまたがって実行するテストは存在しない。unit/test_strategy_slot_restore_position_mismatchは2スロット×claimed_trade_ids共有の検証を含むが（lines 257-312）、これはStrategySlot.restore_positions()を直接呼ぶ単体テストであり、runner.initialize()経由のループ全体をカバーしていない。QT-204の主張は正確。runner.py:488の関数名は_startup_recoveryではなくinitialize()内の一部であることに注意（第1チームの記述'runner._restore_all_positions()'という記述は不正確だが、主張の本質は正しい）。severity=mediumは妥当。"
+    },
+    {
+      "id": "QT-205",
+      "claim_accuracy": "誤り（現コードと矛盾）",
+      "severity_verdict": "severity=low は過大。実際にはissueとして成立しない",
+      "current_code_quote": "tests/conftest.py:48-51: # STRICT_SKIP をデフォルト有効化（QT-F-01 恒久対策） / # 存在チェック系の pytest.skip による偽緑を CI・ローカル両方で即検出する。 / # 特定テストで意図的に無効化する場合は os.environ[\"STRICT_SKIP\"] = \"0\" を明示すること。 / os.environ.setdefault(\"STRICT_SKIP\", \"1\")",
+      "verdict": "refuted",
+      "notes": "第1チームの主張『conftest.py:365のif os.environ.get(STRICT_SKIP)==1はデフォルト無効』は現コードと矛盾する。conftest.py:51にos.environ.setdefault('STRICT_SKIP','1')が存在しており、テスト実行時にconftest.pyがロードされると自動的にSTRICT_SKIP=1が設定される（setdefaultなので外部から0を渡した場合は上書きしない）。コメントにも『STRICT_SKIPをデフォルト有効化（QT-F-01 恒久対策）』と明記されている。第1チームが引用したconftest.py:365は正確だが、その前提（デフォルト無効）が誤り。この修正はQT-F-01として既に対応済みであり、QT-205はすでに解消されたissueを重複登録している。severity=lowも過大で、有効なfindingとして成立しない。"
+    }
+  ],
+  "verdict_summary": {
+    "confirmed": ["QT-201", "QT-203", "QT-204"],
+    "refuted": ["QT-202", "QT-205"],
+    "adjusted": []
+  }
+}

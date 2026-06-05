@@ -1,0 +1,613 @@
+{
+  "meta": {
+    "reviewer": "devil-advocate",
+    "cluster": "B",
+    "label": "FTS infra",
+    "audit_id": "AUDIT-2026-0530-001",
+    "fts_commit_reviewed": "9998a7a",
+    "findings_reviewed": [
+      "PA-401 to PA-413",
+      "RE-401 to RE-412"
+    ],
+    "files_read": 28,
+    "generated_at": "2026-05-30"
+  },
+  "cross_cluster_deduplication": [
+    {
+      "finding_ids": [
+        "RE-401",
+        "DE-402",
+        "DM-402"
+      ],
+      "declaration": "DUPLICATE",
+      "canonical": "RE-401",
+      "defect_summary": "OANDABroker metrics= not injected in 3 places (runner.py:343/main.py:335/forward_test.py:239). DM-302 instrumentation dead in production.",
+      "verdict": "3 findings unified. RE-401 canonical. DE-402 and DM-402 closed as duplicates. Fix: add metrics=self._metrics to 3 instantiation sites.",
+      "severity_consensus": "medium -- DE-402 high and DM-402 HIGH overstated; observation-only, no trade flow impact"
+    },
+    {
+      "finding_ids": [
+        "RE-411",
+        "DE-404",
+        "DM-403"
+      ],
+      "declaration": "PARTIAL_DUPLICATE",
+      "canonical": "RE-411",
+      "defect_summary": "submit_order does not record TimeoutError metric. cancel_order is the only method with proper exception handling.",
+      "verdict": "RE-411 canonical. severity=low appropriate; no independent effect until RE-401 fixed."
+    },
+    {
+      "finding_ids": [
+        "PA-407",
+        "PA-401",
+        "PA-412"
+      ],
+      "declaration": "HIERARCHY",
+      "verdict": "PA-407 is structural root cause; PA-401 and PA-412 are concrete instances. Fix order: PA-401/PA-412 first then PA-407."
+    },
+    {
+      "finding_ids": [
+        "RE-406",
+        "RE-407"
+      ],
+      "declaration": "RELATED",
+      "verdict": "RE-406: live_anomaly over-aggregation. RE-407: live_orders_silent semantic collision. Both stem from EmailNotifier kind design. Keep as separate findings."
+    }
+  ],
+  "finding_validations": [
+    {
+      "id": "PA-401",
+      "claimed_severity": "high",
+      "validated_severity": "high",
+      "verdict": "CONFIRMED",
+      "post_fix_defect_confirmed": true,
+      "fact_check": {
+        "status": "EXACT_MATCH",
+        "details": "main.py:492-506 calls self._event_bus.publish() while EventBus not started (start() is at TradingPlatform.start() line 1004). EmailNotifier created line 852, start() at lines 1083-1089. memory_adapter.py:94-96: if not self._running: return confirmed. runner.py C-01 fix (EmailNotifier.start() before slot loop, lines 500-525) applied. main.py has NO equivalent fix. Email notification = 0 for main.py path."
+      },
+      "adoption_level": "must_fix",
+      "adoption_rationale": "Exact same bug as runner.py C-01. Zero Email notifications quantitatively confirmed. Fix pattern established."
+    },
+    {
+      "id": "PA-402",
+      "claimed_severity": "medium",
+      "validated_severity": "low",
+      "verdict": "SEVERITY_DOWNGRADED",
+      "post_fix_defect_confirmed": true,
+      "fact_check": {
+        "status": "CONFIRMED_WITH_DOWNGRADE",
+        "details": "main.py:141-143: self._audit_logger = AuditLogger() created unconditionally. No None path exists. Redundant guard = zero functional impact."
+      },
+      "bias_detected": [
+        {
+          "type": "OVERESTIMATION",
+          "location": "PA-402 severity=medium",
+          "criticism": "Zero functional impact. medium applies to findings with potential harm.",
+          "evidence": "main.py __init__: AuditLogger created unconditionally. No None-returning code path found.",
+          "counter_proposal": "Downgrade to low. Code cleanup only."
+        }
+      ],
+      "adoption_level": "informational",
+      "adoption_rationale": "Zero functional impact. Code cleanup only."
+    },
+    {
+      "id": "PA-403",
+      "claimed_severity": "medium",
+      "validated_severity": "low",
+      "verdict": "SEVERITY_DOWNGRADED",
+      "post_fix_defect_confirmed": true,
+      "fact_check": {
+        "status": "CONFIRMED_WITH_DOWNGRADE",
+        "details": "CRITICAL + WARNING double log in main.py structurally confirmable. Zero impact on trade flow, audit, alerting."
+      },
+      "bias_detected": [
+        {
+          "type": "OVERESTIMATION",
+          "location": "PA-403 severity=medium",
+          "criticism": "Log duplication is UX issue. Prometheus alerting does not parse raw structlog lines. low is appropriate.",
+          "evidence": "Zero impact on trade flow / monitoring / AuditLog confirmed in source.",
+          "counter_proposal": "Downgrade to low. Remove WARNING in memory branch."
+        }
+      ],
+      "adoption_level": "informational",
+      "adoption_rationale": "Pure log cleanup. No functional or monitoring impact."
+    },
+    {
+      "id": "PA-404",
+      "claimed_severity": "low",
+      "validated_severity": "low",
+      "verdict": "CONFIRMED",
+      "post_fix_defect_confirmed": false,
+      "fact_check": {
+        "status": "CONFIRMED",
+        "details": "actor strings are forensics-only with no downstream branching. Zero functional impact."
+      },
+      "adoption_level": "informational",
+      "adoption_rationale": "Enum migration prevents future typo risk only. Zero current impact."
+    },
+    {
+      "id": "PA-405",
+      "claimed_severity": "medium",
+      "validated_severity": "low",
+      "verdict": "SEVERITY_DOWNGRADED",
+      "post_fix_defect_confirmed": false,
+      "fact_check": {
+        "status": "PARTIALLY_INCORRECT",
+        "details": "_check_live_health_alerts at line 1547 is inside heartbeat block (1522-1554). account_info failure return is at line 1632. 1547 < 1632 => _check_live_health_alerts EXECUTES even on account_info failure. Primary claim gets-skipped contradicts actual code. Side effect (silence_sec grows during outage) is accurate but low impact."
+      },
+      "bias_detected": [
+        {
+          "type": "CAUSAL_ERROR",
+          "location": "PA-405 primary claim",
+          "criticism": "runner.py:1547 is before account_info failure return at 1632. Skip claim is factually incorrect.",
+          "evidence": "runner.py:1522-1554 heartbeat block contains _check_live_health_alerts(1547), then account_info fetch at 1559, failure return at 1632.",
+          "counter_proposal": "Downgrade to low. Record only the silence_sec side effect."
+        }
+      ],
+      "adoption_level": "informational",
+      "adoption_rationale": "Primary premise incorrect (not skipped). Side effect is low severity."
+    },
+    {
+      "id": "PA-406",
+      "claimed_severity": "medium",
+      "validated_severity": "low",
+      "verdict": "SEVERITY_DOWNGRADED",
+      "post_fix_defect_confirmed": false,
+      "fact_check": {
+        "status": "CONFIRMED_WITH_DOWNGRADE",
+        "details": "loader.py:693-698 finally pop confirmed. AST allowlist blocks inspect/pickle/globals. Finding itself states no actual harm with current ATLAS strategies."
+      },
+      "bias_detected": [
+        {
+          "type": "OVERESTIMATION",
+          "location": "PA-406 severity=medium",
+          "criticism": "Finding admits zero current harm. AST allowlist blocks attack surface. medium is excessive.",
+          "evidence": "_ALLOWED_MODULE_PREFIXES: no inspect/pickle/sys. _EXPLICIT_DENYLIST: os/sys/subprocess listed.",
+          "counter_proposal": "Maintain at low. Docstring addition sufficient."
+        }
+      ],
+      "adoption_level": "informational",
+      "adoption_rationale": "Zero current harm, structurally protected by AST allowlist."
+    },
+    {
+      "id": "PA-407",
+      "claimed_severity": "high",
+      "validated_severity": "high",
+      "verdict": "CONFIRMED",
+      "post_fix_defect_confirmed": false,
+      "fact_check": {
+        "status": "CONFIRMED",
+        "details": "main.py:128-132 and runner.py:407-411 duplicate set_metrics_collector loops confirmed. main.py:455-528 and runner.py:544-605 duplicate Gate rejection handling confirmed. PA-401 itself is direct evidence that this dual-implementation causes one-side-only fix omissions."
+      },
+      "risk_warnings": [
+        {
+          "scenario": "Future audits will repeatedly find same-pattern one-side-only fix omissions",
+          "probability": "high -- PA-401 demonstrates this in current round",
+          "impact": "Audit cost grows O(n). No structural fix without PA-307 ADR."
+        }
+      ],
+      "adoption_level": "should_consider",
+      "adoption_rationale": "Valid structural concern justifying PA-307 ADR advancement. Requires decision: shared bootstrap layer or main.py deprecation."
+    },
+    {
+      "id": "PA-408",
+      "claimed_severity": "medium",
+      "validated_severity": "medium",
+      "verdict": "CONFIRMED",
+      "post_fix_defect_confirmed": false,
+      "fact_check": {
+        "status": "CONFIRMED",
+        "details": "memory_adapter.py:94-96 silent return confirmed. publish() returns normally so caller except clause never triggered. Structurally prevents detection of PA-401 bug category."
+      },
+      "adoption_level": "should_consider",
+      "adoption_rationale": "PA-401 fix eliminates immediate harm. EventBusNotStartedError or metrics increment remains valuable as defense-in-depth."
+    },
+    {
+      "id": "PA-409",
+      "claimed_severity": "low",
+      "validated_severity": "low",
+      "verdict": "CONFIRMED",
+      "post_fix_defect_confirmed": false,
+      "fact_check": {
+        "status": "CONFIRMED",
+        "details": "loader.py:50-66: both collections and collections.abc listed. Prefix match allows collections.deque etc. No current ATLAS strategy uses this."
+      },
+      "adoption_level": "informational",
+      "adoption_rationale": "Zero current harm. Preventive concern for future ATLAS generation patterns."
+    },
+    {
+      "id": "PA-410",
+      "claimed_severity": "medium",
+      "validated_severity": "low",
+      "verdict": "SEVERITY_DOWNGRADED",
+      "post_fix_defect_confirmed": false,
+      "fact_check": {
+        "status": "PARTIALLY_INCORRECT",
+        "details": "_track_live_order_submissions (line 1728) is after account_info failure return (line 1632) -- correctly skipped. _maybe_reconcile_live_positions is inside heartbeat block (line 1551) before account_info fetch -- NOT skipped. Same error as PA-405. state_manager.save_all skip during OANDA outage is acceptable by design."
+      },
+      "bias_detected": [
+        {
+          "type": "CAUSAL_ERROR",
+          "location": "PA-410 claim that _maybe_reconcile_live_positions gets skipped",
+          "criticism": "_maybe_reconcile_live_positions at runner.py:1551 (heartbeat block) executes before account_info failure return at line 1632.",
+          "evidence": "runner.py:1551 < runner.py:1632.",
+          "counter_proposal": "Downgrade to low. Only _track_live_order_submissions skip is factually correct."
+        }
+      ],
+      "adoption_level": "informational",
+      "adoption_rationale": "Temporary state save skip during OANDA outage is acceptable design behavior."
+    },
+    {
+      "id": "PA-411",
+      "claimed_severity": "low",
+      "validated_severity": "low",
+      "verdict": "CONFIRMED",
+      "post_fix_defect_confirmed": false,
+      "fact_check": {
+        "status": "CONFIRMED",
+        "details": "_ALERT_LEVEL_BY_TYPE and _RISK_ALERT_KINDS are str dicts. alert_type is raw str not Enum. Typo-induced silently-drop risk is real."
+      },
+      "adoption_level": "should_consider",
+      "adoption_rationale": "Enum migration enables mypy typo detection. Low cost, zero current harm."
+    },
+    {
+      "id": "PA-412",
+      "claimed_severity": "high",
+      "validated_severity": "high",
+      "verdict": "CONFIRMED",
+      "post_fix_defect_confirmed": true,
+      "fact_check": {
+        "status": "CONFIRMED",
+        "details": "main.py:357-420 escape hatch (PLATFORM_ALLOW_MAIN_PRODUCTION_LIVE=1) confirmed in source. When traversed: PA-401 Email dead path + PA-103 restore_positions unimplemented = dual risk. main.py has no _restore_all_positions equivalent (runner.py:661 has it)."
+      },
+      "risk_warnings": [
+        {
+          "scenario": "Escape hatch used with OANDA existing positions + Gate-FAIL strategy",
+          "probability": "low -- emergency-only",
+          "impact": "FTS does not recognize existing positions => double entry + Gate rejection Email = 0. Reproduces INC-2026-0526-001 phantom position."
+        }
+      ],
+      "adoption_level": "must_fix",
+      "adoption_rationale": "Dual risk of PA-401 + PA-103 on single escape hatch path. Escape hatch removal or EmailNotifier fast-path implementation required."
+    },
+    {
+      "id": "PA-413",
+      "claimed_severity": "low",
+      "validated_severity": "low",
+      "verdict": "CONFIRMED",
+      "post_fix_defect_confirmed": true,
+      "fact_check": {
+        "status": "CONFIRMED",
+        "details": "test_pa301_osg_metrics_injection.py AST check verifies presence of set_metrics_collector in for loop body but does not verify receiver object identity. Current implementation correct; test structural weakness only."
+      },
+      "adoption_level": "should_consider",
+      "adoption_rationale": "Test quality issue. Current impl correct but refactor regression detection is weak."
+    },
+    {
+      "id": "RE-401",
+      "claimed_severity": "medium",
+      "validated_severity": "medium",
+      "verdict": "CONFIRMED",
+      "post_fix_defect_confirmed": true,
+      "fact_check": {
+        "status": "CONFIRMED",
+        "details": "runner.py:343-347 / main.py:335-339 / forward_test.py:239-243: all 3 instantiate OANDABroker without metrics= confirmed. client.py:841-842: if self._metrics is None: return is immediate no-op. Same defect independently found by DE-402 and DM-402; RE-401 canonical."
+      },
+      "bias_detected": [
+        {
+          "type": "POTENTIAL_UNDERESTIMATION",
+          "location": "RE-401 severity=medium",
+          "criticism": "DE-402 rated same defect high. SRE perspective: OANDA API degradation undetectable is serious. However trade flow unaffected so medium is correct floor.",
+          "evidence": "client.py:841: metrics None check is observation-only. Trade submission functions with metrics=None.",
+          "counter_proposal": "Maintain medium. Treat as SRE-high urgency: 3-line fix only."
+        }
+      ],
+      "adoption_level": "must_fix",
+      "adoption_rationale": "3-line fix. Directly prevents INC-2026-0526 recurrence."
+    },
+    {
+      "id": "RE-402",
+      "claimed_severity": "high",
+      "validated_severity": "high",
+      "verdict": "CONFIRMED",
+      "post_fix_defect_confirmed": true,
+      "fact_check": {
+        "status": "CONFIRMED",
+        "details": "strategy_slot.py:808-824 (BrokerUnavailableError): return only, no OANDA close. Lines 829-842 (matching=[]): return only, no OANDA close. Lines 749-759 entry_rollback: state clear only. runner.py:1122-1146 divergence B: WARN + Email only, no auto-close (by design). Reproduction scenario realistic -- INC-2026-0526 same-type event."
+      },
+      "risk_warnings": [
+        {
+          "scenario": "OANDA transient failure after entry -> BrokerUnavailableError in get_open_trades -> entry_rollback -> orphan trade with no SL/TP",
+          "probability": "medium -- OANDA outages have occurred",
+          "impact": "Unmanaged position exposed to market + PTRC unaware of exposure => allows new entry = up to 2x unintended position size"
+        },
+        {
+          "scenario": "RE-404 compound: submit succeeds, immediate get_open_trades before clientExtensions propagation -> matching=[] -> entry_rollback",
+          "probability": "medium -- OANDA latency spikes trigger this",
+          "impact": "Same orphan trade. RE-404 retry fix reduces RE-402 frequency significantly."
+        }
+      ],
+      "adoption_level": "must_fix",
+      "adoption_rationale": "Inverse of INC-2026-0526-001 (FTS->OANDA direction phantom trade). Real loss risk. Minimum: CRITICAL RiskAlert on orphan. Fix order: RE-404 first then RE-402."
+    },
+    {
+      "id": "RE-403",
+      "claimed_severity": "high",
+      "validated_severity": "medium",
+      "verdict": "SEVERITY_DOWNGRADED",
+      "post_fix_defect_confirmed": true,
+      "fact_check": {
+        "status": "CONFIRMED_WITH_DOWNGRADE",
+        "details": "strategy_slot.py:884: max(matching, key=lambda t: t.open_time) latest-only adoption confirmed. Line 867-868 explicitly defers claimed_trade_ids runtime exclusion to next audit-loop. Current Live 22 strategies: pyramiding presence unconfirmed."
+      },
+      "bias_detected": [
+        {
+          "type": "REALIZABILITY_QUESTION",
+          "location": "RE-403 reproduction scenario (same strategy enters twice in short window)",
+          "criticism": "PTRC enforces 1-position-per-strategy (open_units > 0 blocks new entry). Without pyramiding enabled strategies, double-entry path is structurally dead. Finding self-qualifies: current Live 22 strategies no pyramiding (unconfirmed). Confirm first.",
+          "evidence": "1-position PTRC constraint means open_trade_id > 0 slots skip new entries. Double-entry requires pyramiding not confirmed in current Live strategies.",
+          "counter_proposal": "Downgrade to medium. Must-fix before any pyramiding strategy goes Live."
+        }
+      ],
+      "adoption_level": "should_consider",
+      "adoption_rationale": "Must fix before pyramiding strategy goes Live. Current 1-position constraint makes immediate risk low."
+    },
+    {
+      "id": "RE-404",
+      "claimed_severity": "medium",
+      "validated_severity": "medium",
+      "verdict": "CONFIRMED",
+      "post_fix_defect_confirmed": true,
+      "fact_check": {
+        "status": "CONFIRMED",
+        "details": "strategy_slot.py:806-808: get_open_trades called once only. Lines 855-860: comment exact-match only. Lines 867-882: no match => unconditional entry_rollback. OANDA clientExtensions async propagation (typically < 500ms) creates race window => matching=[] => RE-402 orphan path. RE-301 fallback removal exposed this race."
+      },
+      "adoption_level": "must_fix",
+      "adoption_rationale": "Actively triggers RE-402 orphan trade path. Low-cost fix: backoff retry 2-3 times (0.2s/0.5s/1.0s). Fix before RE-402."
+    },
+    {
+      "id": "RE-405",
+      "claimed_severity": "low",
+      "validated_severity": "low",
+      "verdict": "CONFIRMED",
+      "post_fix_defect_confirmed": false,
+      "fact_check": {
+        "status": "CONFIRMED",
+        "details": "runner.py:827 and runner.py:1045: self._broker.get_open_trades() called directly bypassing BrokerGateway. except Exception catches failures so no functional breakage. Type consistency issue only."
+      },
+      "adoption_level": "informational",
+      "adoption_rationale": "Zero operational impact. Future extensibility technical debt."
+    },
+    {
+      "id": "RE-406",
+      "claimed_severity": "medium",
+      "validated_severity": "medium",
+      "verdict": "CONFIRMED",
+      "post_fix_defect_confirmed": true,
+      "fact_check": {
+        "status": "CONFIRMED",
+        "details": "email_notifier.py:316: oanda_connection_lost -> live_anomaly. Line 321: oanda_connection_degraded -> live_anomaly. Lines 294/300/326: account_position_mismatch, exposure_near_cap, position_reconcile_mismatch, market_data_poll_failure all -> live_anomaly. Line 343: live_anomaly throttle=900s. During OANDA failure 6+ alert types fire but only 1 email per 15 minutes delivered."
+      },
+      "risk_warnings": [
+        {
+          "scenario": "OANDA outage triggers both oanda_connection_lost and oanda_connection_degraded simultaneously",
+          "probability": "high -- both fire near-simultaneously by design",
+          "impact": "One email delivered, one silently dropped. Operator cannot distinguish severity. Up to 6 distinct alert types suppressed to 1 email per 15 minutes."
+        }
+      ],
+      "adoption_level": "should_consider",
+      "adoption_rationale": "Same structural fix as INV-2026-0528-001: first-of-type bypass or kind separation. Operational impact real, zero trade flow impact."
+    },
+    {
+      "id": "RE-407",
+      "claimed_severity": "medium",
+      "validated_severity": "medium",
+      "verdict": "CONFIRMED",
+      "post_fix_defect_confirmed": true,
+      "fact_check": {
+        "status": "CONFIRMED",
+        "details": "runner.py:937: _check_live_health_alerts fires live_orders_silent. runner.py:1613: RE-305 fires same alert_type live_orders_silent. email_notifier.py:295: live_orders_silent kind with 43200s throttle shared by both. Two semantically distinct events collapsed to 1 email per 12 hours."
+      },
+      "adoption_level": "should_consider",
+      "adoption_rationale": "RE-408/RE-409 combined: separate RE-305 to dedicated alert_type solves all three."
+    },
+    {
+      "id": "RE-408",
+      "claimed_severity": "low",
+      "validated_severity": "low",
+      "verdict": "CONFIRMED",
+      "post_fix_defect_confirmed": true,
+      "fact_check": {
+        "status": "CONFIRMED",
+        "details": "runner.py:1608-1611: fires on multiples of 30 consecutive errors. email_notifier.py:349: live_orders_silent throttle=43200s (12h). 30-minute interval firing => only first email delivered. Commit message claim notifying operator until recovery is misleading for email channel."
+      },
+      "adoption_level": "should_consider",
+      "adoption_rationale": "Resolve jointly with RE-407 via dedicated kind + appropriate throttle."
+    },
+    {
+      "id": "RE-409",
+      "claimed_severity": "low",
+      "validated_severity": "low",
+      "verdict": "CONFIRMED",
+      "post_fix_defect_confirmed": true,
+      "fact_check": {
+        "status": "CONFIRMED",
+        "details": "runner.py:1275-1290 _ALERT_LEVEL_BY_TYPE: live_orders_silent registered at line 1282 (for _check_live_health_alerts). RE-305 fires same alert_type so level=WARNING. CRITICAL would be appropriate for trading completely stopped escalation."
+      },
+      "adoption_level": "should_consider",
+      "adoption_rationale": "Set CRITICAL when splitting RE-305 to its own alert_type (RE-407 fix)."
+    },
+    {
+      "id": "RE-410",
+      "claimed_severity": "medium",
+      "validated_severity": "medium",
+      "verdict": "CONFIRMED",
+      "post_fix_defect_confirmed": true,
+      "fact_check": {
+        "status": "CONFIRMED",
+        "details": "live_store.py:439: self._metrics.observe_feature_staleness(self.primary_tf, age_sec) passes TF string as strategy_id arg. metrics.py:838: param name is strategy_id: str, Prometheus label is strategy_id. Result: strategy_id=H1 merges all strategies sharing H1 TF. Individual strategy feature staleness invisible. FxFeatureStorestaleHigh alert semantics broken."
+      },
+      "adoption_level": "should_consider",
+      "adoption_rationale": "Prometheus label semantic mismatch breaks per-strategy staleness monitoring. Fix: rename param or move observation point to strategy_slot level."
+    },
+    {
+      "id": "RE-411",
+      "claimed_severity": "low",
+      "validated_severity": "low",
+      "verdict": "CONFIRMED",
+      "post_fix_defect_confirmed": true,
+      "fact_check": {
+        "status": "CONFIRMED",
+        "details": "client.py:370: submit_order uses async with session.post() without try block. TimeoutError propagates without calling _record_api_metric. client.py:520-527: cancel_order is the only method with proper TimeoutError catch + metric record. Zero independent effect until RE-401 fixed."
+      },
+      "adoption_level": "informational",
+      "adoption_rationale": "Depends on RE-401 fix for any effect. Batch-fix with RE-401."
+    },
+    {
+      "id": "RE-412",
+      "claimed_severity": "low",
+      "validated_severity": "low",
+      "verdict": "CONFIRMED",
+      "post_fix_defect_confirmed": false,
+      "fact_check": {
+        "status": "CONFIRMED",
+        "details": "main.py has zero check_kill_switch calls. Uses CircuitBreaker + KillSwitch (risk_engine module) with EventBus-based halt/cancel. H-01 loop pattern structurally cannot occur. RE-303 (low) re-evaluation correctly stays low."
+      },
+      "adoption_level": "informational",
+      "adoption_rationale": "Re-evaluation confirms low is correct. Revisit when PA-307 main.py deprecation proceeds."
+    }
+  ],
+  "summary": {
+    "total_findings": 25,
+    "pa_findings": 13,
+    "re_findings": 12,
+    "severity_distribution_original": {
+      "high": 5,
+      "medium": 11,
+      "low": 9
+    },
+    "severity_distribution_after_review": {
+      "high": 4,
+      "medium": 7,
+      "low": 14
+    },
+    "severity_changes": [
+      {
+        "id": "PA-402",
+        "original": "medium",
+        "revised": "low",
+        "reason": "Zero functional impact -- redundant dead-code guard"
+      },
+      {
+        "id": "PA-403",
+        "original": "medium",
+        "revised": "low",
+        "reason": "Log duplication only -- zero monitoring/alert impact"
+      },
+      {
+        "id": "PA-405",
+        "original": "medium",
+        "revised": "low",
+        "reason": "_check_live_health_alerts executes even when account_info fails (primary premise incorrect)"
+      },
+      {
+        "id": "PA-406",
+        "original": "medium",
+        "revised": "low",
+        "reason": "Zero current harm; AST allowlist structurally prevents stated attack surface"
+      },
+      {
+        "id": "PA-410",
+        "original": "medium",
+        "revised": "low",
+        "reason": "_maybe_reconcile executes before account_info failure return (same analysis error as PA-405)"
+      },
+      {
+        "id": "RE-403",
+        "original": "high",
+        "revised": "medium",
+        "reason": "Pyramiding not confirmed in current Live strategies; 1-position PTRC constraint makes immediate risk low"
+      }
+    ],
+    "confirmed_high": [
+      "PA-401",
+      "PA-407",
+      "PA-412",
+      "RE-402"
+    ],
+    "confirmed_post_fix_defects": [
+      "PA-401",
+      "PA-402",
+      "PA-403",
+      "PA-412",
+      "PA-413",
+      "RE-401",
+      "RE-402",
+      "RE-403",
+      "RE-404",
+      "RE-406",
+      "RE-407",
+      "RE-408",
+      "RE-409",
+      "RE-410",
+      "RE-411"
+    ],
+    "must_fix": [
+      "PA-401",
+      "PA-412",
+      "RE-401",
+      "RE-402",
+      "RE-404"
+    ],
+    "should_consider": [
+      "PA-407",
+      "PA-408",
+      "PA-411",
+      "PA-413",
+      "RE-403",
+      "RE-406",
+      "RE-407",
+      "RE-408",
+      "RE-409",
+      "RE-410"
+    ],
+    "informational": [
+      "PA-402",
+      "PA-403",
+      "PA-404",
+      "PA-405",
+      "PA-406",
+      "PA-409",
+      "PA-410",
+      "RE-405",
+      "RE-411",
+      "RE-412"
+    ],
+    "duplicate_declarations": [
+      "RE-401 = DE-402 = DM-402 (OANDABroker metrics not injected) -- RE-401 canonical, others closed",
+      "RE-411 ~ DE-404 ~ DM-403 (submit_order TimeoutError metric drop) -- RE-411 canonical, merge recommended"
+    ]
+  },
+  "critical_observations": [
+    {
+      "observation": "PA-401: runner.py C-01 fix not ported to main.py",
+      "details": "AUDIT-2026-0529-003 C-01 moved EmailNotifier.start() before slot load loop in runner.py (lines 500-525). Identical fix omitted from main.py (lines 422-858). Dual-implementation structure (PA-407) predictably generates one-side-only fix omissions. Quantitative impact: 0 email notifications for LIVE Gate rejections on main.py path."
+    },
+    {
+      "observation": "RE-402 and RE-404 are a chained bug pair",
+      "details": "RE-404 (clientExtensions propagation race) triggers RE-402 (orphan trade). RE-301 fallback removal exposed this race window. RE-404 retry fix substantially reduces RE-402 occurrence frequency. Recommended fix order: RE-404 (retry) -> RE-402 (emergency close on orphan)."
+    },
+    {
+      "observation": "DM-302 found independently by 3 teams (RE-401/DE-402/DM-402)",
+      "details": "3 teams independently identified OANDABroker metrics= not injected. Fix is 3 lines (runner.py:343 / main.py:335 / forward_test.py:239: add metrics=self._metrics). Repetition confirms importance; also indicates need for structural injection verification (AST test) to prevent recurrence."
+    },
+    {
+      "observation": "PA-405 and PA-410 share the same code execution order analysis error",
+      "details": "Both claim _check_live_health_alerts / _maybe_reconcile_live_positions get skipped when account_info fails. Both are inside the heartbeat block (runner.py:1522-1554) which executes BEFORE the account_info try block (line 1559) and its failure return (line 1632). Evidence line numbers are correct; execution order analysis is wrong. Root cause of severity downgrades for both findings."
+    },
+    {
+      "observation": "RE-406 live_anomaly over-aggregation matches INV-2026-0528-001 structure",
+      "details": "Up to 6+ distinct alert types collapsed into live_anomaly with 900s shared throttle. INV-2026-0528-001 first-of-type bypass mechanism, if applied to live_anomaly kind, would ensure each distinct alert_type delivers its first notification while still throttling repeats."
+    }
+  ]
+}

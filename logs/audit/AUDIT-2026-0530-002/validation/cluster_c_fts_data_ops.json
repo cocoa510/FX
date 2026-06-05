@@ -1,0 +1,445 @@
+{
+  "meta": {
+    "cluster": "C",
+    "label": "FTS データ・運用",
+    "validator": "devil-advocate",
+    "audit_round": "AUDIT-2026-0530-002",
+    "head_commit_verified": "9f605e0",
+    "code_commit_verified": "eccab9a",
+    "validation_date": "2026-05-30",
+    "findings_scope": {
+      "data-engineer": [
+        "DE-501",
+        "DE-502",
+        "DE-503",
+        "DE-504",
+        "DE-505",
+        "DE-506",
+        "DE-507",
+        "DE-508",
+        "DE-509",
+        "DE-510"
+      ],
+      "qa-tester": [
+        "QT-501",
+        "QT-502",
+        "QT-503",
+        "QT-504",
+        "QT-505",
+        "QT-506",
+        "QT-507"
+      ],
+      "devops-monitor": [
+        "DM-501",
+        "DM-502",
+        "DM-503",
+        "DM-504",
+        "DM-505"
+      ]
+    },
+    "files_referenced": 28
+  },
+  "duplicate_analysis": {
+    "DE-501_vs_DM-503": {
+      "verdict": "完全重複",
+      "canonical_id": "DE-501",
+      "suppress_id": "DM-503",
+      "severity_consensus": "medium",
+      "rationale": "両 finding とも observe_event_bus_latency / set_order_success_rate の本番呼び出し 0 件を指摘。metrics.py:550-565 / 831-839 定義のみ、trading_platform/ 全体で callsite ゼロを Grep で確認。原因記述・suggested_fix・impact が一致する。",
+      "note": "DE-501 は severity=high、DM-503 は medium。DE-501 の high 付与根拠は RE-401 との類推だが、RE-401（gauge 自体が未生成）と本件（gauge 登録済みで observe/set 呼び出しゼロ = unused metrics）では深刻度が異なる。medium が妥当。"
+    },
+    "DE-502_vs_DM-502": {
+      "verdict": "完全重複",
+      "canonical_id": "DE-502",
+      "suppress_id": "DM-502",
+      "severity_consensus": "medium",
+      "rationale": "alerting_rules.yml:109-117 が M15/H1/H4 の 3 TF しか PromQL に含まず、live_store.py:93-101 の TF_SECONDS の 4 TF で FxFeatureStorestaleHigh が発火しない dead alert path を指摘。evidence の file:line も一致。",
+      "note": "DE-502 は medium、DM-502 は low。TF_SECONDS 定義と alerting coverage の乖離は設計上の構造問題として medium 採用。"
+    },
+    "DM-501_vs_RE-503": {
+      "verdict": "部分重複（DM-501 は RE-503 のサブセット）",
+      "canonical_ids": [
+        "DM-501",
+        "RE-503"
+      ],
+      "overlap_evidence": "client.py:854-872 (get_open_positions)",
+      "unique_to_DM_501": "client.py:831-847 (close_trade 通常経路 PUT: _record_api_metric 完全欠落)",
+      "rationale": "RE-503 は 6 エンドポイントで _record_api_metric dead path を指摘。DM-501 は close_trade + get_open_positions の 2 エンドポイントのみ。独立 finding として維持。"
+    }
+  },
+  "finding_verdicts": [
+    {
+      "id": "DE-501",
+      "original_severity": "high",
+      "da_severity": "medium",
+      "factual_verification": "CONFIRMED",
+      "evidence_checked": [
+        "metrics.py:550-565 observe_event_bus_latency 定義確認済",
+        "metrics.py:831-839 set_order_success_rate 定義確認済",
+        "Grep: trading_platform/ 内 callsite = metrics.py 定義行 + tests/unit/test_prometheus_metrics_dm_f_002.py:122,207 のみ（本番 callsite ゼロ確認）",
+        "alerting_rules.yml 全 186 行: 両 metric のアラートルール存在せず"
+      ],
+      "severity_downgrade_reason": "RE-401（Prometheus gauge 自体が未生成）との類推による high 付与は過剰。本件は gauge 登録済みで Prometheus scrape は機能する。observe/set 呼び出しがないため常時初期値のまま（unused metrics であり dead instrumentation ではない）。medium が定量的に妥当。",
+      "duplicate_of": "DM-503（完全重複）",
+      "adoption_level": "should_consider",
+      "post_fix_defect_verified": false,
+      "da_notes": "suggested_fix の 4 ステップ（EventBus 計装 / OrderManager 成功率更新 / contract テスト拡張 / alerting_rules 追加）はいずれも妥当。DM-503 と統合して判断すること。"
+    },
+    {
+      "id": "DE-502",
+      "original_severity": "medium",
+      "da_severity": "medium",
+      "factual_verification": "CONFIRMED",
+      "evidence_checked": [
+        "alerting_rules.yml:109-117: M15/H1/H4 の 3 ブランチのみ（D1/M1/M5/M30 なし）を直接確認",
+        "live_store.py:93-101: TF_SECONDS に M1/M5/M15/M30/H1/H4/D1 全 7 TF 定義を確認"
+      ],
+      "duplicate_of": "DM-502（完全重複）",
+      "adoption_level": "should_consider",
+      "post_fix_defect_verified": true,
+      "da_notes": "TF_SECONDS を機械的に参照して alerting_rules を生成するスクリプト化が推奨されるが緊急性は低い。DE-509 修正と同時対処が効率的。"
+    },
+    {
+      "id": "DE-503",
+      "original_severity": "medium",
+      "da_severity": "medium",
+      "factual_verification": "CONFIRMED",
+      "evidence_checked": [
+        "docs/runbook/feature_staleness.md:4: 旧 expr のまま（全文確認済）",
+        "docs/runbook/feature_staleness.md:19: 旧 semantics のまま",
+        "docs/runbook/feature_staleness.md:27: 旧ラベルセット",
+        "alerting_rules.yml:109-131: 新 expr / 新ラベル（primary_tf）確認済",
+        "runbook 最終更新: 2026-05-24（eccab9a の DE-403 修正後に未更新）"
+      ],
+      "adoption_level": "must_fix",
+      "post_fix_defect_verified": true,
+      "da_notes": "alerting_rules.yml:130 の annotations 修正と runbook 更新を同一 PR で対処推奨。修正コスト低（docs 更新のみ）かつ oncall 誤誘導の直接リスクがあるため must_fix とする。"
+    },
+    {
+      "id": "DE-504",
+      "original_severity": "high",
+      "da_severity": "high",
+      "factual_verification": "CONFIRMED",
+      "evidence_checked": [
+        "alerting_rules.yml:109-131: 週末 mute なし / for: 3m のみ確認済",
+        "stream_receiver.py:301-323: _is_weekend_utc() および _current_heartbeat_timeout() -- 週末判定が data 層に実装済みを確認",
+        "quality_engine.py:692-733: _count_weekend_seconds() による weekend_seconds 控除が quality_engine には実装済みを確認（非対称性の実証）",
+        "計算確認: H4 staleness 週末 48h 停止 = 約 172800s（閾値 28800s の 6.0 倍）、H1 = 約 169200s（閾値 7200s の 23.5 倍）、M15 = 約 171900s（閾値 1800s の 95.5 倍）"
+      ],
+      "adoption_level": "must_fix",
+      "post_fix_defect_verified": true,
+      "additional_suggestion": "Alertmanager の mute_time_intervals（土曜 00:00 UTC〜月曜 00:00 UTC）を使う案 C も追加提案する。alerting_rules.yml / live_store.py 双方を変更せず Alertmanager 設定のみで対処でき最小変更リスク。週末中の真の stream 障害を検知できなくなるリスクがあるため案 A（fx_market_open gauge + alerting ゲート）が設計上は優位。",
+      "da_notes": "DE-403 修正の直接の副産物（旧実装は常時 FIRING、修正後は平日正常・週末一斉 FIRING）。次の週末（UTC 金曜 22:00）までに修正が必要。"
+    },
+    {
+      "id": "DE-505",
+      "original_severity": "medium",
+      "da_severity": "medium",
+      "factual_verification": "CONFIRMED",
+      "evidence_checked": [
+        "metrics.py:858-868: Phase 4.5 ADVISORY docstring 確認済",
+        "alerting_rules.yml:130: 影響戦略は strategy_id ラベルで特定できます -- 実態は TF 名しか入らない（live_store.py:449-453 で self.primary_tf を strategy_id 引数として渡している）を確認",
+        "docs/ 配下: LiveFeatureStore.*strategy_id -- 0 hits（ADR/TODO 未起票確認）"
+      ],
+      "adoption_level": "should_consider",
+      "post_fix_defect_verified": true,
+      "da_notes": "alerting_rules.yml:130 の annotations 修正は DE-503 と同一 PR で対処可能（1 行変更）。ADR 起票は中期対応でよい。"
+    },
+    {
+      "id": "DE-506",
+      "original_severity": "medium",
+      "da_severity": "medium",
+      "factual_verification": "CONFIRMED",
+      "evidence_checked": [
+        "main.py:977-987: OANDAStreamReceiver 生成 -- quality_engine のみ注入、backfill_fn/backfill_timeframes/state_store/last_bar_time_fn/kill_switch_fn は全 default(None) を確認",
+        "forward_test.py:204-210: OANDAStreamReceiver 生成 -- quality_engine すら未注入（5 引数すべて default）を確認",
+        "stream_receiver.py:487-491: backfill_fn is None または backfill_timeframes 空で早期 return する経路を確認"
+      ],
+      "adoption_level": "should_consider",
+      "post_fix_defect_verified": false,
+      "da_notes": "RE-401 同型の実装完了・配線忘れパターンが本監査で 3 件目（DE-501/DE-506/DM-501）。forward_test.py は quality_engine も欠落（DE-101 修正が main.py に限定され forward_test.py に未適用）。contract テストによる配線強制が根本的解決策。"
+    },
+    {
+      "id": "DE-507",
+      "original_severity": "low",
+      "da_severity": "low",
+      "factual_verification": "CONFIRMED",
+      "evidence_checked": [
+        "live_store.py:443-444: if self._metrics is not None and self._last_primary_bar_time is not None ガード確認",
+        "alerting_rules.yml:109-117: absent() 検出なし確認"
+      ],
+      "adoption_level": "informational",
+      "post_fix_defect_verified": true,
+      "da_notes": "初回バー到達時に staleness=0.0 を発行する修正が最もシンプルで副作用ゼロ。低優先度で次回 sprint 対象。"
+    },
+    {
+      "id": "DE-508",
+      "original_severity": "low",
+      "da_severity": "low",
+      "factual_verification": "CONFIRMED",
+      "evidence_checked": [
+        "stream_receiver.py:58-61: _TF_SECONDS に D:86400 を使用（D1 ではない）ことを直接確認",
+        "live_store.py:93-101: TF_SECONDS に D1:86400 を使用",
+        "data/common/timeframes.py: 両キー対応の共通モジュール存在確認"
+      ],
+      "adoption_level": "informational",
+      "post_fix_defect_verified": false,
+      "da_notes": "循環 import 回避コメントは timeframes.py が独立モジュールであれば根拠が薄い可能性がある。DE-506 修正時に同時確認を推奨。"
+    },
+    {
+      "id": "DE-509",
+      "original_severity": "low",
+      "da_severity": "low",
+      "factual_verification": "CONFIRMED",
+      "evidence_checked": [
+        "test_de403_feature_staleness_semantics.py:52-105: H1/H4/M15 の 3 TF のみ parametrize 確認",
+        "live_store.py:445: TF_SECONDS.get(self.primary_tf, 3600) フォールバック確認"
+      ],
+      "adoption_level": "informational",
+      "post_fix_defect_verified": true,
+      "da_notes": "DE-502 修正（alerting_rules に D1/M1/M5/M30 追加）と合わせて parametrize を 7 TF 全網羅に拡張するのが効率的。同時対処推奨。"
+    },
+    {
+      "id": "DE-510",
+      "original_severity": "low",
+      "da_severity": "informational",
+      "factual_verification": "CONFIRMED",
+      "evidence_checked": [
+        "runner.py:1611-1634: RE-305 復旧通知 publish 箇所確認",
+        "Grep: live_orders_silent trading_platform/data/ -- no matches 確認"
+      ],
+      "adoption_level": "informational",
+      "post_fix_defect_verified": false,
+      "da_notes": "finding 内容がデータ層からは追加検知すべき欠陥なしという影響範囲調査の完了報告。修正対象が存在しない。次回監査では finding カウントから除外を推奨。"
+    },
+    {
+      "id": "QT-501",
+      "original_severity": "high",
+      "da_severity": "high",
+      "factual_verification": "CONFIRMED",
+      "evidence_checked": [
+        ".github/workflows/parity.yml:76-81: if [ -d tests/integration/contract ]; then pytest tests/integration/contract/ ... を直接確認",
+        "Glob: tests/contract/ に test_oanda_broker_metrics_wired.py が存在することを確認",
+        "Glob: tests/integration/contract/ に test_strategy_contract.py のみが存在（test_oanda_broker_metrics_wired.py は不在）を確認",
+        "parity.yml コメント L74-75: QT-007（第11次監査）が tests/integration/contract/ を正規パスと宣言しているにもかかわらず eccab9a で tests/contract/ に配置した矛盾を確認"
+      ],
+      "adoption_level": "must_fix",
+      "post_fix_defect_verified": true,
+      "da_notes": "修正方法: (A) tests/contract/ を tests/integration/contract/ に移動（parity.yml コメントとの整合性の観点から推奨）、または (B) parity.yml の contract ステップで両パスを走査する条件を追加。unit ステップの --maxfail=10 は他の失敗が先行した場合に contract テストを隠す可能性があるため専用ゲートへの昇格が必要。"
+    },
+    {
+      "id": "QT-502",
+      "original_severity": "medium",
+      "da_severity": "medium",
+      "factual_verification": "CONFIRMED",
+      "evidence_checked": [
+        "scripts/live_signal_probe.py:57: broker = OANDABroker(api_key=api_key, account_id=account_id, base_url=base_url) -- metrics= なし（直接確認）",
+        "scripts/live_order_test.py:61: broker = OANDABroker(api_key=api_key, account_id=account_id, base_url=base_url) -- metrics= なし（直接確認）",
+        "tests/contract/test_oanda_broker_metrics_wired.py:34-39: REQUIRED_SITES に 4 ファイルのみ（live_signal_probe.py / live_order_test.py は不在）を確認"
+      ],
+      "counter_argument": "scripts/ は本番経路ではなく診断ツールであり MetricsCollector インスタンスをスクリプト単独で生成・inject するコストも発生する。対象外として明示的に docstring に記載する代替案も現実的。",
+      "adoption_level": "should_consider",
+      "post_fix_defect_verified": true,
+      "da_notes": "QT-501 修正（contract テストを tests/integration/contract/ に移動）後に REQUIRED_SITES に scripts/ を追加して CI 検証を確立するフロー推奨。"
+    },
+    {
+      "id": "QT-503",
+      "original_severity": "medium",
+      "da_severity": "low",
+      "factual_verification": "CONFIRMED",
+      "evidence_checked": [
+        "tests/unit/test_re411_submit_order_timeout_metric.py:127-134: test_submit_order_no_metrics_no_op が metrics= 未注入で OANDABroker を生成することを確認",
+        "tests/contract/test_oanda_broker_metrics_wired.py:86-93: metrics=None リテラルを禁止するチェックが REQUIRED_SITES（本番ファイル）のみを対象とすることを確認"
+      ],
+      "severity_downgrade_reason": "contract テストが REQUIRED_SITES（本番ファイル）のみを対象とする設計上の意図通りであり tests/unit/ 内の OANDABroker 生成は意図的に対象外。設計矛盾は conceptual であり実害ゼロ。medium は過剰で low が妥当。",
+      "adoption_level": "informational",
+      "post_fix_defect_verified": false,
+      "da_notes": "テストコードへのコメント追加（後方互換テスト、contract 対象外）で十分対応可能。"
+    },
+    {
+      "id": "QT-504",
+      "original_severity": "medium",
+      "da_severity": "medium",
+      "factual_verification": "CONFIRMED",
+      "evidence_checked": [
+        "tests/integration/test_pa401_main_eventbus_startup_order.py:154-189: research モードで動作し _ensure_eventbus_and_notifier_started() を手動呼出後に手動 publish していることを確認",
+        "main.py:627-635: 実際の Gate 拒否経路（PA-401 の修正点）を確認"
+      ],
+      "adoption_level": "should_consider",
+      "post_fix_defect_verified": false,
+      "da_notes": "テスト名変更（期待を正直に表現）が最小コストの対応。実際の Gate 拒否経路を踏むテストには PLATFORM_ALLOW_MAIN_PRODUCTION_LIVE 環境変数設定または monkeypatch による戦略 reject 注入が必要。"
+    },
+    {
+      "id": "QT-505",
+      "original_severity": "low",
+      "da_severity": "low",
+      "factual_verification": "CONFIRMED",
+      "evidence_checked": [
+        "tests/integration/test_pa412_escape_hatch_warning.py:59-88: capsys.readouterr() で stdout/stderr 捕捉 + PA-412 チェック確認",
+        "tests/conftest.py:46: setup_logging(WARNING) が autouse で呼ばれていることを確認"
+      ],
+      "adoption_level": "informational",
+      "post_fix_defect_verified": false,
+      "da_notes": "conftest.py:46 の setup_logging(WARNING) が PrintLogger 経由の stdout 直書き設定であれば現状機能する。テストコメントに structlog PrintLogger 前提を明記することで環境依存を自己文書化する最小対応を推奨。"
+    },
+    {
+      "id": "QT-506",
+      "original_severity": "low",
+      "da_severity": "low",
+      "factual_verification": "CONFIRMED",
+      "evidence_checked": [
+        "test_de403_feature_staleness_semantics.py:134: store._last_primary_bar_time = simulated_past による直接書き換えを確認",
+        "test_de403_feature_staleness_semantics.py:153: 同様の書き換えを確認"
+      ],
+      "adoption_level": "informational",
+      "post_fix_defect_verified": false,
+      "da_notes": "2 箇所で同一手法。修正するなら helper fixture 化（freeze_monotonic）で両テストを一括対応が効率的。"
+    },
+    {
+      "id": "QT-507",
+      "original_severity": "low",
+      "da_severity": "low",
+      "factual_verification": "CONFIRMED",
+      "evidence_checked": [
+        "test_de403_feature_staleness_semantics.py:215-237: strategy_id=TF名 の現状設計を正しいとして assert していることを確認",
+        "metrics.py:858-868: Phase 4.5 ADVISORY docstring 確認済"
+      ],
+      "adoption_level": "informational",
+      "post_fix_defect_verified": false,
+      "da_notes": "テスト名に現状設計の制約として を明記するだけで十分。DE-505 の ADR 起票と同時対応推奨。"
+    },
+    {
+      "id": "DM-501",
+      "original_severity": "medium",
+      "da_severity": "medium",
+      "factual_verification": "CONFIRMED",
+      "evidence_checked": [
+        "client.py:831-847: close_trade 通常経路 PUT -- _record_api_metric 呼び出しが皆無であることを直接確認",
+        "client.py:854-872: get_open_positions -- _record_api_metric 呼び出しなし確認",
+        "client.py:409-411: submit_order に _record_api_metric が追加済みの対比確認",
+        "client.py:937-982: _record_api_metric 定義確認（metrics is None 時は return で skip）"
+      ],
+      "partial_duplicate_of": "RE-503（get_open_positions 部分が重複。close_trade は DM-501 のみ）",
+      "adoption_level": "should_consider",
+      "post_fix_defect_verified": true,
+      "da_notes": "RE-503（6 エンドポイント全体）と合わせた包括修正（デコレータ化）が最も効率的。"
+    },
+    {
+      "id": "DM-502",
+      "original_severity": "low",
+      "da_severity": "medium",
+      "factual_verification": "CONFIRMED（DE-502 と完全重複のため DE-502 判定を採用）",
+      "evidence_checked": "DE-502 と同一証拠（alerting_rules.yml:109-117 / live_store.py:93-101）",
+      "duplicate_of": "DE-502（完全重複）",
+      "adoption_level": "suppress",
+      "post_fix_defect_verified": true,
+      "da_notes": "suppress。DE-502 で統合処理。"
+    },
+    {
+      "id": "DM-503",
+      "original_severity": "medium",
+      "da_severity": "medium",
+      "factual_verification": "CONFIRMED（DE-501 と完全重複のため DE-501 判定を採用）",
+      "evidence_checked": "DE-501 と同一証拠（metrics.py:550-565 / 831-839 定義、trading_platform/ callsite ゼロ）",
+      "duplicate_of": "DE-501（完全重複）",
+      "adoption_level": "suppress",
+      "post_fix_defect_verified": false,
+      "da_notes": "suppress。DE-501 で統合処理。"
+    },
+    {
+      "id": "DM-504",
+      "original_severity": "low",
+      "da_severity": "low",
+      "factual_verification": "CONFIRMED",
+      "evidence_checked": [
+        "alerting_rules.yml 全文（186 行）確認: fx_oanda_api_responses_total / entry_rollback_orphan / fx_snapshot_persistence_failures_total / fx_backfill_failures_total / fx_feature_store_compute_errors_total を参照するアラートルールが存在しないことを確認",
+        "metrics.py:148-152: fx_oanda_api_responses_total 定義確認",
+        "email_notifier.py:339: entry_rollback_orphan _RISK_ALERT_KINDS 登録確認"
+      ],
+      "adoption_level": "should_consider",
+      "post_fix_defect_verified": false,
+      "da_notes": "suggested_fix の 4 アラートのうち FxSnapshotPersistenceFailure（persistence 失敗はプロセス再起動後のポジション復元失敗に直結）が最も優先度が高い。次点は FxOandaApiErrorRateHigh（5xx/timeout スパイク検知）。"
+    },
+    {
+      "id": "DM-505",
+      "original_severity": "info",
+      "da_severity": "informational",
+      "factual_verification": "CONFIRMED",
+      "evidence_checked": [
+        "runner.py:1617-1640: 30 の倍数で繰り返し発火するコメント付きロジック確認",
+        "email_notifier.py:362-363: live_orders_silent: 43200.0 (12 時間 throttle) 確認",
+        "email_notifier.py:289-293: ユーザー要請 2026-05-29 コメント確認"
+      ],
+      "adoption_level": "informational",
+      "post_fix_defect_verified": false,
+      "da_notes": "DESIGN-C-001 として既認識のユーザー判断待ちの設計問題。runner.py:1634-1635 のコメント修正（30 の倍数で繰り返し発火し復旧まで通知し続ける -> 12h throttle により 12 時間に 1 通）は低コストで実施可能。設計方針のユーザー判断後に合わせて対処推奨。"
+    }
+  ],
+  "suppressed_findings": [
+    {
+      "id": "DM-502",
+      "reason": "DE-502 と完全重複。DE-502 を canonical として処理",
+      "canonical_id": "DE-502"
+    },
+    {
+      "id": "DM-503",
+      "reason": "DE-501 と完全重複。DE-501 を canonical として処理",
+      "canonical_id": "DE-501"
+    }
+  ],
+  "severity_adjustments": [
+    {
+      "id": "DE-501",
+      "from": "high",
+      "to": "medium",
+      "reason": "RE-401（Prometheus gauge 自体が未生成）との類推による high 付与は過剰。本件は gauge 登録済みで observe/set 呼び出しがないだけ（unused metrics であり dead instrumentation ではない）。"
+    },
+    {
+      "id": "DM-502",
+      "from": "low",
+      "to": "medium",
+      "reason": "suppress（DE-502 の medium を採用）"
+    },
+    {
+      "id": "QT-503",
+      "from": "medium",
+      "to": "low",
+      "reason": "contract テストが REQUIRED_SITES（本番ファイル）のみを対象とする設計上の意図通りであり tests/unit/ の後方互換テストが CI を通過することは想定内。実害ゼロ。"
+    },
+    {
+      "id": "DE-510",
+      "from": "low",
+      "to": "informational",
+      "reason": "finding 内容がデータ層からは追加検知すべき欠陥なしという影響範囲調査の完了報告であり修正対象が存在しない。"
+    }
+  ],
+  "summary": {
+    "total_findings_reviewed": 22,
+    "suppressed_as_duplicates": 2,
+    "effective_unique_findings": 20,
+    "by_severity_after_da": {
+      "high": 2,
+      "medium": 9,
+      "low": 6,
+      "informational": 3
+    },
+    "by_adoption_level": {
+      "must_fix": 3,
+      "should_consider": 8,
+      "informational": 9,
+      "suppress": 2
+    },
+    "post_fix_defect_confirmed": 10,
+    "post_fix_defect_rejected": 0,
+    "must_fix_items": [
+      "DE-503: docs/runbook/feature_staleness.md が旧 semantics/閾値のまま -- 修正コスト低（docs 更新のみ）かつ oncall 誤誘導の直接リスク",
+      "DE-504: 週末閉場で全 H1/H4 戦略が FxFeatureStorestaleHigh 一斉 FIRING（UTC 金曜 22:03 から月曜 22:00 まで継続）-- quality_engine/stream_receiver に週末 awareness が実装済みなのに alerting 層にのみ欠落（H4 staleness = 閾値 28800s の 6.0 倍に到達）",
+      "QT-501: parity.yml の contract ステップが tests/contract/ を永続 skip -- eccab9a の RE-401 contract テストが専用 CI ゲートを通過していない（parity.yml コメント自体が tests/integration/contract/ を正規パスと宣言）"
+    ],
+    "structural_patterns_detected": [
+      "PATTERN-1: 実装完了・配線未了の反復 -- DM-302(observe_event_bus_latency/set_order_success_rate)/FTS-DATA-009(backfill 引数 5 つ)/RE-411 スコープ外(close_trade/get_open_positions)の 3 件が今回の監査で同時検出。contract テストは OANDABroker インスタンス化の metrics= 注入のみを保護しており、メソッドレベルの呼出配線は保護対象外。",
+      "PATTERN-2: alerting coverage と実装の乖離 -- DE-403 修正（TF 別閾値）が M15/H1/H4 に限定されたことで TF_SECONDS の全 TF をカバーしない dead alert path が生まれた。実装変更時に alerting_rules との一貫性チェックを CI に組み込む仕組みが必要。",
+      "PATTERN-3: docs/runbook の更新遅延 -- eccab9a で alert の expr/閾値/semantics が全変更されたが runbook は未更新。PR にドキュメント更新を必須チェック項目として追加する運用規約が必要。"
+    ]
+  }
+}

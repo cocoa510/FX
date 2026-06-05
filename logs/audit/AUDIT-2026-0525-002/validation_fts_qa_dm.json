@@ -1,0 +1,195 @@
+{
+  "validator": "devil-advocate",
+  "cluster": "fts_qa_dm",
+  "session": "AUDIT-2026-0525-002",
+  "validation_date": "2026-05-25",
+  "results": [
+    {
+      "id": "QT-101",
+      "original_severity": "high",
+      "validated": "downgraded",
+      "adjusted_severity": "medium",
+      "reproducible": true,
+      "adoption_level": "must_fix",
+      "rationale": "tests/fault/test_reconnect_cycle.py:50-64 実読: _make_broker_trades() は list[dict] を返す。position_reconciler.py:157-158: broker_trade_map[bt.trade_id]=bt は OpenTrade.trade_id 属性を要求。dict に .trade_id 属性がないため AttributeError で2件FAIL実証。峻別結論: テストfixture のバグ（本番コードバグではない）。position_reconciler.py:63-73 に list[OpenTrade] 要求と明示。broker.py:35-51 で OpenTrade.trade_id: str 確認。PR52-M-C3 で OpenTrade 導入後にテストfixture が追従しなかった incomplete_fix。本番経路は OpenTrade を返すため本番バグではない。fault テスト2件FAILは安全性クリティカルな検証が機能しないため must_fix だが、テストバグと断定できるため severity は medium が妥当。前回監査での QT-003/QT-005 high->medium/low 訂正と整合した判定。",
+      "bias_assessment": "original_severity=high は過大。テストfixture不整合。本番コードは正しい。medium が妥当。"
+    },
+    {
+      "id": "QT-102",
+      "original_severity": "medium",
+      "validated": "true",
+      "adjusted_severity": "medium",
+      "reproducible": true,
+      "adoption_level": "should_consider",
+      "rationale": "tests/parity/test_feature_store_parity.py:34-35 実読: high=close*(1+abs_noise)/low=close*(1-abs_noise)/open_=np.roll(close,1) パターン確認。open_が前closeのため open_>high ケースが発生（seed=123で111/300本、約37%）。ATR/Donchian等OHLC整合依存指標の絶対値が不正確。qa-tester 自身がparity差は0になり偽PASSにはならないと認める。本番精度保証の欠如として medium は適切。12ファイルへの波及は incomplete_fix として実在する。",
+      "bias_assessment": "severity medium は妥当。偽GREENではなく精度保証の欠如。conftest.py共通化で一括修正可能。"
+    },
+    {
+      "id": "QT-103",
+      "original_severity": "medium",
+      "validated": "true",
+      "adjusted_severity": "medium",
+      "reproducible": true,
+      "adoption_level": "should_consider",
+      "rationale": "tests/integration/test_atlas_top3_strategies.py:368-377 実読: if not signals: warnings.warn のみ(assert なし)を確認。5件のUserWarning発生中。QT-004修正でテスト名・契約一致は改善されたが pytest.xfail 対応未実施。warnings.warn は pytest xfail/xpass 管理外のため問題が表面化しない。medium は妥当。",
+      "bias_assessment": "severity medium は妥当。warnings.warn を pytest.xfail に置換するのみの低コスト改善。"
+    },
+    {
+      "id": "QT-104",
+      "original_severity": "low",
+      "validated": "true",
+      "adjusted_severity": "low",
+      "reproducible": false,
+      "adoption_level": "informational",
+      "rationale": "test_0510_002_feature_set_parity に番兵テストがない。qa-tester 自身がデータ量600本・指標ウォームアップから実際には起きないと認める。将来的なデータ量変更リスクへの予防的指摘。low は妥当。",
+      "bias_assessment": "severity low は妥当。"
+    },
+    {
+      "id": "QT-105",
+      "original_severity": "low",
+      "validated": "true",
+      "adjusted_severity": "low",
+      "reproducible": false,
+      "adoption_level": "informational",
+      "rationale": "does-not-raise パターン3件。qa-tester が偽緑レベルには達していないと自認。low は妥当。",
+      "bias_assessment": "severity low は妥当。"
+    },
+    {
+      "id": "QT-106",
+      "original_severity": "info",
+      "validated": "true",
+      "adjusted_severity": "info",
+      "reproducible": false,
+      "adoption_level": "informational",
+      "rationale": "AUDIT-2026-0525-001 の QT修正有効性確認報告。1926 passed, 5 xfailed, 0 failed の状態証跡。info は妥当。",
+      "bias_assessment": "適切な修正確認報告。"
+    },
+    {
+      "id": "QT-107",
+      "original_severity": "info",
+      "validated": "true",
+      "adjusted_severity": "info",
+      "reproducible": false,
+      "adoption_level": "informational",
+      "rationale": "performance テスト68秒PASS確認。latency flaky懸念の払拭。info は妥当。",
+      "bias_assessment": "適切な確認報告。"
+    },
+    {
+      "id": "DM-101",
+      "original_severity": "high",
+      "validated": "true",
+      "adjusted_severity": "high",
+      "reproducible": true,
+      "adoption_level": "must_fix",
+      "rationale": "trading_platform/dashboard/app.py:36 実読: API_BASE_URL = http://localhost:8000 ハードコード確認。app.py:43 fetch_status() と app.py:53 fetch_health() がこの URL を参照。scripts/run_unified.py 全文に start_http_server / FastAPI / uvicorn の記載なし(grep: no matches)。前回監査 verification.json:65 で report_correct、fixes_applied.json に DM-004 の記載なし(未修正継続)。本番経路(UnifiedRunner)はHTTPサーバ不在のため Dashboard は Kill Switch状態・PositionReconciler不整合をリアルタイム監視できない。DM-003でHealthCheckerを配線したが情報がDashboardに届く経路なし。high は妥当。最小修正: os.getenv でFTS_DASHBOARD_API_URL 参照に変更 + .env.example への記載。",
+      "bias_assessment": "severity high は適切。前回監査でも確認済みの継続未修正問題。本番監視空白が継続中。"
+    },
+    {
+      "id": "DM-102",
+      "original_severity": "high",
+      "validated": "true",
+      "adjusted_severity": "high",
+      "reproducible": true,
+      "adoption_level": "must_fix",
+      "rationale": "三点実証完了: (1) runner.py:324-328 実読: async def _event_bus_prober() -> bool: return await _bus_ref.health_status() — await付きで同期メソッド呼び出し確認。(2) memory_adapter.py:253: def health_status(self) -> dict — asyncキーワードなし確認。redis_adapter.py:384: def health_status(self) -> dict — 同様にasyncなし確認。(3) main.py:494-500: status = event_bus.health_status(); return bool(status.get(healthy, False)) — awaitなしの正しい同期呼び出し確認。runner.pyとmain.pyの二重実装ドリフトを4ファイル実読で実証。runner.pyで await dict_object を実行するとTypeError: object dict cannot be used in await expressionが発生し except Exception: return False でキャッチされ常時Falseを返す。health_check.py:43でevent_busはCRITICAL_COMPONENTSに含まれるためPROBER_UNHEALTHY_THRESHOLD=3回(30秒後)以降システム全体がunhealthyと偽報告される。platform-architect も PA-102 として独立検出。high は妥当。修正コスト: runner.py:326の1行変更(await削除+main.pyと同一パターンに統一)。",
+      "bias_assessment": "severity high は適切。修正コストが極めて低い(1行変更)のに対し放置コストが高い(HealthChecker全体が偽陽性)。"
+    },
+    {
+      "id": "DM-103",
+      "original_severity": "medium",
+      "validated": "true",
+      "adjusted_severity": "medium",
+      "reproducible": false,
+      "adoption_level": "should_consider",
+      "rationale": "audit_log.py:141 の raise と ptrc.py:92 / risk_supervisor.py:194 の fire-and-forget create_task の意味的矛盾。disk full等の異常系でのみ顕在化。medium は妥当。",
+      "bias_assessment": "severity medium は妥当。"
+    },
+    {
+      "id": "DM-104",
+      "original_severity": "medium",
+      "validated": "true",
+      "adjusted_severity": "medium",
+      "reproducible": true,
+      "adoption_level": "should_consider",
+      "rationale": ".env.example に FTS_WATCHDOG_WEBHOOK_URL の記載なし。commit 8deceed で DM-006実装時に.env.example変更なし。運用者がwebhook機能を発見できない。medium は妥当。修正コスト: .env.exampleへの3行追記のみ。",
+      "bias_assessment": "severity medium は妥当。"
+    },
+    {
+      "id": "DM-105",
+      "original_severity": "medium",
+      "validated": "downgraded",
+      "adjusted_severity": "low",
+      "reproducible": true,
+      "adoption_level": "should_consider",
+      "rationale": "docs/runbook/restart_loop.md:44 の 5回以上 と runner_watchdog.ps1:24 の MaxConsecutiveFailures=3 の矛盾は実在する。ただしドキュメント不整合であり実際のシステム動作(watchdog の3回でのタスク無効化)に影響しない。オペレーターが混乱する可能性はあるが直接的な運用障害ではない。medium は過大評価。runbook 修正(1行変更)で解決可能。low が妥当。",
+      "bias_assessment": "original_severity=medium は過大。ドキュメント不整合のみ。実行バグではない。low に下げる。"
+    },
+    {
+      "id": "DM-106",
+      "original_severity": "medium",
+      "validated": "true",
+      "adjusted_severity": "medium",
+      "reproducible": true,
+      "adoption_level": "should_consider",
+      "rationale": "scripts/run_unified.py で prometheus start_http_server / make_wsgi_app 呼び出しが一切ない(grep: no matches)を確認。deploy/prometheus/alerting_rules.yml:12-157 で FxKillSwitchTriggered等10件のアラートが fx_* メトリクスを参照。scrape対象となる本番HTTPエンドポイントが存在しないため全件dead alert。DM-008修正はREADME誤記修正のみで根本問題未解決。DM-101+DM-106が同時未修正の場合、Kill Switch発動を検知する全自動・手動経路がdeadになる合算リスクあり。medium は妥当。",
+      "bias_assessment": "severity medium は妥当。ただしDM-101+DM-102+DM-106の組合せリスクはmedium×3ではなくhigh相当。修正優先度: DM-102 > DM-101 > DM-106 の順を推奨。"
+    },
+    {
+      "id": "DM-107",
+      "original_severity": "medium",
+      "validated": "downgraded",
+      "adjusted_severity": "low",
+      "reproducible": true,
+      "adoption_level": "informational",
+      "rationale": "ptrc.py:293-299 の承認パスが _fire_ptrc_audit を呼ばないことは事実。ただし CLAUDE.md の規約は「リスク拒否理由は必ずAudit Logに記録する」であり承認ケースの記録を必須とはしていない。現行規約は満たされており承認記録の欠如は規約違反ではなく改善機会(betterment)。medium は過大評価。low が妥当。",
+      "bias_assessment": "original_severity=medium は過大。CLAUDE.md規約(拒否記録必須)は満たされている。low に下げる。"
+    },
+    {
+      "id": "DM-108",
+      "original_severity": "low",
+      "validated": "true",
+      "adjusted_severity": "low",
+      "reproducible": true,
+      "adoption_level": "informational",
+      "rationale": "watchdog_alerts.jsonlが書き込まれるが読まれない。DM-101/DM-106との連鎖的問題の一部。low は妥当。",
+      "bias_assessment": "severity low は妥当。DM-101/DM-106修正の一環として対応可能。"
+    },
+    {
+      "id": "DM-109",
+      "original_severity": "low",
+      "validated": "true",
+      "adjusted_severity": "low",
+      "reproducible": false,
+      "adoption_level": "informational",
+      "rationale": "HealthCheckerの結果がrun()ループから直接参照されないのは監視と実行の分離設計判断として許容可能。RiskAlertEvent経由でGlobalRiskSupervisorに通知される間接経路がある。low は妥当。DM-102修正後に event_bus prober偽陽性が解消されることで全体的な信頼性が向上する。",
+      "bias_assessment": "severity low は妥当。DM-102修正後の副作用確認を推奨。"
+    },
+    {
+      "id": "DM-110",
+      "original_severity": "low",
+      "validated": "true",
+      "adjusted_severity": "low",
+      "reproducible": false,
+      "adoption_level": "informational",
+      "rationale": "B-001(datetime.UTC)同種バグ残存なし確認。regression check として適切。low は妥当。",
+      "bias_assessment": "適切なregression確認報告。"
+    }
+  ],
+  "summary": {
+    "total_validated": 17,
+    "false_findings": 0,
+    "severity_upgrades": 0,
+    "severity_downgrades": 3,
+    "downgrade_details": [
+      "QT-101: high -> medium: テストfixture不整合と断定。本番コードバグではない。fault テスト2件FAILは重要だが must_fix medium が妥当。",
+      "DM-105: medium -> low: ドキュメント不整合のみ。実行バグではない。",
+      "DM-107: medium -> low: CLAUDE.md規約(拒否記録必須)は満たされており承認記録欠如は改善機会。"
+    ],
+    "high_findings_conclusion": {
+      "QT-101": "downgraded_to_medium: _make_broker_trades()のlist[dict]返却はテストfixture不整合。本番コードは正しい。fault テスト2件FAILは must_fix だが medium 相当。",
+      "DM-101": "confirmed_high: app.py:36のAPI_BASE_URL=http://localhost:8000ハードコードを実読確認。run_unified.pyにHTTPサーバ起動コードが一切ない。前回監査でreport_correct判定済みだが未修正継続。本番UnifiedRunner監視不能が継続中。",
+      "DM-102": "confirmed_high: runner.py:326がawait _bus_ref.health_status()で同期dictをawaitしTypeError->常時False->event_bus unhealthyの偽陽性を三点実証(runner.py:326/memory_adapter.py:253/redis_adapter.py:384/main.py:496の4ファイル実読)。二重実装ドリフトを実証。修正コスト1行。"
+    },
+    "compounded_risk_warning": "DM-101(Dashboard監視不能)+ DM-102(event_bus prober常時偽陽性)+ DM-106(Prometheusアラート全dead)が同時未修正の場合、本番Kill Switch発動をリアルタイムで検知する全自動・手動経路が実質dead。3件の組合せリスクはmedium×3ではなくhigh相当。修正推奨順序: DM-102(runner.py:326の1行修正)> DM-101(.env化+暫定ファイル直読み経路)> DM-106(start_http_server追加)。"
+  }
+}

@@ -1,0 +1,164 @@
+[fix:bug][feat][test] AUDIT-2026-0529-001: High 5件 + Medium 19件 + 重複統合 一括修正
+
+専門家チーム監査 (7名) + devil-advocate 3名 + 第2チーム検証 (5名) で検出した
+FTS 24 件 + 統合 1 件の欠陥を一括修正。過去 AUDIT-0528-002/003 の前例に倣う
+ドメイン横断バッチコミット。
+
+=== HIGH 修正 (5件、即時運用リスク) ===
+
+## RE-302 [HIGH] OANDA タイムアウト時の幻 trade_id 格納 (実損失経路、INC-0526 同型)
+broker_gateway.get_open_trades が OANDA 例外を握りつぶし [] を返却していたため、
+strategy_slot:792-799 で fill.broker_order_id を state.open_trade_id に格納し、
+次回 close_trade が 404 で幻ポジション化する経路を遮断。
+BrokerUnavailableError(ConnectionError) 専用例外を導入し例外伝播へ変更。
+strategy_slot._resolve_live_trade_id で is_live ガード追加、LIVE + trades=[] は
+entry_rollback ルートへ合流。再発防止: test_re302_oanda_timeout_phantom_trade (5 tests)
+
+## RE-301 [HIGH] _resolve_live_trade_id instrument fallback runtime 残存 (INC-0526 同型)
+restore_positions (INC-0526 R1) では instrument+direction fallback 廃止+
+claimed_trade_ids 排他制御済だが、runtime 経路 strategy_slot:805-823 には未適用
+だった問題を修正。同一 instrument・direction 複数 LIVE 戦略で別戦略 trade を
+誤 close する実損失経路を遮断。matching=[] 時の instrument 再マッチを撤廃し
+entry_rollback へ合流。claimed_trade_ids ランタイム排他制御は次回 audit-loop
+で検討と明記。再発防止: test_re301_runtime_instrument_fallback (3 tests)
+
+## DE-303 [HIGH] SharedDataProvider.poll_latest silent failure
+data_provider:154-162 の except が logger.exception のみで RiskAlertEvent
+未発火 → OANDA candle 障害で全戦略 idle 化しても観測不能だった問題を修正。
+_consecutive_poll_failures カウンタ + 30 回連続失敗で RiskAlertEvent
+(alert_type=market_data_poll_failure) 発行。one-shot フラグで連投抑止、
+成功時リセット。EmailNotifier._RISK_ALERT_KINDS に該当 kind を live_anomaly
+集約 (DM-306 と整合)。再発防止: test_de303_poll_latest_failure_alert (6 tests)
+
+## DM-306 [HIGH] OANDA 60秒断絶通知が主要 3 経路 dead (1 行修正で復活)
+health_check.py:417 が publish する oanda_connection_lost は _RISK_ALERT_KINDS
+未登録 → silently drop されていた問題を修正。Prometheus/Email/Dashboard 全 3
+経路で機能しない silent failure を Email 経路で復活。_RISK_ALERT_KINDS に
+oanda_connection_lost: live_anomaly を 1 行追加。再発防止:
+test_dm306_oanda_connection_lost_email (2 tests)
+
+## DM-302 [HIGH] OANDA API latency / FeatureStore staleness alert 永久 Inactive
+metrics.py:562-591 に observe_oanda_api_latency 等 4 メソッド定義済だが本番
+呼出 0 件 (grep 確認) → FxOandaApiLatencyHigh / FxFeatureStorestaleHigh が
+デッドアラートだった問題を修正。client.py の 5 OANDA API メソッド
+(submit_order/cancel_order/get_account_info/get_open_trades/get_candles) に
+time.perf_counter() 計測 + observe_oanda_api_latency / inc_oanda_api_status
+計装追加。live_store.update_bar に observe_feature_staleness 計装追加。
+inc_oanda_api_status の status_code 型を int から int|str に拡張。
+再発防止: test_dm302_metrics_instrumentation (7 tests)
+
+=== MEDIUM 修正 (19件) ===
+
+## RE-MISSED-302 [MEDIUM] _poll_cycle account_info 失敗で能動アラート欠如 (第2チーム発見)
+_consecutive_poll_errors >= 5 時に oanda_connection_degraded RiskAlertEvent
+publish (one-shot) を追加。EmailNotifier kind 登録。
+再発防止: test_re_missed_302_poll_cycle_cascade (3 tests)
+
+## PA-301 [MEDIUM] OrderSubmissionGuard MetricsCollector 注入漏れ
+main.py / runner.py の set_metrics_collector 注入ループに order_submission_guard
+追加 (AST 検証で構造的担保)。
+再発防止: test_pa301_osg_metrics_injection (6 tests)
+
+## PA-303 [MEDIUM] AUDIT-0529-001 Task C の LIVE Gate が main.py 未実装
+main.py の load_all_strategies を discover + load 個別ループに置換、runner.py
+533-578 同等の LIVE Gate 拒否ハンドリング (Email 発火含む) を追加。
+actor=main_platform で runner.py の unified_runner と区別。
+再発防止: test_pa303_main_live_gate_rejection (6 tests)
+
+## PA-306 [MEDIUM] main.py StateStore が常に InMemoryBackend
+PlatformSettings.state_backend 設定値 (memory|redis) から backend インスタンス
+明示選択。ephemeral 警告ログ追加。第2チーム指摘で本番経路 (UnifiedRunner)
+は影響なし (DE-311 別件)。
+再発防止: test_pa306_state_store_backend_selection (5 tests)
+
+## RE-305 [MEDIUM] _consecutive_poll_errors >= 5 で WARNING のみ
+30 の倍数で繰り返し RiskAlertEvent 発火 (30/60/90/...) で復旧まで通知し続ける。
+RE-MISSED-302 と共存。再発防止: test_re305_poll_errors_alert (5 tests)
+
+## RE-306 [MEDIUM] _maybe_reconcile_live_positions の last_position_reconcile_at 更新タイミング
+_reconcile_live_positions 戻り値型 None→bool に変更。成功時のみ
+last_position_reconcile_at 更新で OANDA 一時障害時の照合スキップを回避。
+再発防止: test_re306_reconcile_failure_retry (7 tests)
+
+## DE-304 [MEDIUM] poll_latest count=3 固定で複数 bar gap を silent drop
+count を max(3, ceil(elapsed / tf_sec) + 2) を [3, 200] にクランプする動的計算
+に変更。失敗時は _last_poll_time 非更新で backlog 推定温存。
+再発防止: test_de304_poll_dynamic_count (7 tests)
+
+## DE-306 [MEDIUM] _count_weekend_seconds 計算誤り (第2チーム検証で発見)
+OANDA 公式市場時間 (金曜 22:00 〜 日曜 22:00 UTC) ベースの分単位重なり計算に
+修正。初版主張の「金曜 23:00→月曜 00:00 で 16h FAIL」は第2チーム実機検証で
+誤りと判明、実際の発火は週末跨ぎのみ。
+再発防止: test_de306_weekend_seconds (11 tests)、tests/unit/test_pr16_data_layer.py
+の旧期待値更新
+
+## DE-301 [MEDIUM ← high 格下げ] ema_800 戦略の warmup EWM 残差 (構造的予防)
+第2チーム検証: Live 22 戦略の最大 period は SMA50 のみ、ema_800 (069) は
+paper のみで Live 経路非該当 → high → medium 格下げ。scripts/import_atlas_strategy
+に MAX_LIVE_SAFE_PERIOD=384 構造的予防 gate (live + period > 384 で対話確認 /
+CI auto-deny / --allow-large-period で明示許可) を追加。
+再発防止: test_de301_import_period_gate (13 tests)
+
+## DE-311 [MEDIUM ← high 差戻] AioRedisBackend 未実装 (docs 更新のみ)
+第2チーム検証: 本番経路 (UnifiedRunner) は StateStore 非使用、StateManager で
+永続化。settings.py が production+memory を起動拒否済み → high → medium 差戻。
+redis_store.py docstring に本番経路は StateManager が担当することを明示。
+正規対応 (AioRedisBackend) は次回 audit-loop で実施。
+
+## QT-308 [MEDIUM] sample_ohlcv_df に DatetimeIndex 不在
+tests/conftest.py の sample_ohlcv_df fixture に UTC tz-aware DatetimeIndex
+付与 (pd.date_range freq=h)。Asia session 戦略のテストでフィルタ機能を回復。
+再発防止: test_qt308_sample_ohlcv_datetime_index (13 tests)
+
+## QT-310 [MEDIUM] Kill Switch audit log 失敗テスト不在
+_fire_ks_audit が既に fire-and-forget + done_callback でエラー記録する正しい
+実装と確認。テストで明示的に検証。
+再発防止: test_qt310_ks_audit_log_failure (6 tests)
+
+## QT-304 [MEDIUM] E2E test の条件付き assert 空振り
+fills_completed==0 時に warnings.warn で明示メッセージ (偽緑回避)。
+ファイル: tests/integration/test_signal_flow.py
+
+## QT-305/306 [MEDIUM] FaultRedisBackend / fan-out 回帰 (コメント追記のみ)
+tests/fault/conftest.py docstring に DE-311 後の刷新計画と構造的限界を明示。
+
+## QT-311/312 [MEDIUM] prometheus 二重 fixture 統一 [refactor]
+独自 _reset_prometheus_registry を削除し conftest.py の autouse
+_cleanup_global_prometheus_registry に統一。
+
+=== LOW + 統合 ===
+
+## DM-314 [LOW] FxEventBusDedupSpike が InMemoryEventBus で dead (コメント追記)
+alerting_rules.yml に「InMemoryEventBus では常時 Inactive (設計上正常)」明記。
+
+## QT-307 + QT-317 + DM-313 重複統合
+parity.yml に finding ID・影響範囲・将来分離計画コメント追加。
+logs/audit/AUDIT-2026-0529-001/duplicates_consolidated.md 新規作成。
+
+=== ユーザー要請: live_orders_silent メール頻度を 12 時間に変更 ===
+live_orders_silent を専用 kind に分離 (live_anomaly 集約から独立)、
+_EMAIL_THROTTLE_INTERVAL_SEC に live_orders_silent: 43200.0 (12h) 登録。
+他の live_anomaly (OANDA 断絶等) は 15 分維持で迅速検知を保護。
+再発防止: test_email_notifier_live_anomaly.py に新規 test 追加 (合計 8 tests)
+
+=== 検証結果 ===
+- FTS unit + fault: 1273 passed (退行なし)
+- FTS integration + parity: 775 passed / 10 xfailed (10:41、2 回連続実行確認)
+- ruff: 本セッション変更ファイル 73 → 51 errors (-22 改善、auto-fix 適用済)
+
+=== 監査体制 ===
+第1チーム 10名 (専門家 7 + devil-advocate 3) → 81 findings 検出
+第2チーム  5名 (専門家 4 + devil-advocate 1) → 71 件合意 + 重大訂正 3 件
+           + 見落とし 8 件発見
+
+=== 対象外 (本コミット範囲外、次回以降) ===
+- PA-307 main.py 廃止 ADR (設計判断必要)
+- DE-311 AioRedisBackend 新規実装 (5-8 ファイル規模)
+- QA-302/303/307 (別 [change:spec] 再設計が必要)
+- QA-301 過去世代 backfill (専用 scripts/backfill_v6_2_0_soft_score.py)
+
+監査ID: AUDIT-2026-0529-001
+正本: logs/audit/summary_AUDIT-2026-0529-001.md
+詳細: logs/audit/AUDIT-2026-0529-001/{findings,validation,verification,fixes}/
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>

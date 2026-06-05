@@ -1,0 +1,54 @@
+{
+  "issue": "numba_njit_cache_no_locator",
+  "root_cause": "test_njit_guard_exports_callable はテストメソッド内部で _dummy を <locals> クロージャとして定義し @njit(cache=True) を付与している (tests/unit/test_numba_kernels.py:267-274)。numba 0.65.0 は cache=True 時に CompileResultCacheImpl.__init__ -> 各 CacheLocator.from_function(py_func, inspect.getfile(py_func)) を順に試すが、いずれの locator も成立せず最後に RuntimeError('cannot cache function ... no locator available for file ...') を送出する (numba/core/caching.py:423)。クリーンな ASCII パス C:\\data\\works\\FX\\ATLAS でも 'outer.<locals>._dummy' / '<string>' で同一エラーを再現済み。つまり根本原因は『<locals> に定義された関数（モジュールトップレベルにソース位置を持たない関数）に cache=True を付けたこと』であり、環境非依存のテスト記述バグである。なお当初報告された mojibake パスは、リポジトリのもう一つの非ASCII名チェックアウト(C:\\data\\<日本語>\\claude\\ATLAS)から実行された二次的増悪要因。非ASCIIパスでは InTreeCacheLocator.from_function の os.path.exists(py_file) が False になり全 locator が None を返すため、モジュールトップレベル関数でも同エラーが起きうる。",
+  "affects_production_bt": false,
+  "evidence": [
+    "tests/unit/test_numba_kernels.py:267-274 (TestJitFallback.test_njit_guard_exports_callable で <locals> 関数 _dummy に @njit(cache=True, fastmath=False) を付与)",
+    ".venv/Lib/site-packages/numba/core/caching.py:423 (locator が全て None の場合 'cannot cache function %r: no locator available for file %r' を raise)",
+    ".venv/Lib/site-packages/numba/core/caching.py:687 (FunctionCache.__init__ -> CompileResultCacheImpl(py_func))",
+    ".venv/Lib/site-packages/numba/core/dispatcher.py:811 (Dispatcher.enable_caching -> FunctionCache(self.py_func))",
+    ".venv/Lib/site-packages/numba/core/decorators.py:227 (cache=True 指定時に wrapper が disp.enable_caching() を呼ぶ)",
+    "atlas/backtest/_numba_kernels.py:43-212 (本番カーネル J1-J6 は全てモジュールトップレベル定義のため cache=True で正常コンパイル・キャッシュ可能。実測で _check_sl_tp_nb / _calc_position_size_nb のコンパイル+キャッシュ成功を確認)",
+    "atlas/backtest/_numba_guard.py:26-34 (njit ガードは numba.njit への透過パススルー。cache=True を素通しするため <locals> 関数にも cache=True が伝播する)",
+    "再現ログ: クリーン ASCII パスでも RuntimeError cannot cache function 'outer.<locals>._dummy': no locator available for file '<string>' を再現 (numba 0.65.0)",
+    "再現ログ: 同 _dummy を cache=False / cache 無指定にすると 6.0 を返し正常動作"
+  ],
+  "remediations": [
+    {
+      "option": "テストの _dummy から cache=True を外す（cache 無指定 または cache=False）",
+      "effort": "low",
+      "risk": "なし。本テストの意図は『njit ガードがデコレータとして callable を返し、ラップ関数が実行可能か』の確認のみで、JIT キャッシュ機能の検証ではない。cache=True はそもそも本テストの検証対象外。tests/unit/test_numba_kernels.py:270 の 1 行修正で完結し、本番カーネルにも parity テストにも影響しない。",
+      "recommended": true,
+      "detail": "@njit(cache=True, fastmath=False) を @njit(fastmath=False) もしくは @njit(cache=False, fastmath=False) に変更する。修正後 tests/unit/test_numba_kernels.py 全 41 件と tests/parity/test_numba_parity.py(10 passed/2 skipped) がグリーンになる想定。cache 動作を検証したいなら別途モジュールトップレベル関数を用いた専用テストを新設する（cache 検証はトップレベル関数でのみ意味を持つ）。"
+    },
+    {
+      "option": "_dummy をテストメソッド外（モジュールトップレベル）へ移し cache=True のまま検証",
+      "effort": "low",
+      "risk": "低。<locals> でなくなるため locator が成立しキャッシュ生成可能。ただし非ASCIIパスのチェックアウトでは依然 os.path.exists 失敗で落ちうる（二次要因は未解消）。クリーンパス前提なら有効。",
+      "recommended": false,
+      "detail": "モジュール冒頭に @njit(cache=True, fastmath=False) def _module_dummy(x): return x*2.0 を定義し、テストメソッドからは呼ぶだけにする。njit ガードの『デコレータが callable を返す』検証目的とはやや乖離するため、検証意図が変わる点に注意。"
+    },
+    {
+      "option": "conftest で NUMBA_CACHE_DIR を一時ディレクトリに設定 + NUMBA_CACHE_LOCATOR_CLASSES を UserProvidedCacheLocator に強制",
+      "effort": "medium",
+      "risk": "中。<locals> 関数の本質的非キャッシュ性は UserProvidedCacheLocator でも解決しない（inspect.getfile が '<string>' を返す経路では py_file が存在せず落ちる）。本ケースの primary 原因（<locals>）には効かないため対症療法に留まり、複雑度だけ増える。",
+      "recommended": false,
+      "detail": "UserProvidedCacheLocator は NUMBA_CACHE_DIR が設定されていれば py_file の存在を要求するため、結局 <locals>/<string> 経路は救えない。非ASCIIパス問題(二次要因)の緩和にはなるが primary 原因には無力。"
+    },
+    {
+      "option": "conftest で NUMBA_DISABLE_JIT=1 を全テストに注入し純Python経路で検証",
+      "effort": "medium",
+      "risk": "中。test_numba_kernels.py は『JIT 有/無で同一結果になること』を CI 両経路で回す設計（ファイル冒頭 docstring）であり、全テストを DISABLE_JIT 固定にすると JIT 経路の bit-exact 検証が失われる。テストの設計意図に反する。",
+      "recommended": false,
+      "detail": "NUMBA_DISABLE_JIT=1 にすると njit ガードが no-op デコレータを返し(_numba_guard.py:39-51)、_dummy は純 Python として動くため当該テストは通る。だが本来 JIT 経路(numba 実コンパイル)で njit ガードのパススルーを確認したい場合に検証カバレッジが落ちる。本件の最小修正としては過剰。"
+    },
+    {
+      "option": "非ASCIIパスのチェックアウト(C:\\data\\<日本語>\\claude\\ATLAS)を使わず ASCII パスから実行",
+      "effort": "low",
+      "risk": "低だが対症療法。primary 原因(<locals> + cache=True)は ASCII パスでも残存するため、本テストは ASCII パスでも依然 FAIL する。二次要因のみ解消。",
+      "recommended": false,
+      "detail": "運用上、CI/開発はクリーンな ASCII パス(C:\\data\\works\\FX\\ATLAS)で実行すべき(非ASCIIパスは numba cache 一般・他ライブラリでも地雷)。ただし本テスト失敗そのものは ASCII パスでも起きるので、これ単独では解決にならない。option 1 と併用が正。"
+    }
+  ],
+  "recommended": "推奨は option 1: tests/unit/test_numba_kernels.py:270 の @njit(cache=True, fastmath=False) から cache=True を外す 1 行修正。本テストは njit ガードがデコレータとして callable を返すことの確認が目的で、JIT キャッシュ生成は検証対象外。<locals> 関数に cache=True を付けたこと自体が記述バグ。本番 BT カーネル(_numba_kernels.py J1-J6)はモジュールトップレベル定義で cache=True が正常動作するため影響なし。併せて CI は ASCII パス(C:\\data\\works\\FX\\ATLAS)から実行し、非ASCII名チェックアウトからの実行を避けること(二次要因の根絶)。"
+}

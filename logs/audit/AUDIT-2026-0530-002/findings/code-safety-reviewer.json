@@ -1,0 +1,92 @@
+{
+  "agent": "code-safety-reviewer",
+  "scope": "ATLAS (commit 9c83b9f5)",
+  "audit_date": "2026-05-30",
+  "commit_reviewed": "9c83b9f5",
+  "files_read": [
+    "scripts/backfill_v6_2_0_soft_score.py",
+    "atlas/backtest/runner.py",
+    "atlas/validator/syntax_checker.py",
+    "atlas/validator/sandbox_runner.py",
+    "atlas/common/sandbox_builtins.py",
+    "atlas/feedback/context_builder.py",
+    "atlas/utils/path_safety.py",
+    "atlas/main.py",
+    "logs/backfill_v6_2_0_soft_score.json",
+    "tests/golden/test_qa301_soft_score_floor.py"
+  ],
+  "post_fix_verification": {
+    "commit_9c83b9f5_backfill": "concerns: [CSR-501, CSR-503, CSR-504]",
+    "golden_tests": "5/5 PASS (test_qa301_soft_score_floor.py)",
+    "errors": 0,
+    "atomic_write": "OK - tmp files zero",
+    "flip_breakdown": "12 from FLOOR change, 3 from is_duplicate legacy fix (CSR-501)"
+  },
+  "findings": [
+    {
+      "id": "CSR-501",
+      "severity": "WARNING_ADVISORY",
+      "area": "scripts/backfill_v6_2_0_soft_score.py",
+      "title": "backfill 15件 flip のうち 3件が FLOOR 変更と無関係な is_duplicate 旧不整合の副作用的修正",
+      "description": "15件 flip のうち 3件 (ATLAS-2026-0506-026, ATLAS-2026-0507-010, ATLAS-2026-0507-013) は soft_score_delta=0.0。FLOOR 変更の影響を受けていないが、backfill の overall_passed 再計算 (L165-167) が is_duplicate を参照するため QA-003 修正前の is_duplicate=True + overall_passed=True 不整合を副作用的に修正した。flip 結果は正しいが未文書化の副作用。",
+      "evidence": [
+        "logs/backfill_v6_2_0_soft_score.json: flipped[0-2].soft_score_delta=0.0",
+        "strategies/ATLAS-2026-0506-026/backtest/result.json.bak2: overall_passed=True + is_duplicate=True",
+        "scripts/backfill_v6_2_0_soft_score.py:L167: new_overall_passed = bool(tier1_passed and new_t2_passed and not is_duplicate)"
+      ],
+      "reproduction": "backfill ログの flipped リストで soft_score_delta=0.0 かつ overall_passed_old=True の 3件確認",
+      "suggested_fix": "修正不要。spec_change_log.md QA-301 手順6 エントリに 3件が is_duplicate 副次修正である旨を追記",
+      "regression_of": null,
+      "post_fix_defect": true
+    },
+    {
+      "id": "CSR-502",
+      "severity": "WARNING_ADVISORY",
+      "area": "atlas/main.py:L651-655, atlas/feedback/context_builder.py",
+      "title": "context --strategy-id が validate_generation_id を経由しない (CSR-302/303 設計漏れ)",
+      "description": "atlas context improve --strategy-id で渡した strategy_id が validate_generation_id() を通らないまま build_improvement_context に渡される。context_builder の _load_evaluation_report/_load_weakness_report/_load_adversarial_review/_load_direction_bias_from_metadata は Path(strategies) / strategy_id / ... としてディスク読み取りを行うため、../../../etc 等でパストラバーサル読み取りが可能。他の全サブコマンド (validate/backtest/metrics/score/evaluate) は CSR-302/303 で保護済み。read-only かつ CLI アクセス必要で実被害限定的だが設計原則の漏れ。",
+      "evidence": [
+        "atlas/main.py:L651-655: validate_generation_id なし",
+        "atlas/feedback/context_builder.py:L203,219,279,493: Path(strategies)/strategy_id 構築",
+        "他コマンドには guard あり: main.py:L187,L329,L503,L522,L553"
+      ],
+      "reproduction": "python -m atlas.main context improve --strategy-id ../../../tmp/x -> 内部で Path(strategies/../../../tmp/x) 構築, validate_generation_id 未呼び出し",
+      "suggested_fix": "main.py context コマンド内 L652付近に validate_generation_id(strategy_id) 追加。または context_builder.build_improvement_context() 冒頭でバリデーション実施",
+      "regression_of": null,
+      "post_fix_defect": false
+    },
+    {
+      "id": "CSR-503",
+      "severity": "WARNING_INFO",
+      "area": "strategies/*/backtest/result.json.bak2 (612件)",
+      "title": ".bak2 バックアップファイル 612件が git 追跡対象のまま残存",
+      "description": "backfill 後に 612 件の .bak2 ファイルが残存 (今回作成 607件 + 事前存在 5件)。commit 9c83b9f5 の 609 files changed に含まれ git 追跡されている。スクリプト docstring に cleanup 計画の言及なし。QA-201 の .bak と同様の問題再発。tmp 残留はゼロで atomic write は正常。",
+      "evidence": [
+        "scripts/backfill_v6_2_0_soft_score.py:L78-83: .bak2 作成ロジック (cleanup 手順なし)",
+        "strategies/ 配下 .bak2 ファイル数: 612件",
+        "commit 9c83b9f5: 609 files changed"
+      ],
+      "reproduction": "ls ATLAS/strategies/*/backtest/*.bak2 | wc -l -> 612",
+      "suggested_fix": "git rm ATLAS/strategies/*/backtest/result.json.bak2 で削除し .gitignore に strategies/*/backtest/*.bak* を追加",
+      "regression_of": null,
+      "post_fix_defect": true
+    },
+    {
+      "id": "CSR-504",
+      "severity": "WARNING_ADVISORY",
+      "area": "strategies/ATLAS-2026-0509-005/spec.md, strategies/ATLAS-2026-0509-040/spec.md",
+      "title": "flip-to-FAIL 戦略 2件の spec.md が旧 Gate PASS 状態を記載したまま",
+      "description": "backfill で overall_passed が True から False に変化した 11件のうち 2件 (ATLAS-2026-0509-005, ATLAS-2026-0509-040) の spec.md に Gate PASS 記述が残っている。backfill は result.json のみ更新し spec.md を更新しないため、人間が spec.md を参照すると Gate 合否を誤認するリスクがある。他 9件は問題なし。",
+      "evidence": [
+        "strategies/ATLAS-2026-0509-005/spec.md: Gate PASS 記述あり",
+        "strategies/ATLAS-2026-0509-040/spec.md: 同様",
+        "strategies/ATLAS-2026-0509-005/backtest/result.json: overall_passed=False (backfill 後)",
+        "strategies/ATLAS-2026-0509-040/backtest/result.json: overall_passed=False (backfill 後)"
+      ],
+      "reproduction": "grep Gate.*PASS ATLAS/strategies/ATLAS-2026-0509-005/spec.md ATLAS/strategies/ATLAS-2026-0509-040/spec.md",
+      "suggested_fix": "2件の spec.md の Gate 判定セクションを手動で FAIL に修正。中長期的には backfill スクリプトによる自動更新または spec.md の動的参照化を検討",
+      "regression_of": null,
+      "post_fix_defect": true
+    }
+  ]
+}

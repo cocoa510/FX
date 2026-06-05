@@ -1,0 +1,423 @@
+{
+  "validator": "quant-analyst-team2-devil-advocate",
+  "scope": "ATLAS QA-301..312 + CSR-301..306",
+  "audit_id": "AUDIT-2026-0529-001",
+  "audit_commit": "02bee7f1",
+  "validated_at": "2026-05-29",
+  "validation_methodology": "Each finding file:line evidence Read-verified independently. QA-301/302/303 numerical claims independently re-derived using defaults.py constants and runner.py:631-674 _compute_soft_score_redistributed algorithm. Cross-checked devil-advocate-A (validation/cluster_a_atlas.json) verdicts.",
+  "validations": [
+    {
+      "finding_id": "CSR-301",
+      "agreement_with_devil_advocate_a": "agree",
+      "verdict": "downgraded",
+      "original_severity": "medium",
+      "team1_adjusted_severity": "low",
+      "team2_adjusted_severity": "low",
+      "rationale": "sandbox_builtins.py:29 で __import__ が本物の組込関数のまま、syntax_checker.py:51-56 の FORBIDDEN_BUILTINS に __import__ が明示列挙されていることを Read 確認 (一致)。AST 静的解析で禁止モジュール import は遮断されており、本 finding は AST をすり抜ける未知の Name 参照経路 という仮定的シナリオに依存。AUDIT-0525-002 CSR-101 の実証 RCE と性質が異なる。Team-1 low 判定が妥当。",
+      "independent_evidence_check": [
+        "sandbox_builtins.py:29 __import__ key 確認",
+        "syntax_checker.py:51-56 FORBIDDEN_BUILTINS に __import__ 列挙",
+        "sandbox_builtins.py:24-26 コメントで AST 静的解析で禁止モジュール import 検出と明記"
+      ],
+      "additional_observations": []
+    },
+    {
+      "finding_id": "CSR-302",
+      "agreement_with_devil_advocate_a": "partial_disagree",
+      "verdict": "validated",
+      "original_severity": "medium",
+      "team1_adjusted_severity": "low",
+      "team2_adjusted_severity": "medium",
+      "rationale": "Team-1 はクローズドな開発ツール文脈として low に格下げしたが、ATLAS は LLM (fx-strategist エージェント) が strategies/[id]/metadata.json を自動生成する設計。プロンプト注入経由で攻撃者制御 parent_id (例: ../../../etc/passwd) が混入するリスクは無視できない。LLM 生成物に対する信頼境界は人間入力より低い。Team-1 の脅威モデル 攻撃者が metadata.json を直接書き換える は狭すぎる。CSR-303 が medium 維持されている整合性も担保すべき。severity=medium が妥当。",
+      "independent_evidence_check": [
+        "main.py:134-144 parent_id が str チェックのみで Path 結合 (一致)",
+        "main.py:142 isinstance(parent_id, str) は ../ を含むパスを通す",
+        "正規表現バリデーション (ATLAS-YYYY-MMDD-NNN 形式) なし"
+      ],
+      "additional_observations": [
+        "CSR-302 と CSR-303 を統合修正する場合、common/path_safety.py に generation_id/parent_id 共通バリデータを設けるべき"
+      ]
+    },
+    {
+      "finding_id": "CSR-303",
+      "agreement_with_devil_advocate_a": "agree",
+      "verdict": "validated",
+      "original_severity": "medium",
+      "team1_adjusted_severity": "medium",
+      "team2_adjusted_severity": "medium",
+      "rationale": "main.py:177-178, runner.py:1525-1526, metrics.py:26 すべて generation_id バリデーションなしで Path 結合を行う。runner.py:90 _strategies_dir() は _ATLAS_ROOT/strategies/generation_id を返すが resolve().is_relative_to() チェックなし。CLI から直接渡せる点で metadata.json 書き換え前提が不要で CSR-302 より深刻。任意ディレクトリへの JSON 書き込みで情報破壊 (上書き) リスクあり。severity=medium 維持が妥当。",
+      "independent_evidence_check": [
+        "main.py:177-178 strategy_dir = Path(strategies)/generation_id (バリデーションなし)",
+        "runner.py:87 _ATLAS_ROOT = Path(__file__).resolve().parent.parent.parent",
+        "runner.py:90-100 _strategies_dir() は is_relative_to チェックなし",
+        "runner.py:1525-1532 save_backtest_result が bt_dir.mkdir(parents=True, exist_ok=True) で sandbox 外を作成可能"
+      ],
+      "additional_observations": [
+        "save_backtest_result の mkdir(parents=True) は ../ を含むパスでも sandbox 外ディレクトリを silently 作成 (情報破壊への低コスト経路)"
+      ]
+    },
+    {
+      "finding_id": "CSR-304",
+      "agreement_with_devil_advocate_a": "agree",
+      "verdict": "validated",
+      "original_severity": "low",
+      "team1_adjusted_severity": "low",
+      "team2_adjusted_severity": "low",
+      "rationale": "syntax_checker.py:51-56 FORBIDDEN_BUILTINS に type 含まれず、sandbox_builtins.py:45 で type:type 許可を Read 確認 (一致)。type(name, bases, dict) は AST 検査通過、ただし埋め込み callable が exec/eval/__import__ を呼ぶ必要があり二次防衛で遮断される。既知 RCE 経路なし。severity=low が妥当。",
+      "independent_evidence_check": [
+        "syntax_checker.py:51-56 FORBIDDEN_BUILTINS に type 含まれず",
+        "sandbox_builtins.py:45 type: type 確認"
+      ],
+      "additional_observations": []
+    },
+    {
+      "finding_id": "CSR-305",
+      "agreement_with_devil_advocate_a": "agree",
+      "verdict": "validated",
+      "original_severity": "low",
+      "team1_adjusted_severity": "low",
+      "team2_adjusted_severity": "low",
+      "rationale": "event_simulator.py:1785-1799 ProcessPoolExecutor 経路、_walk_worker (1676-1700)、_resolve_wfa_workers (1710-1717) を全て Read 確認 (一致)。デフォルト ATLAS_WFA_PARALLEL_WORKERS=1 で通常運用未発動。spawn 子プロセスは module.__builtins__ 代入を引き継がない Python 仕様通り。Stage 1-4 をすり抜けた戦略のみ影響。severity=low 妥当。",
+      "independent_evidence_check": [
+        "event_simulator.py:1710-1717 _resolve_wfa_workers デフォルト 1",
+        "event_simulator.py:1785-1799 ProcessPoolExecutor 経路 (workers>=2 時のみ)",
+        "event_simulator.py:1676-1700 _walk_worker でサンドボックス再適用なし"
+      ],
+      "additional_observations": [
+        "並列化推進時は _walk_worker 先頭でサンドボックス再適用を必須化すべき"
+      ]
+    },
+    {
+      "finding_id": "CSR-306",
+      "agreement_with_devil_advocate_a": "agree",
+      "verdict": "validated",
+      "original_severity": "low",
+      "team1_adjusted_severity": "low",
+      "team2_adjusted_severity": "low",
+      "rationale": "context_builder.py:546-549 except Exception: return None を Read 確認 (一致)。CLAUDE.md 共通開発ルール 例外は握りつぶさず必ずログに記録 への明確な違反。本番 Live 直接影響なし。1 行修正 (logger.warning 追加) で完了。severity=low 妥当。",
+      "independent_evidence_check": [
+        "context_builder.py:546-549 except Exception: return None 確認"
+      ],
+      "additional_observations": []
+    },
+    {
+      "finding_id": "QA-301",
+      "agreement_with_devil_advocate_a": "agree",
+      "verdict": "validated",
+      "original_severity": "high",
+      "team1_adjusted_severity": "high",
+      "team2_adjusted_severity": "high",
+      "rationale": "数値再現を独立に実施し QA-301 主張は厳密に正しいと確認。runner.py:631-674 _compute_soft_score_redistributed と defaults.py:201-208 Tier 2 重み定数で以下を算出: シナリオ A (WFA/Drift/OOS_IS/Top3 全 None): valid_weight = 0.18+0.15+0.15+0.12 = 0.60、effective_weight = max(0.60, 0.70) = 0.70、残 4 component normalized=1.0 で contribution = 0.60/0.70 = 0.857142857 -> 閾値 0.70 超過で Tier 2 PASS。シナリオ B (3 None、Top3 値あり): valid_weight=0.70 で effective_weight キャップ不発動、最大 soft_score=1.0。WFA walks<10 は WFA_OOS_MONTHS=6 + WFA_IS_OOS_RATIO=2 = 18 months 最低 + step=1 で 28 months 未満データで構造的発生 (--period 短期、低頻度戦略の trade=0 walk 多発)。Gate 直結問題で severity=high 妥当。",
+      "independent_evidence_check": [
+        "runner.py:631-674 _compute_soft_score_redistributed 確認",
+        "runner.py:663 EFFECTIVE_WEIGHT_FLOOR=0.70 確認",
+        "defaults.py:201-208 Tier 2 重み 8 個 (合計 1.00、import-time 検証あり) 確認",
+        "event_simulator.py:1589-1599 _aggregate_wfa_walks walks<min_walks 全 None 返却 確認",
+        "defaults.py:310 WFA_MIN_WALKS=10 確認",
+        "result_parser.py:240-263 _compute_oos_is_ratio フォールバック 確認"
+      ],
+      "additional_observations": [
+        "v6.0.1 コメント (runner.py:647-658) に LONG 11/balanced 10 件の偽陽性発生のためキャップ採用と明記、本指摘はそのトレードオフの裏面",
+        "Tier 1 (Killer Criteria 7 条件) は通過するが Tier 2 で robustness 未評価のまま PASS する経路で、実 BT 頻度は要 audit/historical_passes.json 集計"
+      ],
+      "independent_numerical_verification": {
+        "scenario_a_all_4_robustness_none": {
+          "valid_weight": 0.6,
+          "effective_weight": 0.7,
+          "max_soft_score_when_all_remaining_normalized_1": 0.857142857,
+          "passes_threshold_0_70": true,
+          "realistic_scenario_pf_1_3_dd_10_sharpe_1_sens_0_3": {
+            "contributions": "PF:0.108 + MaxDD:0.075 + Sharpe:0.10 + Sens:0.075 = 0.358",
+            "soft_score": 0.5114,
+            "passes": false,
+            "note": "Tier 2 PASS には Sharpe>=1.5 AND PF>=1.5 AND MaxDD<=10% AND Sens<=0.25 の全条件が必要、高品質戦略のみ届く"
+          }
+        },
+        "scenario_b_3_robustness_none_top3_present": {
+          "valid_weight": 0.7,
+          "effective_weight": 0.7,
+          "max_soft_score": 1.0,
+          "passes_threshold_0_70": true
+        }
+      }
+    },
+    {
+      "finding_id": "QA-302",
+      "agreement_with_devil_advocate_a": "agree",
+      "verdict": "validated",
+      "original_severity": "high",
+      "team1_adjusted_severity": "medium",
+      "team2_adjusted_severity": "medium",
+      "rationale": "result_parser.py:240-263 を Read 確認、行 257-260 で is_profit_factor_walks=None 時に l2.profit_factor へフォールバックを確認 (一致)。P8-H6 で問題視された異質スコープ比較の再導入は技術的に正確。影響方向は oos_is_pf_ratio 過小評価 = Gate を落とす方向 = Tier 2 PASS を阻止する安全側バイアス。QA-301 (通過方向) と QA-302 (落下方向) は同一の WFA 欠落条件で逆作用、部分相殺成立。severity=medium 妥当。",
+      "independent_evidence_check": [
+        "result_parser.py:240-263 _compute_oos_is_ratio 確認",
+        "result_parser.py:256-260 if is_pf is None: is_pf = l2.profit_factor フォールバック",
+        "event_simulator.py:1602-1605 is_pfs 空時 mean_is_pf=None 経路"
+      ],
+      "additional_observations": [
+        "発生条件の一致度: QA-301 (WFA walks<10) と QA-302 (is_profit_factor_walks=None) は同じ WFA 集計失敗状態 -> 完全重複",
+        "フォールバック削除単独修正は QA-301 を悪化させる。両者セット修正必須"
+      ]
+    },
+    {
+      "finding_id": "QA-303",
+      "agreement_with_devil_advocate_a": "agree",
+      "verdict": "validated",
+      "original_severity": "medium",
+      "team1_adjusted_severity": "medium",
+      "team2_adjusted_severity": "medium",
+      "rationale": "vectorbt_engine.py:853 np.std(sharpes) は ddof=0 (numpy default) を Read 確認 (一致)。perturbations=[0.9, 1.0, 1.1] 3 点固定も確認。独立に [1.0, 1.2, 0.8] で計算: mean=1.0, std_pop = sqrt(0.08/3) = 0.1633, std_samp(ddof=1) = sqrt(0.08/2) = 0.2, 比率 = 0.8165 (= sqrt(2/3) 理論値と一致)。CV 過小評価率 18.4%。L2 側 event_simulator.py:1968-1973 arr.std() (ddof=0) も同問題。Tier 2 Param Sensitivity (weight 0.12) と scorer Layer2 sensitivity (境界 0.3/0.5) への有意影響。severity=medium 妥当。",
+      "independent_evidence_check": [
+        "vectorbt_engine.py:851-854 np.std(sharpes) ddof=0 確認",
+        "vectorbt_engine.py:811 perturbations=[0.9, 1.0, 1.1] 確認",
+        "event_simulator.py:1968-1973 L2 _run_l2_param_sensitivity arr.std() ddof=0"
+      ],
+      "additional_observations": [
+        "fallback cv=1.0 (mean<=0.01) は Sharpe 符号反転と低位安定戦略を区別不能にする副次問題",
+        "ddof 修正は [change:spec] (parity test 影響大)"
+      ],
+      "independent_numerical_verification": {
+        "sample_sharpes": [
+          1.0,
+          1.2,
+          0.8
+        ],
+        "mean": 1.0,
+        "std_pop_ddof_0": 0.1633,
+        "std_samp_ddof_1": 0.2,
+        "current_cv_ddof_0": 0.1633,
+        "correct_cv_ddof_1": 0.2,
+        "underestimation_pct": 18.4,
+        "expected_ratio_sqrt_2_over_3": 0.8165,
+        "actual_ratio": 0.8165
+      }
+    },
+    {
+      "finding_id": "QA-304",
+      "agreement_with_devil_advocate_a": "agree",
+      "verdict": "validated",
+      "original_severity": "medium",
+      "team1_adjusted_severity": "low",
+      "team2_adjusted_severity": "low",
+      "rationale": "event_simulator.py:1548 tail_ratio = abs(p95)/abs(p5) を Read 確認 (一致)。abs 化による方向性情報破壊は技術的に正確だが Gate に直接接続しない。p95<0 戦略は Tier 1 #1 PF>=1.0 と Tier 2 Sharpe で既に落ちる構造。weakness_detector の改善方針誤誘導が主リスクで severity=low 妥当。",
+      "independent_evidence_check": [
+        "event_simulator.py:1548 abs(p95)/abs(p5) if abs(p5)>1e-10 else None 確認",
+        "weakness_detector.py:283-293 tail_ratio<0.8 判定 確認"
+      ],
+      "additional_observations": []
+    },
+    {
+      "finding_id": "QA-305",
+      "agreement_with_devil_advocate_a": "agree",
+      "verdict": "validated",
+      "original_severity": "medium",
+      "team1_adjusted_severity": "low",
+      "team2_adjusted_severity": "low",
+      "rationale": "vectorbt_engine.py:953 if pf is not None and pf < L1_MIN_PROFIT_FACTOR と 966 sharpe 版を Read 確認 (一致)。None 時に通過する設計。runner.py:787-792 Tier1 _t1_cond で value is None -> passed=False で最終的に落ちる。問題は L2 高負荷処理 (WFA+MC+感度分析) の無駄消費のみ。severity=low 妥当。",
+      "independent_evidence_check": [
+        "vectorbt_engine.py:953 pf None スキップ確認",
+        "vectorbt_engine.py:966 sharpe None スキップ確認",
+        "runner.py:787-792 Tier1 None -> passed=False"
+      ],
+      "additional_observations": [
+        "L2 計算リソース浪費 + Skill 層で原因 (gross_loss=0 全勝) が伝わりにくい"
+      ]
+    },
+    {
+      "finding_id": "QA-306",
+      "agreement_with_devil_advocate_a": "agree",
+      "verdict": "validated",
+      "original_severity": "medium",
+      "team1_adjusted_severity": "low",
+      "team2_adjusted_severity": "low",
+      "rationale": "monte_carlo.py:212 sharpe = mean_pnl/std_pnl 年率化なし を Read 確認、GPU 経路 287-290 も同様 (一致)。metrics.py:56 で bt_result.monte_carlo 出力に含まれるが scorer は mc_drawdown_95pct のみ参照、MC Sharpe を消費しない。Gate/scorer 数値影響ゼロ。severity=low 妥当。",
+      "independent_evidence_check": [
+        "monte_carlo.py:210-213 CPU 経路 mean_pnl/std_pnl 確認",
+        "monte_carlo.py:287-290 GPU 経路 cp.where(stds>0, means/stds, 0.0) 確認",
+        "metrics.py:56 monte_carlo: bt_result.monte_carlo 出力 確認"
+      ],
+      "additional_observations": []
+    },
+    {
+      "finding_id": "QA-307",
+      "agreement_with_devil_advocate_a": "agree",
+      "verdict": "validated",
+      "original_severity": "medium",
+      "team1_adjusted_severity": "medium",
+      "team2_adjusted_severity": "medium",
+      "rationale": "comparator.py:1-34 import に METRICS_SCHEMA_VERSION なし (一致)。convergence.py:1-80 も schema_version チェックなし (一致)。defaults.py:59-65 で 6.0.0->6.1.0 の var_95 計算根拠変更が文書化、QA-307 具体例として正確。本エージェントプロンプト自身が Q4 として METRICS_SCHEMA_VERSION クロス世代警告を必須と明記しているが計算層に未実装。severity=medium 妥当。",
+      "independent_evidence_check": [
+        "comparator.py:1-34 import に METRICS_SCHEMA_VERSION なし",
+        "comparator.py COMPARISON_METRICS (行 17-34) に schema_version 比較なし",
+        "convergence.py:24-35 import に METRICS_SCHEMA_VERSION なし",
+        "defaults.py:59-65 6.0.0->6.1.0 var_95 計算根拠変更"
+      ],
+      "additional_observations": [
+        "comparator.py に schema_version_warning フィールド追加 + convergence.py で schema 不一致世代を STAGNATION 判定除外、2 箇所修正で完了"
+      ]
+    },
+    {
+      "finding_id": "QA-308",
+      "agreement_with_devil_advocate_a": "agree",
+      "verdict": "validated",
+      "original_severity": "low",
+      "team1_adjusted_severity": "low",
+      "team2_adjusted_severity": "low",
+      "rationale": "result_parser.py:296-305 MFE=0 を efficiencies.append(0.0) で母集団化を Read 確認 (一致)。コメント MFE=0 の取引は efficiency=0 として全取引を母集団に含める も確認。50% MFE=0 戦略で mean=0.25 となり weakness_detector trade_efficiency<0.3 を誤発火させる方向。Gate 接続なし。severity=low 妥当。",
+      "independent_evidence_check": [
+        "result_parser.py:294-305 efficiencies.append(0.0) for mfe<=0",
+        "weakness_detector.py:182-192 trade_efficiency<0.3 判定"
+      ],
+      "additional_observations": []
+    },
+    {
+      "finding_id": "QA-309",
+      "agreement_with_devil_advocate_a": "agree",
+      "verdict": "validated",
+      "original_severity": "low",
+      "team1_adjusted_severity": "low",
+      "team2_adjusted_severity": "low",
+      "rationale": "scorer.py:222-232 を Read 確認 (一致)。final_score = adjusted * quality_mult 後で if not evaluable: final_score = min(final_score, 0.5) クランプ順序を確認。quality_mult=1.2 未評価戦略は実質 -0.1 ペナルティ (0.6->0.5)、quality_mult=0.8 はペナルティなし (0.4 のまま)。SCORE_EXCELLENT=0.75 に届かないため Gate 影響なし。severity=low 妥当。",
+      "independent_evidence_check": [
+        "scorer.py:225-226 adjusted * quality_mult -> final_score",
+        "scorer.py:231-232 quality_mult 適用後に min(final_score, 0.5) クランプ"
+      ],
+      "additional_observations": []
+    },
+    {
+      "finding_id": "QA-310",
+      "agreement_with_devil_advocate_a": "agree",
+      "verdict": "downgraded",
+      "original_severity": "low",
+      "team1_adjusted_severity": "low",
+      "team2_adjusted_severity": "low",
+      "rationale": "dedup.py:160-170 _compute_cosine_similarity を Read 確認。行 163 if not keys: return 1.0 は両者 parameters={} (union 空) のみ発動。行 168-169 if norm_a==0 or norm_b==0: return 0.0 で片方空+もう片方値ありは保護されている (devil-advocate-A も指摘済、original finding は未言及)。parameters={} 戦略は config.json Pydantic で最低 pips_per_unit 等が要求され発生確率ほぼゼロ。severity=low 維持。",
+      "independent_evidence_check": [
+        "dedup.py:163 if not keys: return 1.0",
+        "dedup.py:168-169 if norm_a == 0 or norm_b == 0: return 0.0 (Team-1 が指摘した未言及保護を独立確認)"
+      ],
+      "additional_observations": []
+    },
+    {
+      "finding_id": "QA-311",
+      "agreement_with_devil_advocate_a": "agree",
+      "verdict": "validated",
+      "original_severity": "low",
+      "team1_adjusted_severity": "low",
+      "team2_adjusted_severity": "low",
+      "rationale": "event_simulator.py:1676-1700 _walk_worker で IS seed=42+walk_id, OOS seed=142+walk_id を Read 確認 (一致)。_simulate デフォルト seed=42 との衝突で walk_id=0 IS と base 同 slippage 系列。データが時系列部分集合 (IS) のため slippage 差異の貢献は小、統計的独立性損失は微小。severity=low 妥当。",
+      "independent_evidence_check": [
+        "event_simulator.py:1676-1700 _walk_worker seed=42+walk_id (IS), 142+walk_id (OOS) 確認"
+      ],
+      "additional_observations": [
+        "WFA seed を SHA256(strategy_id+walk_id) ハッシュ化、または base seed=99 分離、いずれも低コスト修正"
+      ]
+    },
+    {
+      "finding_id": "QA-312",
+      "agreement_with_devil_advocate_a": "agree",
+      "verdict": "validated",
+      "original_severity": "low",
+      "team1_adjusted_severity": "low",
+      "team2_adjusted_severity": "low",
+      "rationale": "scorer.py:134-167 WFA/Drift/Sensitivity stepwise if-elif を Read 確認 (一致)。WFA=0.899 で adj=0.0, WFA=0.900 で adj=0.05 の 0.05 不連続ジャンプは実コードで成立。Goodhart Law 的脆弱性として severity=low 妥当。",
+      "independent_evidence_check": [
+        "scorer.py:134-144 WFA stepwise (>=0.9: +0.05, >=0.7: 0.0, >=0.5: -0.05, else: -0.10)",
+        "scorer.py:148-156 Drift stepwise (>0.5: -0.10, >0.3: -0.05, else: 0.0)",
+        "scorer.py:159-167 Sensitivity stepwise (>0.5: -0.10, >0.3: -0.03, else: +0.02)"
+      ],
+      "additional_observations": [
+        "Sensitivity 境界 0.5 (scorer penalty) と Tier 2 NORM_SENSITIVITY_SPAN=0.8 (score 0 境界) が整合せず - ATLAS-MISSED-001 で別途指摘"
+      ]
+    }
+  ],
+  "missed_findings": [
+    {
+      "id": "ATLAS-MISSED-001",
+      "severity": "medium",
+      "area": "scoring/sensitivity",
+      "title": "scorer.py の sensitivity ペナルティ境界と Tier 2 NORM_SENSITIVITY_SPAN の二重定義",
+      "description": "scorer.py Layer2 sensitivity adjustment は境界 0.3/0.5 stepwise (>=0.5: -0.10, >0.3: -0.03, else: +0.02 ボーナス) を使うが、Tier 2 (runner.py:973-981) は GATE_TIER2_NORM_SENSITIVITY_SPAN=0.8 で線形正規化 (sens=0 で 1.0、sens=0.8 で 0.0) を使う。同じ Param Sensitivity 値に対し 2 つのスコアリングロジックが異なる基準で評価される。sensitivity=0.4 戦略は scorer で -0.03 ペナルティ、Tier 2 で normalized=0.5 (中間) と評価される。CLAUDE.md 暗黙原則 1 つの指標を 2 箇所で評価する場合は基準を統一 (S-3 監査 direction_bias 役割分離教訓と同型) に反する。",
+      "evidence": [
+        "scorer.py:159-167 sensitivity stepwise (0.3/0.5 境界)",
+        "runner.py:973-981 Tier 2 sensitivity 線形正規化 (NORM_SENSITIVITY_SPAN=0.8)",
+        "defaults.py:245 GATE_TIER2_NORM_SENSITIVITY_SPAN=0.8"
+      ],
+      "suggested_fix": "scorer.py の sensitivity 評価を Tier 2 と同じ線形正規化に統一するか、両者で異なる基準を使う場合は spec_change_log.md で意図を明文化。[change:spec] 手順。"
+    },
+    {
+      "id": "ATLAS-MISSED-002",
+      "severity": "low",
+      "area": "gate/tier1",
+      "title": "Tier 1 #5 Secondary Period PF=0.8 が L1_MIN_PROFIT_FACTOR=0.8 と同値で多層防御効果薄",
+      "description": "Tier 1 #5 GATE_TIER1_MIN_SECONDARY_PERIOD_PF=0.8 (LONG/balanced) は defaults.py:285 L1_MIN_PROFIT_FACTOR=0.8 と同値。L1 で primary 期間 PF>=0.8 を必須化した後 secondary 期間で同じ 0.8 を要求する設計で 多層防御の意義が薄い。本来 secondary は厳しめ (例: PF>=1.0) で out-of-distribution 期間のロバスト性を確認する目的のはず。SHORT 戦略 0.6 緩和も含めて閾値設計の見直し余地あり。",
+      "evidence": [
+        "defaults.py:184 GATE_TIER1_MIN_SECONDARY_PERIOD_PF=0.8",
+        "defaults.py:188 GATE_TIER1_MIN_SECONDARY_PERIOD_PF_SHORT=0.6",
+        "defaults.py:285 L1_MIN_PROFIT_FACTOR=0.8"
+      ],
+      "suggested_fix": "secondary 閾値を primary より厳しく (例: 0.9 or 1.0) に再設定。[change:spec] 手順 + 過去戦略 overall_passed 変動を spec_change_log.md に記録。"
+    },
+    {
+      "id": "ATLAS-MISSED-003",
+      "severity": "low",
+      "area": "live_promotion",
+      "title": "ATLAS 計算層に paper->live promotion 判定ロジックが存在しない (探索結果)",
+      "description": "本監査 (ATLAS 計算層) のスコープでは paper->live promotion 判定は実装されていない。promotion 決定は親リポ (fx_trading_system 配下) の運用ツール側で行われる設計と推察される。ATLAS 側で出力する final_score / Gate PASS は promotion の必要条件ではあるが十分条件ではない。本観察は 見落とし ではなく 境界の明示。promotion 判定の検証は別監査 (FTS/parity スコープ) に委ねる。",
+      "evidence": [
+        "ATLAS 配下 grep で promote/promotion/paper_to_live すべて 0 ヒット",
+        "atlas/orchestrator/convergence.py は ConvergenceAction として CONTINUE/STOP_EXCELLENT/ABANDON 等のみで promotion 概念なし"
+      ],
+      "suggested_fix": "本監査スコープ外。FTS 側監査で paper->live promotion ロジックの存在確認と検証を実施するべき。"
+    },
+    {
+      "id": "ATLAS-MISSED-004",
+      "severity": "low",
+      "area": "path_safety",
+      "title": "instrument / timeframe / filename CLI 引数の path traversal 経路 (CSR-303 と同型の網羅性確認)",
+      "description": "CSR-303 で指摘された generation_id バリデーション欠如と同型のリスクが、他の CLI 引数 (instrument / timeframe / filename for atlas data / atlas backtest --period 等) にも残存している可能性。本監査では generation_id に集中し、他引数の網羅検証は未実施。例: filename パラメータ (runner.py:1521 save_backtest_result) に ../foo.json を渡せばどう挙動するか未確認。devil-advocate-A も指摘漏れ。",
+      "evidence": [
+        "runner.py:1521 save_backtest_result(filename: str) - caller controlled str",
+        "main.py --period 引数のサニタイズ状況未確認"
+      ],
+      "suggested_fix": "全 CLI 引数のサニタイズ状況を grep で確認し、common/path_safety.py に統合バリデータを設けて全引数を通す。"
+    }
+  ],
+  "summary": {
+    "total": 18,
+    "agreed_with_team1": 17,
+    "disagreed_with_team1": 1,
+    "disagreement_details": [
+      {
+        "finding_id": "CSR-302",
+        "team1_severity": "low",
+        "team2_severity": "medium",
+        "reason": "ATLAS は LLM (fx-strategist) が metadata.json を自動生成する設計のため、Team-1 の 攻撃者が metadata.json を直接書き換える前提 脅威モデルは狭すぎる。LLM プロンプト注入経由で攻撃者制御 parent_id が混入するリスクを過小評価。CSR-303 が medium 維持されている整合性も担保する必要あり。"
+      }
+    ],
+    "team2_final_severity_distribution": {
+      "critical": 0,
+      "high": 1,
+      "medium": 6,
+      "low": 11
+    },
+    "additional_findings_count": 4,
+    "additional_findings_severity": {
+      "medium": 1,
+      "low": 3
+    },
+    "qa_301_numerical_reproduction_status": "confirmed_exact",
+    "qa_303_numerical_reproduction_status": "confirmed_exact_18_4_pct_underestimation",
+    "cross_cutting_recommendations": [
+      "QA-301 と QA-302 は同一の WFA 欠落状況で逆方向に作用する設計欠陥。両者をセットで [change:spec] 修正すること",
+      "CSR-302 と CSR-303 は同型 path traversal で統合修正 (common/path_safety.py) を推奨",
+      "scorer.py と runner.py (Tier 2) で sensitivity 評価基準が二重定義 (ATLAS-MISSED-001) - 統一すべき",
+      "Q4 (METRICS_SCHEMA_VERSION クロス世代警告) は本エージェントプロンプト要求事項だが QA-307 で未実装が確認された。計算層に追加すべき"
+    ],
+    "alignment_with_audit_0525_002_lessons": [
+      "AUDIT-0525-002 で過大評価された影響範囲 (全 KS dead, Live 14 戦略) と同型の誇張パターンを本監査でも QA-304/QA-306 で検出し格下げ済 (Team-1 と一致)",
+      "CSR-301 は AUDIT-0525-002 CSR-101 (実証 RCE) と性質が異なる仮定的シナリオで low が妥当 (Team-1 と一致)",
+      "Team-2 として新たに CSR-302 を medium に格上げ - LLM 生成物に対する信頼境界の脅威モデル拡張"
+    ]
+  }
+}

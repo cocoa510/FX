@@ -1,0 +1,126 @@
+{
+  "agent": "qa-tester",
+  "scope": ["PR28", "PR23", "PR25", "PR26", "PR27", "PR29", "PR30", "PR31", "PR32", "PR34", "PR36"],
+  "test_run_result": {
+    "command": "cd C:/data/works/FX/fx_trading_system && .venv/Scripts/python.exe -m pytest tests/unit/test_unified_runner_metrics_injection.py tests/unit/test_forward_test_metrics_injection.py tests/unit/test_kill_switch_reason_label.py tests/unit/test_coordinator_ptrc_post_triggers.py tests/unit/test_account_risk_state_guard.py tests/unit/test_warn_hysteresis.py tests/unit/test_unrealized_warning_email.py tests/unit/test_dashboard_autorefresh.py tests/unit/test_stream_receiver_reconnect_log.py tests/unit/test_pytest_timeout_config.py tests/risk_engine/test_global_kill_switch.py -v",
+    "passed": 74,
+    "failed": 0,
+    "errors": 0,
+    "detail": "74 passed in 0.69s。PR28〜PR36 全テストが PASS。ただし下記 findings に false-green 2 件 / fix_incomplete 1 件を検出。"
+  },
+  "findings": [
+    {
+      "id": "QA-001",
+      "severity": "high",
+      "pr": "PR28",
+      "area": "test / CI",
+      "title": "parity/conftest.py の pytestmark=timeout(300) は parity テストファイルに伝播しない",
+      "description": "PR28 は C-5 の解消策として parity/conftest.py に `pytestmark = pytest.mark.timeout(300)` を追加した。しかし pytest 9.0.3 実環境で実測した結果、parity 配下のテストアイテムの markers は空 (`MARKS: []`) であり、timeout=300 が一切適用されていない。グローバル timeout=30 がそのまま有効で、parity テスト 56 件が将来 30 秒を超えた時点で誤 FAIL する。計画は「個別に @pytest.mark.timeout(300)」だったが実装方式 (conftest.py 側に pytestmark) に変えたことで効果がなくなっている。現状の parity は 5.47s で完了するため即時問題は発生していないが、構造的な防御が機能していない。",
+      "evidence": [
+        "tests/parity/conftest.py:27 — pytestmark = pytest.mark.timeout(300)",
+        "[実測] GetMarksPlugin hook: test_ema_parity MARKS: [] (timeout マークなし)",
+        "tests/unit/test_pytest_timeout_config.py:45 — test_parity_conftest_has_module_level_timeout_override は conftest.py にコードが書かれているかのみ確認し、実際の伝播を検証しない (false-green)"
+      ],
+      "verdict": "false_green",
+      "suggested_fix": "各 parity テストファイル (test_feature_store_parity.py, test_bar_source_parity.py 等 6 ファイル) の先頭に `pytestmark = pytest.mark.timeout(300)` を直接記述する。または pytest-timeout の hook 版 (conftest.py の pytest_configure で timeout 設定) を使う。test_pytest_timeout_config.py::test_parity_conftest_has_module_level_timeout_override も「実際にマークが伝播する」ことを hook で動的検証するよう書き換える。"
+    },
+    {
+      "id": "QA-002",
+      "severity": "high",
+      "pr": "PR30",
+      "area": "test",
+      "title": "test_coordinator_ptrc_post_triggers.py が実際の coordinator._run_post_trade_risk 経路を通らない (自家製ロジックで偽装)",
+      "description": "PR30 の triggers キー修正テストは `_invoke_handle_action` というテスト内独自関数 (coordinator.py:542-571 のロジックを手動再現) を通じて動作する。実際の `ExecutionCoordinator._run_post_trade_risk` メソッドは呼ばれない。また既存の wiring test (`test_coordinator_ptrc_post_wiring.py:99`) は旧形式 `details={'trigger': 'daily_loss_critical'}` (単数キー) を使ったままで、PR30 修正後の coordinator が正しい `reason='ptrc_post_daily_loss_critical'` を渡すことを一切確認していない (force_activate の呼び出し回数のみ assert)。coordinator を実際に経由したエンドツーエンド経路で reason 引数の正しさを証明するテストが存在しない。",
+      "evidence": [
+        "tests/unit/test_coordinator_ptrc_post_triggers.py:32-56 — _invoke_handle_action は coordinator の実メソッドではなく、テスト内ローカル関数でロジックを再実装",
+        "tests/unit/test_coordinator_ptrc_post_wiring.py:99 — details={'trigger': 'daily_loss_critical'} (単数形。triggers キーなし)",
+        "tests/unit/test_coordinator_ptrc_post_wiring.py:124 — kill_switch.force_activate.assert_awaited_once() のみ (reason 引数未確認)",
+        "[推測] wiring test 経路では triggers_raw=[] -> trigger_reason='unknown' となる可能性が高い"
+      ],
+      "verdict": "false_green",
+      "suggested_fix": "test_coordinator_ptrc_post_wiring.py:99 の details を `{'triggers': ['daily_loss_critical']}` (複数形) に修正し、assert を `force_activate.assert_awaited_once_with(reason='ptrc_post_daily_loss_critical', source='post_trade_risk')` に強化する。test_coordinator_ptrc_post_triggers.py についても、_invoke_handle_action を使わず `coord._run_post_trade_risk(order, fill_price)` を直接呼ぶ統合レベルのテストを追加する。"
+    },
+    {
+      "id": "QA-003",
+      "severity": "medium",
+      "pr": "PR25",
+      "area": "test",
+      "title": "UnifiedRunner metrics 注入テストは静的解析 (AST/grep) のみ。本番 LIVE 経路の動的実行を検証しない",
+      "description": "test_unified_runner_metrics_injection.py の 7 テストはすべて runner.py のソースコード解析 (文字列一致・AST walk) または inspect.signature による引数確認で構成されている。UnifiedRunner を実際にインスタンス化して _setup_slot を呼び出し、LiveFeatureStore と EmailNotifier に注入された metrics が同一インスタンスであることを動的に検証するテストがない。C-2 の本質である「本番 LIVE 経路で metrics が feature_store に届くことを検証」には至っていない。静的解析は実装のコピペミス (metrics=self._monitoring 等) を検出できない。",
+      "evidence": [
+        "tests/unit/test_unified_runner_metrics_injection.py:80-95 — AST で LiveFeatureStore() に metrics keyword があることを確認するのみ",
+        "tests/unit/test_unified_runner_metrics_injection.py:51-65 — inspect.signature で引数名確認のみ",
+        "[推測] metrics インスタンスの同一性 (is) や feature_store の _metrics 属性値を確認するテストが存在しない"
+      ],
+      "verdict": "fix_incomplete",
+      "suggested_fix": "UnifiedRunner(strategies_dir=..., logs_dir=..., metrics=isolated) をインスタンス化後、_setup_slot を呼び出し、slot._feature_store._metrics is isolated を動的アサートするテストを追加する。ただし _setup_slot は async メソッドであり、フィクスチャの作り込みが必要なため R3 対応が現実的。"
+    },
+    {
+      "id": "QA-004",
+      "severity": "low",
+      "pr": "PR28",
+      "area": "test / CI",
+      "title": "test_slow_marker_registered は markers リストに 'slow:' 文字列があるかのみ確認 (登録の有効性は未確認)",
+      "description": "test_pytest_timeout_config.py:54 の test_slow_marker_registered は pyproject.toml に `\"slow:` という文字列が含まれるかを grep で確認するのみ。実際に `@pytest.mark.slow` がテスト収集時に UnknownMarkWarning なしに機能するかは検証していない。また parity マーカーも同様に文字列の存在のみ確認。現状は軽微だが、markers 設定に文法エラーがあっても検出できない。",
+      "evidence": [
+        "tests/unit/test_pytest_timeout_config.py:57 — assert '\"slow:' in source",
+        "pyproject.toml:96 — \"slow: 30 秒を超えるテスト...\" (確認済み、文字列は存在する)"
+      ],
+      "verdict": "false_green",
+      "suggested_fix": "pytest.ini_options markers の有効性を確認するには `pytest --markers` の出力に slow が含まれるかを subprocess で動的確認するか、`@pytest.mark.slow` を付けたダミーテストを --strict-markers オプションで実行して UnknownMarkWarning が出ないことを確認する。"
+    },
+    {
+      "id": "QA-005",
+      "severity": "low",
+      "pr": "PR27",
+      "area": "docs",
+      "title": "D Runbook 整合: アラート名は alerting_rules.yml と完全一致。C-4 は解消済み",
+      "description": "deploy/prometheus/alerting_rules.yml:98 に `FxFeatureStorestaleHigh`、:145 に `FxEventBusDedupSpike` が定義されており、docs/runbook/feature_staleness.md と event_bus_dedup_spike.md のヘッダーの対象アラート名と完全一致する。C-4 は適切に解消されている。ただし feature_staleness.md の Step 2 に「PR36 で stream_receiver に logger.info 追加予定」という記述が残っており、PR36 適用後に訂正が必要 (軽微)。",
+      "evidence": [
+        "deploy/prometheus/alerting_rules.yml:98 — FxFeatureStorestaleHigh",
+        "deploy/prometheus/alerting_rules.yml:145 — FxEventBusDedupSpike",
+        "docs/runbook/feature_staleness.md:1 — 対象アラート: FxFeatureStorestaleHigh",
+        "docs/runbook/event_bus_dedup_spike.md:1 — 対象アラート: FxEventBusDedupSpike",
+        "docs/runbook/feature_staleness.md:57 — 'PR36 で stream_receiver に logger.info 追加予定' (未訂正)"
+      ],
+      "verdict": "fix_incomplete",
+      "suggested_fix": "feature_staleness.md:57 の 'PR36 で...追加予定' という記述を 'PR36 で追加済み (67ab47a)' に訂正する。"
+    },
+    {
+      "id": "QA-006",
+      "severity": "low",
+      "pr": "PR36",
+      "area": "test",
+      "title": "test_reconnect_log_is_inside_non_first_connect_branch の is_first_idx 検索条件が過剰",
+      "description": "test_stream_receiver_reconnect_log.py:66 の行検索条件は `'if not self._is_first_connect' in line and '_metrics' in line` となっている。実際の stream_receiver.py:223 は `if not self._is_first_connect and _metrics is not None:` で両方の文字列を含むのでテストはPASSする。しかし将来の実装変更で条件を別行に分けた場合 (例: if cond + if metrics:) に is_first_idx=None になって AssertionError になるという脆弱な検索ロジック。",
+      "evidence": [
+        "tests/unit/test_stream_receiver_reconnect_log.py:66 — if 'if not self._is_first_connect' in line and '_metrics' in line",
+        "trading_platform/data/market_data/stream_receiver.py:223 — if not self._is_first_connect and _metrics is not None:"
+      ],
+      "verdict": "new_defect",
+      "suggested_fix": "行検索条件を '_metrics' との AND を除いて `'if not self._is_first_connect'` のみで検索するか、AST walk で IfブロックのBody内に 'OANDA Stream再接続成功' が含まれることを構造的に確認する。"
+    }
+  ],
+  "existing_test_diff_review": {
+    "test_global_kill_switch.py": "PR31対応で直接代入を classmethod set_guarded 経由に変更 (test_daily_reset_clears_warning_layer_but_not_ks)。防壁を緩める方向の変更なし。正当なガード準拠修正。",
+    "test_risk_supervisor_kill_switch_persistence.py": "PR31対応で直接代入を set_guarded 経由に変更 (test_daily_reset_does_not_auto_clear_kill_switch)。アサート内容は変更なし。防壁を緩める方向の変更なし。",
+    "test_kill_switch_reason_label.py": "新規作成 (PR29)。allowlist/cardinality/後方互換を包括的に検証。false-green なし。",
+    "test_prometheus_metrics_dm_f_002.py": "PR29対応で kill_switch_triggered カウンタに reason ラベルを追加。既存 assert を新形式 (reason='unknown') に更新。防壁を緩める方向の変更なし。",
+    "test_runner_restore_last_reset_date.py": "PR25対応で UnifiedRunner 生成時に isolated metrics を注入。metrics Registry 衝突を回避するための正当な修正。",
+    "hang_regression": "tests/integration/test_correlation_chain.py と test_worker_coordinator.py の skip は R2 で変更なし。R2 が hang を悪化させる変更はなし。新規 skip/xfail の導入もなし。"
+  },
+  "pr_verdicts": {
+    "PR23": "PASS — Dashboard 二重 autorefresh 修正は正確。test_dashboard_autorefresh.py 5 テスト全 PASS。AST/文字列検証だが C-3 の欠陥箇所を正確に特定している。",
+    "PR25": "PARTIAL — UnifiedRunner に MetricsCollector 注入は実装済み。テストは静的解析のみで動的経路検証が不足 (QA-003)。C-2 は機能的に解消されているが証明が不完全。",
+    "PR26": "PASS — ForwardTestRunner への metrics 注入は適切。test_forward_test_metrics_injection.py 4 テスト全 PASS。PR25 と同方式の静的解析テストだが H-4 の欠陥要件に対応している。",
+    "PR27": "PARTIAL — Runbook 2 件のアラート名整合は確認済み。feature_staleness.md:57 に PR36 未訂正の表記残存 (軽微、QA-005)。",
+    "PR28": "FAIL — parity/conftest.py の pytestmark=timeout(300) は parity テストファイルに伝播しない (実測確認)。グローバル timeout=30 がそのまま適用されており、C-5 の防御が機能していない。test_parity_conftest_has_module_level_timeout_override は false-green (QA-001)。",
+    "PR29": "PASS — reason ラベル + allowlist 正規化の実装とテストが整合。7 テスト全 PASS。カーディナリティ防止・後方互換を包括的に検証している。",
+    "PR30": "PARTIAL — coordinator.py の triggers キー修正は実装済み。しかし test_coordinator_ptrc_post_triggers.py が実際の coordinator 経路を経由せず、test_coordinator_ptrc_post_wiring.py が旧 trigger 単数キーのデータを使い reason 引数を確認しないため、修正の正確性を End-to-End で証明できていない (QA-002, false-green)。",
+    "PR31": "PASS — AccountRiskState __setattr__ ガードの実装・テストが整合。9 テスト全 PASS。既存テスト 2 件も正しく set_guarded 経由に修正済み。H-11 が適切に解消されている。",
+    "PR32": "PASS — WARN ヒステリシス (95%/80%) の実装・テストが整合。9 テスト全 PASS。チャタリング防止・日次リセット時 deactivate を包括的に検証。H-1 が適切に解消されている。",
+    "PR34": "PASS — unrealized_warning Email 配線 + per-kind throttle の実装・テストが整合。11 テスト全 PASS。silently drop の根本原因 (_RISK_ALERT_KINDS 未登録) を実際の _on_risk_alert 経路で検証しており、C-1 が適切に解消されている。",
+    "PR36": "PASS — stream_receiver に reconnect logger.info 追加済み。4 テスト全 PASS。ただし is_first_idx 検索ロジックが脆弱 (QA-006、低優先)。H-9 は機能的に解消されている。"
+  },
+  "summary": "R2 全 74 テストが 0.69s で PASS。回帰 (防壁を緩める方向の改変) はなし。新規 skip/xfail の濫用もなし。hang テスト 2 件 (test_correlation_chain, test_full_async_flow) への R2 の影響なし。\n\nfalse-green 検出: 2 件 (QA-001, QA-002)。\n- QA-001 (PR28, High): parity/conftest.py の pytestmark=timeout(300) は parity テストに伝播しない (実測 MARKS=[]。グローバル timeout=30 が依然有効)。test_pytest_timeout_config.py::test_parity_conftest_has_module_level_timeout_override がこれを見逃す false-green テスト。\n- QA-002 (PR30, High): test_coordinator_ptrc_post_triggers.py が coordinator._run_post_trade_risk を経由せずローカル再実装でテスト。既存 wiring test は旧 trigger 単数キーを使い reason を確認しない。PR30 修正の E2E 証明が欠如。\n\nfix_incomplete: 2 件 (QA-003, QA-005)。\n- QA-003 (PR25): UnifiedRunner metrics 注入を静的解析のみで検証、動的経路検証なし。\n- QA-005 (PR27): feature_staleness.md の PR36 未訂正記述残存 (軽微)。\n\nnew_defect: 1 件 (QA-006, Low)。stream_receiver reconnect log テストの行検索ロジックが脆弱。"
+}

@@ -1,0 +1,223 @@
+{
+  "agent": "quant-analyst",
+  "scope": "ATLAS evaluation/statistical layer (atlas/analyzer, atlas/backtest, atlas/orchestrator, atlas/config)",
+  "audit_commit": "02bee7f1",
+  "modules_reviewed": [
+    "atlas/analyzer/scorer.py",
+    "atlas/analyzer/metrics.py",
+    "atlas/analyzer/weakness_detector.py",
+    "atlas/analyzer/dedup.py",
+    "atlas/analyzer/comparator.py",
+    "atlas/analyzer/portfolio_analyzer.py",
+    "atlas/backtest/runner.py",
+    "atlas/backtest/result_parser.py",
+    "atlas/backtest/event_simulator.py",
+    "atlas/backtest/vectorbt_engine.py",
+    "atlas/backtest/monte_carlo.py",
+    "atlas/config/defaults.py",
+    "atlas/orchestrator/convergence.py",
+    "atlas/common/cloning.py",
+    "atlas/history/models.py",
+    "scripts/detect_clones.py"
+  ],
+  "notes": [
+    "ATLAS には独立した regime / parity モジュールは存在しない (grep 結果)。BT vs Live の数値整合性検証は親リポ tests/parity 配下に散在しており本監査スコープ外。",
+    "QA-201/QA-202/QA-203/QA-204/QA-205/QA-108 は再検出禁止指定どおり除外。本監査は dry-run (修正は実施せず)。"
+  ],
+  "findings": [
+    {
+      "id": "QA-301",
+      "severity": "high",
+      "area": "gate",
+      "title": "Tier 2 soft_score 再分配でロバスト性 3 指標 (WFA/Drift/OOS-IS) 全欠落でも PASS 達成可能",
+      "description": "runner.py::_compute_soft_score_redistributed は v6.0.1 で EFFECTIVE_WEIGHT_FLOOR=0.70 を導入し膨張倍率を 1.43 にクランプしたが、None component を valid 集合から除外して再正規化する設計のため、WFA Efficiency (0.10) + Strategy Drift (0.08) + OOS-IS Ratio (0.12) + Top-3 Stripped PF (0.10) の合計 0.40 が全 None でも、残る PF (0.18) + MaxDD (0.15) + Sharpe (0.15) + Param Sensitivity (0.12) の valid weight 合計 0.60 が effective_weight=0.70 (FLOOR) で 0.60/0.70=0.857 倍に膨張する。これら 4 指標すべて max 1.0 なら soft_score 約 0.857 で閾値 0.70 を超え、ロバスト性指標を一切評価せず Tier 2 PASS となる。WFA_MIN_WALKS=10 未達の短期/低頻度戦略では構造的に発生する。",
+      "evidence": [
+        "atlas/backtest/runner.py:631-674 (_compute_soft_score_redistributed)",
+        "atlas/backtest/runner.py:663 (EFFECTIVE_WEIGHT_FLOOR=0.70)",
+        "atlas/backtest/event_simulator.py:1582-1600 (_aggregate_wfa_walks: walks<10 de zen None henkyaku)",
+        "atlas/config/defaults.py:310 (WFA_MIN_WALKS=10)",
+        "atlas/backtest/result_parser.py:240-263 (_compute_oos_is_ratio fallback)"
+      ],
+      "reproduction": "WFA walks 数が 10 未満になる短期 (例: short_secondary H4) または低頻度戦略を作成し _aggregate_wfa_walks の早期 return パスを踏ませる (efficiency/oos_pf/is_pf/drift すべて None)。L2 メトリクスを PF=1.5/Sharpe=1.5/MaxDD=0/Sensitivity=0 で擬似生成し、check_backtest_gate 戻り値で tier2.soft_score>=0.70 かつ tier2.components で WFA/Drift/OOS が value=None になることを確認。",
+      "suggested_fix": "Tier 1 または新規 Tier 2-Hard ガードで robustness 3 指標 (WFA/Drift/OOS) のうち N 個以上 None なら overall_passed=False を強制。最低でも tier2.passed = soft_score>=0.70 AND (WFA Efficiency と Strategy Drift の少なくとも片方が non-None) を追加。または EFFECTIVE_WEIGHT_FLOOR を valid 集合が robustness を含むかで動的に上げる (robustness 全欠落時 FLOOR=0.95)。[change:spec] 手順を経て過去戦略のうち robustness 未評価で PASS した件数を spec_change_log.md に記録。",
+      "impact_scope": "Gate 直結。FTS ペーパー投入・Live 投入の前提となる Tier 2 判定を歪める。WFA で評価不能 = 未検証戦略が PASS 扱いで Live に流れる経路を残す。短期/低頻度系で発生確率が高い。",
+      "regression_of": null
+    },
+    {
+      "id": "QA-302",
+      "severity": "high",
+      "area": "wfa",
+      "title": "oos_is_pf_ratio フォールバックが旧 P8-H6 で問題視された異質スコープ比較を再導入",
+      "description": "result_parser.py::_compute_oos_is_ratio は WFA の is_profit_factor_walks を一次分母とするが、None 時に l2.profit_factor (IS+OOS 結合フル期間 PF) へフォールバックする。P8-H6 (第5次監査) で フル期間 PF は IS の自己相関で膨張するため WFA OOS PF と比較すると系統的に小さくなる と明記された問題を、フォールバック条件で再導入している。新フォーマット result.json では is_profit_factor_walks が常に埋まるが、(a) WFA walks<10 で walks 集計が None を返す経路、(b) WFA 内 IS PF サンプル数 0 経路、(c) 旧フォーマット読み戻し、で発生する。発生時に oos_is_pf_ratio が真値より小さくなり Tier 2 soft_score の OOS-IS Ratio コンポーネント (重み 0.12) が不当に低下する。",
+      "evidence": [
+        "atlas/backtest/result_parser.py:240-263 (_compute_oos_is_ratio fallback)",
+        "atlas/backtest/result_parser.py:256-260 (fallback jouken)",
+        "atlas/backtest/event_simulator.py:1602-1605 (is_pfs kuu ji None henkyaku)",
+        "atlas/backtest/event_simulator.py:1589-1600 (walks<min_walks ji zen None henkyaku)"
+      ],
+      "reproduction": "result.json の layer2 で is_profit_factor_walks=null, oos_profit_factor=1.2, profit_factor=2.5 を作為的に作り _compute_oos_is_ratio を直接呼ぶ。WFA IS PF 平均ベースなら 1.2/1.5 約 0.8 のところ、フォールバックパスでは 1.2/2.5=0.48 と過小評価される。",
+      "suggested_fix": "フォールバックを削除し、is_profit_factor_walks が None なら oos_is_pf_ratio も None を返す (Tier 2 redistribute 経路に委ねる)。または分母種別を出力 (oos_is_pf_ratio_basis: wfa_walks_is または full_period) し、Gate 側で full_period の時は contribution=0 にダウングレード。",
+      "impact_scope": "Tier 2 soft_score に直接影響 (weight 0.12)。oos_is_pf_ratio 過小評価戦略は Gate Tier 2 で不当に落ちる、同じ raw OOS PF を持つ別戦略との横断比較が歪む。",
+      "regression_of": "P8-H6 (dai 5 ji kansa)"
+    },
+    {
+      "id": "QA-303",
+      "severity": "medium",
+      "area": "metrics",
+      "title": "_analyze_param_sensitivity の np.std が母集団 std (ddof=0) で CV を過小評価",
+      "description": "vectorbt_engine.py::_analyze_param_sensitivity 行 853 で std_sharpe = np.std(sharpes) が ddof=0 (母集団 std) で算出される。CV は 3 点 (perturbations=[0.9, 1.0, 1.1]) サンプルから推定しており標本 std (ddof=1) を使うべき。3 点標本での std_pop/std_samp = sqrt(2/3) 約 0.816 倍に過小評価される。結果として Tier 2 Param Sensitivity (重み 0.12) と scorer の Layer2 sensitivity ボーナス (+0.02) が脆弱戦略にも与えられる方向に偏る。さらに行 854 のフォールバック cv = std/abs(mean) if abs(mean)>0.01 else 1.0 は、Sharpe 平均が 0.01 近傍の戦略を一律 CV=1.0 にする恣意的処理で、Sharpe 符号反転の不安定戦略と Sharpe 低位安定戦略を区別できない。",
+      "evidence": [
+        "atlas/backtest/vectorbt_engine.py:851-854 (np.std + CV fallback)",
+        "atlas/backtest/vectorbt_engine.py:811 (perturbations 3 ten kotei)",
+        "atlas/backtest/event_simulator.py:1965-1974 (L2 _run_l2_param_sensitivity douyo no ddof=0)"
+      ],
+      "reproduction": "perturbations=[0.9, 1.0, 1.1] で sharpes=[1.0, 1.2, 0.8] (mean=1.0, std_pop 約 0.163, std_samp 約 0.2) を擬似入力。現実装 CV=0.163、本来の標本 CV=0.2 で 22% 過小評価。",
+      "suggested_fix": "np.std(sharpes, ddof=1) に変更。[change:spec] 手順 (METRICS_SCHEMA_VERSION minor bump) を要する。同時にフォールバック CV=1.0 を cv=None 返却に置き換え、Tier 2 で None component として再分配ロジックに委ねる。L2 側 (_run_l2_param_sensitivity) も同期修正。",
+      "impact_scope": "scorer Layer2 sensitivity (+/-0.10 振れ幅) と Tier 2 Param Sensitivity (重み 0.12) に影響。L1 sensitivity score を Gate Tier 2 で参照する経路で過小評価が起きる。",
+      "regression_of": null
+    },
+    {
+      "id": "QA-304",
+      "severity": "medium",
+      "area": "metrics",
+      "title": "tail_ratio が abs(p95)/abs(p5) で裾の方向性情報を破壊",
+      "description": "event_simulator.py::_compute_metrics 行 1548 で tail_ratio = abs(p95) / abs(p5) と算出される。標準的定義 (右裾の利益期待 / 左裾の損失期待) は p95>0 かつ p5<0 が前提。abs 化により p95<0 のケース (リターン分布の中央が大きく負、95%ile も負) で本来 0 以下を返すべきところ、abs(負)/abs(負) 約 1 を返し 裾は均衡 と誤誘導する。result_parser.py 行 367 (旧フォーマット fallback) と weakness_detector の tail_ratio<0.8 判定 (行 283) に伝播。",
+      "evidence": [
+        "atlas/backtest/event_simulator.py:1548 (abs(p95)/abs(p5))",
+        "atlas/backtest/result_parser.py:367 (kyuu format fallback dou-shiki)",
+        "atlas/analyzer/weakness_detector.py:283-293 (tail_ratio<0.8 hantei)"
+      ],
+      "reproduction": "リターン系列を np.random.normal(-0.01, 0.005, 1000) で生成 (mean=-1%)。p95 約 -0.002, p5 約 -0.018 で abs(p95)/abs(p5)=0.111。tail_ratio<0.8 警告は出るが真の問題は 全リターンが負 で weakness_detector は誤った改善方針 (tail_risk 緩和) を提案する可能性。",
+      "suggested_fix": "tail_ratio の定義を明文化し p95<0 で None を返す (利益裾が存在しない戦略として未評価扱い)。または tail_ratio = max(p95, 0) / abs(min(p5, 0)) で 上方期待 / 下方リスク に修正。[change:spec] 手順 + spec_change_log.md。",
+      "impact_scope": "Gate には直接接続していない (Tier 1/2 に含まれない) が weakness_detector 経由で評価レポートと改善方針に影響。Live への直接影響は無いが改善ループ収束方向を歪める。",
+      "regression_of": null
+    },
+    {
+      "id": "QA-305",
+      "severity": "medium",
+      "area": "wfa",
+      "title": "Layer1 PASS 判定が profit_factor=None / sharpe=None 時にサイレント通過",
+      "description": "vectorbt_engine.py::run_layer1 の最低基準チェック 行 953 は pf is not None and pf < L1_MIN_PROFIT_FACTOR、行 966 は sharpe is not None and sharpe < L1_MIN_SHARPE で、None の場合は通過する。trade_count >= L1_MIN_TRADES=20 を別途ガードするが、20 件以上で完全無敗 (gross_loss=0 で PF=None) の異常戦略が L1 PASS から L2 へ流れる。L2 _compute_metrics は gross_loss=0 で PF=None を返し Tier 1 #1 で 値が算出されていません FAIL に倒れる設計だが、その前段で Monte Carlo / WFA / 感度分析の高負荷処理が走り CPU/メモリを浪費する。",
+      "evidence": [
+        "atlas/backtest/vectorbt_engine.py:953 (pf None skip)",
+        "atlas/backtest/vectorbt_engine.py:966 (sharpe None skip)",
+        "atlas/backtest/vectorbt_engine.py:736-740 (L1 gross_loss=0 de PF=None)",
+        "atlas/backtest/event_simulator.py:1385-1389 (L2 gross_loss=0 de PF=None)"
+      ],
+      "reproduction": "trade=21, 全勝 (gross_loss=0) のダミー戦略を vectorbt で評価。L1 PF=None, Sharpe=None でも passed=True (行 1013-1023)。Layer2 へ進み _run_walk_forward と Monte Carlo 実行後 Tier 1 で落ちる。",
+      "suggested_fix": "Layer1 で if pf is None or pf < L1_MIN_PROFIT_FACTOR に変更 (sharpe も同様)。理由を [change:spec] で記録し L1_PF_NONE_REJECT フラグを Layer1Result.error に設定。",
+      "impact_scope": "Gate 直結ではない (Tier 1 で最終的に落ちる) が L2 計算リソース浪費。ループ実行時に総時間が無駄に膨らみ 94% 安全停止ガードへの圧迫要因。",
+      "regression_of": null
+    },
+    {
+      "id": "QA-306",
+      "severity": "medium",
+      "area": "metrics",
+      "title": "Monte Carlo Sharpe が年率化されておらず他 Sharpe との単位整合が無い",
+      "description": "monte_carlo.py::_run_monte_carlo_cpu 行 212 (GPU 経路 行 290) で sharpe = mean_pnl / std_pnl が年率化なし。L1/L2 Sharpe は BARS_PER_YEAR[tf] で年率化済み (vectorbt_engine.py:753-757, event_simulator.py:1454-1458) のため MC Sharpe (1 トレードあたりの mean/std) と桁が異なる。scorer は mc_drawdown_95pct のみ参照し MC Sharpe を消費しないが、monte_carlo dict は compute_metrics の戻り値 (metrics.py:56) に含まれ、評価エージェント (quant-analyst) が同名 sharpe_mean を他 Sharpe と並列比較する誤読リスク。CLAUDE.md 変更管理プロセスは 指標の計算ロジック変更は [change:spec] 必須 としているが MC Sharpe の単位仕様は明文化されていない。",
+      "evidence": [
+        "atlas/backtest/monte_carlo.py:210-213 (CPU keiro, nenritsu ka nashi)",
+        "atlas/backtest/monte_carlo.py:287-290 (GPU keiro, douyo)",
+        "atlas/backtest/monte_carlo.py:62-65 (MonteCarloResult.sharpe_mean/5pct/95pct)",
+        "atlas/analyzer/metrics.py:56 (monte_carlo dict wo shutsuryoku ni fukumeru)"
+      ],
+      "reproduction": "PnL=[100]*100 の MC を実行し sharpe_mean を確認。標本 mean=100, std=0 で sharpe=0.0 が返るが、std>0 の通常ケースで MC Sharpe と L2 Sharpe (例: 1.5) が直接比較されると桁が違う。",
+      "suggested_fix": "MC Sharpe を sharpe_per_trade_mean/5pct/95pct に rename するか、L2 と整合するよう年率化 (sharpe * sqrt(n_trades_per_year), ただし bars 基底とは別物として spec_change_log.md に明記)。または MC モデルから削除し drawdown と return のみ残す。",
+      "impact_scope": "Gate/scorer 直接接続なし。evaluation/report.json で sharpe_mean を L1/L2 Sharpe と混同するリスクのみ。",
+      "regression_of": null
+    },
+    {
+      "id": "QA-307",
+      "severity": "medium",
+      "area": "scoring",
+      "title": "comparator / convergence で metrics_schema_version cross-check が無い",
+      "description": "comparator.py::compare_two と convergence.py::check_convergence は前世代と現世代の final_score を直接比較するが、PerformanceMetrics または BacktestResult.metrics_schema_version の差分を検知しない。CLAUDE.md 変更管理プロセスは バージョンが異なる結果の横断比較時はバージョン差異を警告すること を要求し、quant-analyst プロンプト本文にも Q4 として METRICS_SCHEMA_VERSION クロス世代警告が必須と明記されているが、計算層には実装されていない。結果として 6.0.0 から 6.1.0 のような minor bump 直後の世代比較で 改善 X% と機械算出されるが、実は指標定義変更で戦略は同一というケースを区別できない。",
+      "evidence": [
+        "atlas/analyzer/comparator.py:79-160 (compare_two, schema version sansyo nashi)",
+        "atlas/orchestrator/convergence.py:66-350 (check_convergence, schema version sansyo nashi)",
+        "atlas/analyzer/comparator.py:1-34 (import bu ni METRICS_SCHEMA_VERSION sansyo nashi)",
+        "atlas/config/defaults.py:59-65 (6.0.0 kara 6.1.0 var_95 keisan konkyo henkou)"
+      ],
+      "reproduction": "Gen N で metrics_schema_version=6.0.0 (var_95 が間引き equity 由来) と Gen N+1 で 6.1.0 (フル equity 由来) の compare_two を実行。var_95 値が 10x 変化していても improved/degraded のみで schema 差分は警告されない。",
+      "suggested_fix": "comparator.py の compare_two 戻り値先頭に schema_version_warning を追加し、prev と current の metrics_schema_version 不一致時に 直接比較不可、スキーマ不変指標 (PF, Sharpe, MaxDD) のみ比較可能 警告を出す。convergence.py も同様に history record の schema_version を比較し、不一致世代を跨ぐ改善率を STAGNATION 判定から除外する。",
+      "impact_scope": "改善ループの方針判断・収束判定に影響。Gate 直結なし。スキーマ更新直後 1-2 世代の評価が歪み、改善停滞や振動の誤検出を誘発しうる。",
+      "regression_of": null
+    },
+    {
+      "id": "QA-308",
+      "severity": "low",
+      "area": "metrics",
+      "title": "trade_efficiency の MFE=0 取引を 0.0 で母集団化する処理がサンプル平均を構造的に押し下げる",
+      "description": "result_parser.py::_compute_trade_stats 行 297-305 で trade_efficiency 算出時、MFE=0 取引を efficiencies.append(0.0) で母集団に含める。コメントは 以前は mfe>0 取引のみ集計でサバイバーシップバイアス として是正の趣旨だが、現実装は逆方向のバイアスを生む。MFE=0 取引は エントリー直後に逆行で利益化せず で本来 trade efficiency=0 ではなく未定義 (分母 0)。0.0 を入れると mfe>0 取引の高い efficiency が薄まり、勝率低くても MFE>0 効率を正しく評価していた既存戦略が一律低評価。weakness_detector の trade_efficiency<0.3 判定 (行 182) を誤発火させる方向。",
+      "evidence": [
+        "atlas/backtest/result_parser.py:296-305 (MFE=0 trade wo 0.0 de bo-shuudan ka)",
+        "atlas/analyzer/weakness_detector.py:182-192 (trade_efficiency<0.3 hantei)"
+      ],
+      "reproduction": "trade_log の 50% が MFE=0/pnl=負、残り 50% が MFE=20/pnl=10 (efficiency=0.5)。現実装 mean=0.25 で 0.3 未満→弱点検出。本来 mfe>0 のみの mean=0.5 で健全。",
+      "suggested_fix": "MFE=0 取引を母集団から除外、全取引中の MFE=0 比率を別フィールド mfe_zero_ratio として記録し、weakness_detector で MFE=0 比率高 (>50%) を別ルール (entry_timing) で検出。[change:spec] 手順、parity test で過去戦略の trade_efficiency 値変化を spec_change_log.md に記録。",
+      "impact_scope": "Gate 接続なし。scorer に Edge Ratio として接続あり (efficiency と独立だが trade_efficiency 由来の weakness 改善方針が fx-strategist に渡る経路で間接影響)。",
+      "regression_of": null
+    },
+    {
+      "id": "QA-309",
+      "severity": "low",
+      "area": "scoring",
+      "title": "scorer の未評価ペナルティ (final_score<=0.5 clamp) が品質乗数を経由してさらに下がる非対称",
+      "description": "scorer.py::compute_score 行 231-232 で未評価戦略 (REQUIRED_FIELDS いずれか None) の final_score を 0.5 に上限クランプする。ただしクランプは Layer3 quality_multiplier (0.8-1.2) 適用後のため、未評価戦略でも core_score+layer2 が 0.5 を超え quality_mult=1.2 なら最終 0.6 が 0.5 にクランプされる一方、quality_mult=0.8 なら 0.4 がそのまま採用される。同じ未評価程度の 2 戦略で前者は実質 0.5/0.6=0.833 倍のペナルティ、後者はノーペナルティで非対称が発生する。本来 未評価戦略は同一上限 (0.5) で頭打ち が意図のはずだが、品質乗数低位戦略は未評価ペナルティを免除される構造。",
+      "evidence": [
+        "atlas/analyzer/scorer.py:222-232 (quality_mult tekiyou go ni clamp)",
+        "atlas/analyzer/scorer.py:118-128 (REQUIRED_FIELDS 7 ko)"
+      ],
+      "reproduction": "戦略 A: core=0.5, layer2=0, quality_mult=1.2 で adjusted=0.5, final=0.6 でクランプ後 0.5 (実質 -0.1)。戦略 B: core=0.5, layer2=0, quality_mult=0.8 で adjusted=0.5, final=0.4 (クランプなし、+/-0)。同じ未評価戦略でも仕上がりが quality_mult 依存。",
+      "suggested_fix": "未評価ペナルティを quality_mult 適用前に倒す (adjusted = min(adjusted, 0.5) してから quality_mult 乗算)。これで未評価+高品質戦略は 0.5*1.2=0.6 ではなく 0.5 経由でクランプされ統一上限。または scorer を 2 段階分離し未評価ペナルティを layer3 と独立な final stage で適用。[change:spec] 手順 + ゴールデンテスト更新。",
+      "impact_scope": "収束判定 (SCORE_EXCELLENT=0.75) には届かない範囲なので最終 PASS/FAIL は変わらない。ループ内の局所最適検出・親子選定で final_score を直接比較する経路に影響。",
+      "regression_of": null
+    },
+    {
+      "id": "QA-310",
+      "severity": "low",
+      "area": "metrics",
+      "title": "_compute_cosine_similarity で両者パラメータ空が類似度 1.0 として重複扱いに",
+      "description": "dedup.py::_compute_cosine_similarity 行 162-164 で keys が空 (両 fingerprint のパラメータが空) のとき 1.0 を返す。実用上戦略には最低でも pips_per_unit 等の数値があるため発生確率は低いが、生成失敗・config 破損戦略 2 件が同じ tag_cluster_id 内に並んだ場合、check_duplicate がそれらを 100% 一致と判定し is_duplicate=True で Gate PASS を取り消す経路がある。コサイン類似度の数学的定義 (両ベクトル長 0 のとき未定義) と整合しない。",
+      "evidence": [
+        "atlas/analyzer/dedup.py:160-170 (_compute_cosine_similarity)",
+        "atlas/analyzer/dedup.py:162-164 (kuu keys ji 1.0 henkyaku)",
+        "atlas/backtest/runner.py:1464-1498 (check_duplicate kekka ni yoru Gate hanten)"
+      ],
+      "reproduction": "config.json::parameters={} の 2 戦略を擬似的に作り tag_cluster_id を一致させる。check_duplicate でパラメータ類似度 1.0 で is_duplicate=True で Gate PASS 取り消し。",
+      "suggested_fix": "両者空のとき 0.0 または None を返し、check_duplicate 側で パラメータ未収集のため重複判定不能 として is_duplicate=False, recommendation=param_unavailable を返す。",
+      "impact_scope": "実発生確率低。Gate PASS 取り消し経路にのみ影響、Live への直接影響なし。偽 deduplication でユニーク戦略を捨てる可能性。",
+      "regression_of": null
+    },
+    {
+      "id": "QA-311",
+      "severity": "low",
+      "area": "wfa",
+      "title": "WFA walk seed と base シミュレーション seed が衝突 (walk_id=0 IS seed=42 と base seed=42 が一致)",
+      "description": "event_simulator.py::_walk_worker 行 1676-1689 で IS seed=42+walk_id, OOS seed=142+walk_id を採用。walk_id=0 の IS seed=42 が run_layer2 内 _simulate デフォルト seed=42 (行 644, 2030) と衝突する。同じ seed 下では slippage rng の系列が完全一致するため、walk_id=0 の IS シミュレーションは base シミュレーションと同じ slippage 系列で評価され、サンプル独立性が崩れる。WFA の前提 (各 walk が独立な再評価) と矛盾し walk_id=0 の IS PF が base PF と相関しやすくなる。さらに 42+walk_id (=42-51+) と 142+walk_id 系列は重ならないが、他の seed=100 系列を将来追加すると 42+58=100 で衝突可能性あり。",
+      "evidence": [
+        "atlas/backtest/event_simulator.py:1676-1689 (walk_id seed)",
+        "atlas/backtest/event_simulator.py:639-644 (_simulate default seed=42)",
+        "atlas/backtest/event_simulator.py:2030 (run_layer2 base seed meiji nashi, default 42)"
+      ],
+      "reproduction": "walk_id=0 IS シミュレーションと run_layer2 のフル simulation を同条件で実行し slippage 系列が bit-exact 一致することを確認。base PF と walk_0 IS PF の差分はデータ部分集合のみで slippage 由来のばらつきは無く WFA 統計の独立性が弱まる。",
+      "suggested_fix": "WFA seed を SHA256(strategy_id + walk_id) ハッシュへ変更、または base seed と分離 (例: walks_seed_base=1000, IS=1000+2*walk_id, OOS=1000+2*walk_id+1)。代替として base シミュレーション seed=99 に変更するだけでも walk_id=0 との衝突は回避できる。[change:spec] + bit-exact parity test 更新。",
+      "impact_scope": "WFA Efficiency / Strategy Drift の統計的精度に影響 (Gate Tier 2 weight 0.10 / 0.08)。実害は小さいが正規分散の推定が偏る。",
+      "regression_of": null
+    },
+    {
+      "id": "QA-312",
+      "severity": "low",
+      "area": "scoring",
+      "title": "scorer Layer2 adjustment が境界値で stepwise 不連続 (Goodhart 脆弱性)",
+      "description": "scorer.py::compute_score 行 130-178 で Layer2 adjustment は WFA Efficiency (0.05/0.0/-0.05/-0.10)、Strategy Drift (0.0/-0.05/-0.10)、Param Sensitivity (+0.02/-0.03/-0.10) を if-elif の stepwise で適用する。境界値前後で final_score が不連続にジャンプ (例: WFA=0.899 で adj=0.0, WFA=0.900 で adj=0.05, 差分 +0.05)。改善ループの方向探索を不安定化し、quant-analyst が 親比改善 X% 報告時にパラメータ微変更が境界跨ぎするだけで大きな score 変動が出る一方、境界内変動は無視される (Goodhart Law 的脆弱性)。",
+      "evidence": [
+        "atlas/analyzer/scorer.py:134-167 (WFA / Drift / Sensitivity no stepwise)"
+      ],
+      "reproduction": "戦略 A: WFA=0.899, 戦略 B: WFA=0.900 で他指標一致。scorer 出力で final_score が 0.05 ジャンプすることを確認。",
+      "suggested_fix": "境界近傍を線形補間に変更 (例: WFA=0.7-0.9 で adj=-0.05 から 0.0 を線形)。[change:spec] 手順, ゴールデンテスト全件更新, 過去戦略の score 変動を spec_change_log.md に記録 (全体的に微小変動が予想され収束判定への影響は限定的)。",
+      "impact_scope": "改善ループの効率に影響。Gate 直接影響なし。Phase 4 GPU 化以降の数値変動と組み合わせると stepwise 境界跨ぎが頻発し収束安定性に響く可能性。",
+      "regression_of": null
+    }
+  ]
+}

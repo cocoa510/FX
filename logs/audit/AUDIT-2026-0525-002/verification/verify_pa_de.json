@@ -1,0 +1,79 @@
+{
+  "verifier": "platform-architect",
+  "mandate": "find_errors",
+  "session": "AUDIT-2026-0525-002",
+  "verification_date": "2026-05-26",
+  "venv": "fx_trading_system/.venv/Scripts/python.exe",
+  "method": "経験的再現 (再現スクリプト出力 + file:line 実読)。修正は一切行わない (dry-run)。",
+  "results": [
+    {
+      "id": "PA-102",
+      "report_claim": "runner.py:326 の `return await _bus_ref.health_status()` が同期 def を await → TypeError → except で False → event_bus(CRITICAL) が 30秒(PING×3)後に恒久 UNHEALTHY。main.py:496 は正しく同期呼び。1行修正。",
+      "verdict": "confirmed",
+      "empirical": "再現スクリプト /tmp/repro_pa102.py 出力で全段を実証: [0] InMemoryEventBus.health_status は iscoroutinefunction=False の同期 def、戻り値は dict({'healthy':True,...})。redis_adapter.py:384 も同期 def。 [1] runner.py:324-328 を忠実再現した prober を await すると except が捕捉した例外は TypeError('object dict can't be used in await expression') で result=False。 [2] main.py:494-500 を再現した同期版 prober は result=True。 [3] 'event_bus' in CRITICAL_COMPONENTS=True、PROBER_UNHEALTHY_THRESHOLD=3。 [4] HealthChecker に runner形 prober を登録し _run_probers を3回実行 → event_bus status='unhealthy'、system_status='unhealthy'、is_healthy=False。 [5] main形 prober なら3回後も system_status='healthy'。 統合テスト test_health_check_integration.py:129 は event_bus に独自 ok prober を登録しており実 prober を踏まないため検知不能 (報告のメタ主張も追認)。",
+      "corrected_severity": "high",
+      "rationale": "報告の主張は file:line・型・例外文言・閾値・集約結果・テスト盲点まで全て経験的に一致。誇張も過小もなし。1行修正 (await 除去) の確実性は極めて高い。runner.py と main.py の二重実装ドリフトであることも runner.py:326 vs main.py:496 の実読で確定。最高信頼度 confirmed。"
+    },
+    {
+      "id": "DM-102",
+      "report_claim": "PA-102 と同一 (runner.py:324-328, memory_adapter.py:253, redis_adapter.py:384)。devops-monitor が独立検出、4チーム合致。",
+      "verdict": "confirmed",
+      "empirical": "PA-102 と同一の再現結果。runner.py:326 単一行のバグで両 finding が同一根因を指す。クロス確認は妥当。",
+      "corrected_severity": "high",
+      "rationale": "PA-102 と同一根因・同一 file:line。独立検出の合致は信頼度を高める。confirmed。"
+    },
+    {
+      "id": "PA-101",
+      "report_claim": "strategy_slot.py:1287 の hasattr(_in_position) ガードが全60戦略で False (実戦略は _bars_in_position/_position 使用) → 復元ブロック dead code → max_hold 永久不発火 + 二重エントリー。代表 0501-004/0511-059 で _in_position 不在を実証。",
+      "verdict": "confirmed_but_understated",
+      "empirical": "dead code 主張は完全追認: ATLAS Strategy 基底 (__init__ は self.config のみ) は _in_position/_position/_bars_in_position/_intended_direction/_entry_bar_index を一切定義せず (venv 実読)。imported 60 戦略の語境界 grep: _in_position=0, _entry_bar_index=0, _bar_counter=0。strategy_slot.py:1287 の hasattr(_in_position) は全戦略で常時 False → 1288-1301 の復元ブロックは dead code 確定。復元メソッドが strategy に書く属性は _intended_direction(1262 無条件) と _in_position系(1288-1301 ガード下) のみで、_pos/_since/_position/_bars_in_position は一切復元しない (strategy_slot.py 実読)。\n\n**過大評価チェックで報告の重大度モデルに2つの誤りを発見 (差し引き understated):**\n(A) 報告は『_position+_bars_in_position 系戦略 (例 0501-004)』を severe (max_hold 永久不発火+二重エントリー) の代表とするが、self._position を使う戦略は 0501-004 の1件のみで、しかも execution_mode=paper (live でない → 復元ブロック自体が走らない slot.is_live ガード runner.py:390)。報告の severe 代表は live で発火しない。\n(B) 報告の grep (_position/_bars_in_position) は『短縮属性名』戦略を取りこぼしている。LIVE 22戦略のうち **14戦略が self._pos (短縮形) + self._since で position/max_hold を管理** (0504-060/117/169/228/236/241, 0505-324/335/338, 0506-005/033, 0507-038/049/050)。これらは _pos!=FLAT で exit 分岐を gate し (0504-060:67)、_pos も _since も復元対象外 → 再起動後 _pos=FLAT のまま → **exit 分岐に入らず max_hold 永久不発火 + 二重エントリー** の真の severe ケース。報告はこの 14 live 戦略を全く挙げていない。\n(C) 残る live で _intended_direction+_bars_in_position を使う 8戦略 (0505-367/368/374/392/423/424, 0504-098, 0511-059) は _intended_direction が 1262 で無条件復元されるため exit 分岐には入る (二重エントリーなし) が、_bars_in_position は復元されず 0 リセット → max_hold が late fire (最大 max_hold_bars 過剰保有)。報告が『救われる』とした _intended_direction 系がこの mild 群に該当 (報告と一致)。",
+      "corrected_severity": "high",
+      "rationale": "dead code 主張 (hasattr 常時 False) は経験的に完全追認 — confirmed。重大度は high で妥当。ただし報告の strategy 分類が誤っており、(1) severe 代表 0501-004 は paper で live 発火せず、(2) 真の live severe は報告が見落とした self._pos/_since 系 14 live 戦略 (報告の grep が短縮属性を捕捉しなかった)。結論として PA-101 の本番影響は report が示したより広い (paper 1件ではなく live 14件が max_hold 永久不発火+二重エントリー)。よって confirmed_but_understated。修正設計時は復元キーを _in_position/_intended_direction だけでなく _pos/_since/_position/_bars_in_position を網羅する contract テストが必須。"
+    },
+    {
+      "id": "DE-101",
+      "report_claim": "DataQualityEngine が trading_platform/ で0インスタンス化、main.py:318/334/459 が quality_engine 未注入 → bar_builder.py:239 の `if self._quality_engine is not None:` が常に偽 → DE-002 dead code。Parity は維持。",
+      "verdict": "confirmed",
+      "empirical": "grep `DataQualityEngine(` は trading_platform/ 配下0件 (一致は tests/ 4ファイルと logs/audit のみ) を実証。main.py:318 BarBuilder(...)/334 CandleFetcher(...)/459 OANDAStreamReceiver(...) はいずれも quality_engine 引数を渡さない (実読)。3コンストラクタとも quality_engine パラメータは存在し default=None (inspect.signature で確認) → 注入されなければ常に None → bar_builder.py:239 の `if is_complete and self._quality_engine is not None:` 常時偽 → DE-002 forced-publish/RiskAlert/メトリクスは production 経路で全 skip。\n\n**過大評価チェック (Parity): 報告の『Parity 維持』は正しい。** bar_builder.py:264 の `await self._event_bus.publish(bar_event)` は品質ガードブロックの外にあり無条件 publish → quality_engine が None でも全バーが publish される (= 全バー使用が既定動作)。parity サブセット test_bar_source_parity.py を実走し 5 passed (0.41s) で corroborate。よって Parity は破壊されず DE-101 の overstatement なし。\n\n**追加の過小評価候補:** 本番の真の実行経路は UnifiedRunner (run_unified.py) だが、UnifiedRunner/SharedDataProvider (data_provider.py) には quality 参照が0行・quality_engine パラメータ自体が存在しない (実読)。すなわち DE-002 の quality gate は dev 経路 main.py (param あるが未注入) と本番経路 UnifiedRunner (param すら無い) の双方で dead。報告は main.py を evidence にしているが本番 UnifiedRunner 側も同様 (むしろ配線の土台が無い)。",
+      "corrected_severity": "high",
+      "rationale": "0インスタンス化・未注入・ガード常時偽を全て経験的に追認 — confirmed。Parity 維持の主張も無条件 publish の実読 + parity 実走で正しいと確認 (overstatement なし)。high で妥当。本番 UnifiedRunner 側にも quality 配線が無い点は報告の指摘を補強こそすれ覆さない。"
+    },
+    {
+      "id": "PA-103",
+      "report_claim": "main.py は ENV=production で live_mode=True だが restore なし (runner.py:389-391 と非対称)。.env に ENV= 行が無く env デフォルトが RESEARCH のため live_mode 常時 False = latent。high→medium 格下げ。",
+      "verdict": "confirmed",
+      "empirical": "settings.py:31-32 で env: Environment の default=Environment.RESEARCH を実読。runtime で os.environ から ENV を除いて PlatformSettings() を生成 → s.env=Environment.RESEARCH、(env==PRODUCTION)=False を確認。.env を実読: 明示 ENV= 行は無し (OANDA_ENVIRONMENT=live は存在)。main.py に restore_position 参照0件 (grep 確認)、live_mode 判定は main.py:231 `live_mode = self._settings.env == Environment.PRODUCTION`。runner.py:389-391 は slot.is_live で restore_positions を呼ぶ → 非対称は事実。現状 env=RESEARCH のため live_mode=False で trigger 不発 = latent。",
+      "corrected_severity": "medium",
+      "rationale": "格下げ high→medium (latent) は ENV 軸で妥当 — 現状 .env に ENV= が無く RESEARCH デフォルトで live_mode は決して True にならず、no-restore バグは発火しない。ただし latency は『非自明に高い』: .env に既に OANDA_ENVIRONMENT=live (実ブローカー) が設定済みで、運用者が整合を取ろうと ENV=production を1行足した瞬間に main.py 経路が無復元 live 発注を開始する。medium 据え置きは妥当だが『ops manual で main.py を dev/paper 専用と明記 + ENV=production×live broker を起動時 fail-closed』を should_consider 以上で強く推奨。過小評価ではない (現状顕在せず) が、トラップの近接性は cross_cluster_note 相当で残すべき。"
+    }
+  ],
+  "additional_findings": [
+    {
+      "id": "PA-101-EXT (報告の見落とし)",
+      "severity": "high (PA-101 の本体に内包)",
+      "title": "PA-101 の grep が短縮属性 self._pos/self._since を取りこぼし、真の live severe 群 14 戦略を見落としている",
+      "detail": "報告は severe 例を self._position の 0501-004 (paper) に置くが、LIVE 22戦略中14戦略が self._pos + self._since で position/max_hold を管理し (0504-060/117/169/228/236/241, 0505-324/335/338, 0506-005/033, 0507-038/049/050)、これらは復元対象外で再起動後 _pos=FLAT 固定 → exit 分岐に入らず max_hold 永久不発火 + 二重エントリー。PA-101 の修正設計は _in_position/_intended_direction に加え _pos/_since/_position/_bars_in_position を網羅した contract テストを必須とすべき。",
+      "evidence": [
+        "trading_platform/strategies/imported/ATLAS-2026-0504-060/strategy.py:30 self._pos = SignalDirection.FLAT",
+        "trading_platform/strategies/imported/ATLAS-2026-0504-060/strategy.py:67 if self._pos == SignalDirection.LONG (exit gate)",
+        "trading_platform/core/unified_runner/strategy_slot.py:1262,1288-1301 (復元は _intended_direction と _in_position系のみ)"
+      ]
+    },
+    {
+      "id": "DE-101-EXT (報告の補強)",
+      "severity": "情報 (DE-101 を補強)",
+      "title": "本番経路 UnifiedRunner/SharedDataProvider には quality_engine パラメータ自体が存在しない",
+      "detail": "報告 evidence は dev 経路 main.py 中心だが、本番実行経路 UnifiedRunner (run_unified.py → SharedDataProvider data_provider.py) には quality 参照0行・quality_engine 受け口が無く、DE-002 配線の土台すら無い。DE-101 の『本番で dead』をむしろ強める (覆さない)。",
+      "evidence": [
+        "trading_platform/core/unified_runner/data_provider.py (quality 参照0件)",
+        "scripts/run_unified.py:89 UnifiedRunner(...) のみ、BarBuilder/CandleFetcher/quality 構築なし"
+      ]
+    }
+  ],
+  "summary_verdicts": {
+    "PA-102/DM-102_TypeError_reproduced": true,
+    "PA-101_confirmed": "confirmed (dead code 追認) but understated (真の live severe は報告未掲載の self._pos 系14戦略)",
+    "DE-101_confirmed": "confirmed (0インスタンス化・dead code 追認、Parity 維持の overstatement なし)",
+    "PA-103_downgrade_valid": "valid (high→medium latent は妥当。ただし OANDA_ENVIRONMENT=live 既設定によりトラップ近接性は高い)"
+  }
+}

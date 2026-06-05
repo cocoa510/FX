@@ -1,0 +1,133 @@
+{
+  "audit_id": "AUDIT-2026-0530-001",
+  "fix_id": "DE-403",
+  "severity": "HIGH",
+  "category": "post_fix_defect",
+  "title": "FxFeatureStorestaleHigh が H1/H4 戦略で常時 FIRING",
+  "status": "FIXED",
+  "fixed_at": "2026-05-30",
+  "commit_kind": "[fix:bug]",
+  "committed": false,
+  "files_changed": [
+    {
+      "path": "trading_platform/core/monitoring/metrics.py",
+      "changes": [
+        {
+          "step": 1,
+          "type": "signature_change",
+          "target": "MetricsCollector.observe_feature_staleness",
+          "before": "observe_feature_staleness(self, strategy_id: str, age_sec: float) -> None",
+          "after": "observe_feature_staleness(self, strategy_id: str, age_sec: float, *, primary_tf: str = 'unknown') -> None",
+          "reason": "primary_tf を keyword 引数として追加し per-strategy + per-TF の両方で Prometheus slicing 可能にする"
+        },
+        {
+          "step": 1,
+          "type": "gauge_label_change",
+          "target": "fx_feature_staleness_sec Gauge 定義",
+          "before": "labels=[\"strategy_id\"]",
+          "after": "labels=[\"strategy_id\", \"primary_tf\"]",
+          "reason": "Prometheus label に primary_tf を追加して TF 別 slicing を可能にする"
+        },
+        {
+          "step": 1,
+          "type": "prom_set_label_change",
+          "target": "observe_feature_staleness 内 gauge.labels().set()",
+          "before": "labels(strategy_id=strategy_id).set(age_sec)",
+          "after": "labels(strategy_id=strategy_id, primary_tf=primary_tf).set(age_sec)",
+          "reason": "Prometheus gauge に primary_tf ラベル値を反映する"
+        }
+      ]
+    },
+    {
+      "path": "trading_platform/data/feature_store/live_store.py",
+      "changes": [
+        {
+          "step": 2,
+          "type": "semantics_fix",
+          "target": "LiveFeatureStore.update_bar() 内の staleness 計測ロジック",
+          "before": "age_sec = now - _last_primary_bar_time  # バー間隔 (H1=3600s) を測定",
+          "after": "bar_interval = TF_SECONDS[primary_tf]; staleness_sec = max(0.0, now - (_last_primary_bar_time + bar_interval))  # 次バー到達遅延を測定",
+          "reason": "旧実装はバー間隔をそのまま staleness として記録しており H1=3600s>60s が常時アラート発火。修正後は次バー到達遅延=通常0、配信遅延時のみ正値"
+        },
+        {
+          "step": 2,
+          "type": "call_site_fix",
+          "target": "observe_feature_staleness 呼出",
+          "before": "self._metrics.observe_feature_staleness(self.primary_tf, age_sec)",
+          "after": "self._metrics.observe_feature_staleness(self.primary_tf, staleness_sec, primary_tf=self.primary_tf)",
+          "reason": "新シグネチャに合わせて primary_tf キーワード引数を追加"
+        }
+      ]
+    },
+    {
+      "path": "deploy/prometheus/alerting_rules.yml",
+      "changes": [
+        {
+          "step": 3,
+          "type": "alert_rule_change",
+          "target": "FxFeatureStorestaleHigh",
+          "before": {
+            "expr": "max(fx_feature_staleness_sec) > 60",
+            "for": "3m"
+          },
+          "after": {
+            "expr": "fx_feature_staleness_sec{primary_tf='M15'} > 1800 or fx_feature_staleness_sec{primary_tf='H1'} > 7200 or fx_feature_staleness_sec{primary_tf='H4'} > 28800",
+            "for": "3m",
+            "thresholds": {
+              "M15": "1800s (bar_interval * 2 = 900 * 2)",
+              "H1":  "7200s (bar_interval * 2 = 3600 * 2)",
+              "H4":  "28800s (bar_interval * 2 = 14400 * 2)"
+            }
+          },
+          "reason": "固定 60s 閾値は H1/H4 戦略で常時超過。TF 別 2 バー分の遅延を閾値とし、primary_tf ラベルで分岐することで誤発火を排除"
+        }
+      ]
+    },
+    {
+      "path": "tests/unit/test_dm302_metrics_instrumentation.py",
+      "changes": [
+        {
+          "type": "test_update",
+          "target": "test_feature_staleness_recorded_on_second_bar",
+          "reason": "新シグネチャの primary_tf キーワード引数検証を追加。staleness_sec の semantics コメントを更新"
+        }
+      ]
+    }
+  ],
+  "tests_added": [
+    {
+      "path": "tests/unit/test_de403_feature_staleness_semantics.py",
+      "cases": [
+        "TestStalenessNearZeroAfterBar::test_h1_staleness_near_zero_on_second_bar",
+        "TestStalenessNearZeroAfterBar::test_h4_staleness_near_zero_on_second_bar",
+        "TestStalenessNearZeroAfterBar::test_m15_staleness_near_zero_on_second_bar",
+        "TestStalenessPositiveOnDelay::test_staleness_positive_when_bar_overdue",
+        "TestStalenessPositiveOnDelay::test_staleness_zero_when_bar_arrives_early",
+        "TestPrometheusLabels::test_observe_feature_staleness_receives_primary_tf_kwarg",
+        "TestPrometheusLabels::test_metrics_collector_gauge_labels_include_primary_tf",
+        "TestPrometheusLabels::test_strategy_id_not_set_to_tf_name_only",
+        "TestNoStalenessOnAuxTfBar::test_aux_tf_bar_does_not_trigger_staleness"
+      ]
+    }
+  ],
+  "test_results": {
+    "total": 16,
+    "passed": 16,
+    "failed": 0,
+    "command": ".venv/Scripts/python.exe -m pytest tests/unit/test_dm302_metrics_instrumentation.py tests/unit/test_de403_feature_staleness_semantics.py -x -v"
+  },
+  "root_cause_summary": {
+    "bug_1_label_misuse": {
+      "file": "live_store.py:update_bar()",
+      "description": "observe_feature_staleness の第 1 引数 strategy_id に TF 名 ('H1' 等) を渡していた。Prometheus label strategy_id に TF 名が入り per-strategy slicing 不能"
+    },
+    "bug_2_semantics_error": {
+      "file": "live_store.py:update_bar()",
+      "description": "age_sec = now - _last_primary_bar_time = バー間隔 (H1=3600s, H4=14400s) を測定。FxFeatureStorestaleHigh (>60s) 閾値で 22 LIVE 戦略が第 2 バー到達後から常時 FIRING"
+    },
+    "bug_3_fixed_threshold": {
+      "file": "deploy/prometheus/alerting_rules.yml",
+      "description": "固定 60s 閾値は TF に関わらず適用されており、H1 (3600s/bar) / H4 (14400s/bar) では正常バー到達でも必ず超過"
+    }
+  }
+}
